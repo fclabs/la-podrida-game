@@ -17,7 +17,7 @@ This guide explains how the repository is organised, which rules the tooling enf
 | Vitest | 5 | With Vite 8 as its peer. |
 | ESLint | 10 (flat config) | Plus `typescript-eslint`, the Next.js plugin and a local layer-boundary rule. |
 | Prettier | 3 | Checked by `pnpm lint`. |
-| Zod | 4 | Runtime dependency, used for configuration (and later the domain). |
+| Zod | 4 | Runtime dependency, used for configuration and the domain schemas (§9). |
 
 **Dependencies.** Runtime `dependencies` are limited to `next`, `react`, `react-dom`, `zod` and `@noble/hashes` (the last one is added when the engine needs hashing). Everything else is a `devDependency`. All versions in `package.json` are **exact pins** (no `^`/`~`): add packages with an explicit version, e.g. `pnpm add -D some-tool@1.2.3`, so every upgrade is a visible, deliberate change.
 
@@ -47,7 +47,7 @@ tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
 
-The layer folders under `src/` are empty for now (each holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
+Apart from `src/domain` (§9), the layer folders under `src/` are empty for now (each holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
 
 **Import alias.** `@/` maps to the **project root**, so imports read `@/src/engine/...` or `@/app/...`. It works in TypeScript, Next.js, Vitest and `tsx`.
 
@@ -226,10 +226,90 @@ pnpm install --frozen-lockfile && pnpm typecheck && pnpm lint && pnpm test && pn
 
 ---
 
-## 9. Known limitations
+## 9. Domain model
+
+`src/domain` is the vocabulary every other layer speaks: cards, decks, rule sets, presets, game state, moves and events. It holds types, Zod schemas, four rule presets and a few pure helpers. There is no game logic here: nothing deals, validates a move or scores.
+
+The domain is **pure**. It imports only `zod` and its own files, and it never uses randomness, I/O or the clock (`Math.random`, `Date`, `crypto`, `fetch`, `process`, …). The layer rule (§3) enforces the imports; the rest is kept by review. A quick check:
+
+```sh
+grep -rnE 'Math\.random|new Date|Date\.now|crypto\.|fetch\(|process\.|performance\.' src/domain   # must find nothing
+```
+
+### 9.1 What each module exports
+
+Import from the module directly, e.g. `import { getPreset } from '@/src/domain/presets'`. There is no barrel `index.ts`. UI code may only `import type` (§3).
+
+| Module | Exports |
+|---|---|
+| `@/src/domain/schemas` | `CardSchema`, `DeckDefinitionSchema`, `BoundSchema`, `SegmentSchema`, `HandSequenceSpecSchema`, `ScoringSpecSchema`, `RuleSetSchema`, `SeatInfoSchema`, `TrickPlaySchema`, `HandStateSchema`, `HandResultSchema`, `GameStateSchema`, `GameEventSchema`; helpers `KNOWN_SUITS`, `KNOWN_RANKS`, `PresetIdSchema` |
+| `@/src/domain/cards` | types `Suit`, `Rank`, `Card`; `InvalidCardError`, `cardId`, `parseCard`, `compareRanks` |
+| `@/src/domain/decks` | type `DeckDefinition`; `FRENCH_52`, `SPANISH_40`, `buildDeck` |
+| `@/src/domain/rules` | types `Bound`, `Segment`, `HandSequenceSpec`, `ScoringSpec`, `PresetId`, `RuleSet` |
+| `@/src/domain/presets` | `PRESET_IDS`, `DEFAULT_PRESET_ID`, `UnknownPresetError`, `getPreset` |
+| `@/src/domain/types` | types `Phase`, `SeatInfo`, `TrickPlay`, `HandState`, `HandResult`, `GameState`, `Move`, `LegalMove`, `GameEvent`, `Transition`, `Rng`, `HandScore`, `ScoreBoard`, `TableView`, `PlayerView`, `PlayerUpdate`, `DecisionContext`, `Decision` |
+
+The shapes themselves are described in [`design.md`](./design.md) §4 (cards, rule sets, hand sequences, state, moves, events), §5.5 (views), §6.1 (score board) and §8.1 (players).
+
+### 9.2 Cards and decks
+
+- **Card ids.** `cardId(card)` is the rank token followed by the suit letter: `7H`, `10S`, `3O`, `CC` (Spanish *caballo* of *copas*). Two cards are the same card exactly when their ids are equal; move ids such as `play:QH` build on this. `parseCard(id, deck)` reads the **last character as the suit** and the rest as the rank, and throws `InvalidCardError` unless both belong to that deck (so `3O` is invalid for `FRENCH_52` and `KO` for `SPANISH_40`; suit letters are upper case). Error messages quote the offending input, e.g. `Invalid card id "7h" for deck french-52`.
+- **Rank order.** `compareRanks(deck, a, b)` returns a positive number when `a` ranks higher, following `deck.ranksHighToLow`. In the Spanish deck the order is `A 3 R C S 7 6 5 4 2`, so the 3 beats the king. A rank outside the deck throws `InvalidCardError`.
+- **Decks.** `FRENCH_52` (suits `S H D C`) and `SPANISH_40` (suits `O C E B`: oros, copas, espadas, bastos). `removeRanksForPlayers` maps a player count, written as a decimal string, to the ranks removed for that count: `SPANISH_40` drops the 2s for 3 and 6 players (36 cards); every other case keeps the full deck.
+- **`buildDeck(deck, players)`** returns a new array of new card objects, ordered by suit (deck order) and then rank high to low, so `buildDeck(FRENCH_52, 4)` starts `AS KS QS`. It throws `RangeError` unless `players` is an integer ≥ 1. It does not shuffle; shuffling belongs to the engine's seeded RNG.
+- **The deck constants are deeply frozen.** Mutating `FRENCH_52` or anything inside it throws a `TypeError`. When you need a modifiable deck definition, `structuredClone` it (the clone is not frozen).
+
+### 9.3 Rule sets and presets
+
+A `RuleSet` is plain JSON data (no functions, classes or `undefined`) because each game freezes a copy of it into its state and persists it. The engine (and later the score engine) reads behaviour from it instead of special-casing presets.
+
+- **Getting a preset.** `getPreset(id)` returns a fresh deep copy every time, so callers may change the result without affecting anyone else. `PRESET_IDS` lists the four ids in canonical order (`argentina-fidepo`, `spain-ludoteka`, `gamerules`, `mexico-bazas`) and `DEFAULT_PRESET_ID` is `argentina-fidepo`. Any other string, including `'__proto__'` or `'toString'`, throws `UnknownPresetError`.
+- **Reading a preset.** Every field of every preset is set explicitly; nothing falls back to a default. Some flags only matter when another flag is on: `beatNotRequiredAfterTrumped` qualifies `mustBeatLedSuit`, and `whenCannotOvertrump` qualifies `mustOvertrump`. When the qualified flag is `false` the engine ignores the dependent one, but it still carries a fixed value (marked `// unused` in `presets.ts`) so that presets stay comparable side by side. The values and their sources are in [`design.md`](./design.md) §4.2.
+- **Hand sequences** are short lists of `range` and `repeat` segments whose bounds may be a number, `'max'` (cards per player when the whole deck is dealt), `{ min: [n, 'max'] }` (= min(n, max)) or `{ offset: ['max', n] }` (= max + n, with n ≤ 0). The offset bound is how `spain-ludoteka` stops its ramps at `max − 1`, so it plays exactly N hands at `max`. [`design.md`](./design.md) §4.3 lists all four sequences and the number of hands each one gives per player count. Turning a sequence into a list of card counts is the engine's job (see §9.6).
+- **Adding or changing a preset** is a design change first: update the preset table in `design.md` §4.2–4.3, then:
+  1. add the id to `PresetIdSchema` in `schemas.ts`; that single list feeds the `PresetId` type, `PRESET_IDS` and `RuleSet.id` validation;
+  2. add a constant in `presets.ts` with **every** `RuleSet` field spelled out (mark ignored flags `// unused`), using `structuredClone(FRENCH_52)` or `structuredClone(SPANISH_40)` for the deck, and register it in the `PRESETS` map (its `Record<PresetId, RuleSet>` type rejects a missing preset);
+  3. add a hand-written expected object to `tests/unit/domain/presets.test.ts`; write it out in full rather than importing it from `presets.ts`, so the test checks the preset independently;
+  4. update the literal preset list in `src/config.ts` (`DEFAULT_RULES_PRESET`, §5), which is deliberately not linked to `PRESET_IDS`.
+
+### 9.4 Schemas are the source of truth
+
+Every shape that is persisted or validated (`Card`, `DeckDefinition`, `Bound`, `Segment`, `HandSequenceSpec`, `ScoringSpec`, `RuleSet`, `SeatInfo`, `TrickPlay`, `HandState`, `HandResult`, `GameState`, `GameEvent`) is a Zod schema in `schemas.ts`, and its TypeScript type is `z.infer<typeof …Schema>`. Never write one of these types by hand: one definition cannot drift from the validator that later phases use on stored data. The cost is that editor hovers show the inferred form rather than a named interface.
+
+How the schemas behave:
+
+- **Strict at every level.** Every object, including each variant of a union, is a `z.strictObject`, so unknown keys are rejected. Every field is required except `SeatInfo.strategy` and `HandState.lastTrick`; `GameState.hand` must be present but may be `null`.
+- **Cards are validated as strings, not enums.** `CardSchema` refines `z.string()` to the union of both decks' suits (`KNOWN_SUITS`: `S H D C O E B`) and ranks (`KNOWN_RANKS`: `A K Q J 10 … 2 R C S`). Using `z.enum` would turn `Suit` and `Rank` into literal unions; with refined strings they stay `string`, because decks are data, not types. The same check applies to `trumpSuit`.
+- **Shape, not game consistency.** `GameStateSchema` checks that a card is a card of *some* deck, that counts and indexes are non-negative integers (`cardsPerPlayer`, `handPlan` entries and `trickNumber` are ≥ 1), that `gameId` and `seed` are non-empty and that `schemaVersion` is `1`. Whether a card belongs to *this* game's deck, whether array lengths match the seat count, or whether the phase agrees with the hand are engine invariants (§9.6).
+- **`removeRanksForPlayers` keys** must match `^[1-9][0-9]*$` and are kept as strings (`"03"` and `"0"` are rejected), and every removed rank must be in the same deck.
+- **`Phase` is `GameState['phase']`**, so the phase list exists only once, in `GameStateSchema`.
+- **Types without a schema.** `Move`, `LegalMove`, `Transition` and `Rng` are never persisted, and `HandScore`, `ScoreBoard`, `TableView`, `PlayerView`, `PlayerUpdate`, `DecisionContext` and `Decision` are computed views; all of these are written by hand in `types.ts`.
+- `schemas.ts` may export helpers beyond the schemas themselves (`KNOWN_SUITS`, `KNOWN_RANKS`, `PresetIdSchema`).
+
+**Changing a persisted shape.** Edit the schema; the inferred type follows. `tests/unit/domain/types.test.ts` compares each inferred type with an expected shape written out by hand, so `pnpm typecheck` fails until you update that expected shape too (and the matching listing in `design.md` §4). This is deliberate: a shape change should never slip through unnoticed. The type test runs under `pnpm typecheck`; at runtime Vitest sees only trivial tests.
+
+### 9.5 Imports inside the domain
+
+- `schemas.ts` imports only `zod`.
+- The **type modules** (`cards.ts`, `decks.ts`, `rules.ts`, `types.ts`) may import `schemas.ts`. When one type module needs another (e.g. `cards.ts` needs `DeckDefinition`, `decks.ts` needs `Card`), it uses **`import type`**, so there is never a runtime import cycle. Where they only need `z.infer`, they import `zod` and the schemas as types too.
+- `presets.ts` is not a type module: it value-imports `decks.ts` (to clone the deck constants) and `schemas.ts` (for `PresetIdSchema`).
+- `decks.ts` and `presets.ts` each hold a small private `deepFreeze` helper; keep the two copies identical.
+
+Domain tests live in `tests/unit/domain/<topic>.test.ts`.
+
+### 9.6 Not in the domain yet
+
+- **Engine behaviour** ([`implementation.md`](./implementation.md) Phase 2): expanding a hand sequence into the game's `handPlan`, dealing, legal moves, transitions, player views, invariants and the seeded RNG. Its `handPlan` must reproduce the hand counts in `design.md` §4.3.
+- **Scoring** (Phase 3) and **players and strategies** (Phase 4). `HandScore`, `ScoreBoard`, the view types and `DecisionContext` / `Decision` exist only as shapes.
+- **Persistence types** `GameMeta`, `Commit` and `CommitBody` and their schemas (Phase 6, in the state layer).
+- No schema checks that a hand sequence makes sense for a player count (for example `range 5→max` when `max` is below 5); that is checked when the engine expands it.
+
+---
+
+## 10. Known limitations
 
 - **Configuration is not validated at server startup yet.** `getConfig()` has no caller; it is wired in by its first user, the GameService factory (Phase 8 in [`implementation.md`](./implementation.md)). Until then a misconfigured deployment would still start.
 - **Storage credentials for the `blob` driver are not checked** by `loadConfig`; that check arrives with the storage layer (Phase 5).
 - **`pnpm simulate` is a stub** that prints `simulate: not implemented until Phase 4` and exits 0. The simulator and the `tests/sim` suite arrive in Phase 4.
 - **The layer rule does not check dynamic `import()` or `require()`.** Use static `import` statements.
-- **No game code yet:** the `src/` layers are empty, and `/` is a placeholder page.
+- **No game logic yet:** only `src/domain` (types, schemas, presets) exists; the other `src/` layers are empty, and `/` is a placeholder page.

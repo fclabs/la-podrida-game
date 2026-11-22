@@ -65,3 +65,9 @@
 **Decision**: `types.test.ts` copies the spec listings into local `Exp*` types that reference each other (e.g. `ExpGameState.hand: ExpHandState | null`), never the imported inferred types, so one schema change fails every assertion that contains it. Values are checked with `not.toBeAny()` or exact function signatures; `DEFAULT_PRESET_ID` is checked as `typeof DEFAULT_PRESET_ID` because passing a widening `const` literal to `expectTypeOf(value)` infers `string`.
 **Rejected**: comparing against the imported types (a drift in `Card` would hide in `HandState`).
 **Consequences**: Changing a persisted shape requires updating the spec listing and the matching `Exp*` type.
+
+## D-012: Domain docs go in development.md §9, after the existing sections  (Iteration 4)
+**Context**: The plan asks for a "Domain model" section in `docs/development.md`; README links to the anchor `#5-configuration`, and the guide cross-references §1, §4, §8.
+**Decision**: Add it as §9 and renumber "Known limitations" to §10, so no existing anchor or `§` reference changes. Also correct three statements the domain made stale (§1 Zod row, §2 "layer folders are empty", §10 "No game code yet"). D-004 is documented (quoted input in error messages); D-008 stays internal (test placement detail); D-011 is documented as "changing a persisted shape" guidance.
+**Rejected**: inserting the section as §5 (breaks the README anchor and the guide's § references).
+**Consequences**: Phase-specific sections are appended before Known limitations.

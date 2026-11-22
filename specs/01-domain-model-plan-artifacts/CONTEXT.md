@@ -1,12 +1,14 @@
 # CONTEXT — Domain Model (Phase 1)
 
-Last updated by: Iteration 3 (Game state and event schemas, shared types, type-level tests)
+Last updated by: Iteration 4 (Design doc alignment, developer docs and CI check) — final state of Phase 1
 
 ## Current state
 
 - Phase 0 scaffold is complete (see `specs/00-project-scaffold-frozen.md`): Next.js 16.4.6, TypeScript 6.0.3 `strict`, pnpm 10.15.1, Node 24 declared, Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7, layer-boundary lint rule, GitHub Actions CI.
 - `src/domain` is code-complete for Phase 1: `schemas.ts`, `cards.ts`, `decks.ts` (spec 01 FR-101 to FR-109), `rules.ts`, `presets.ts` (FR-110 to FR-115), and the state/event schemas plus `types.ts` (FR-116 to FR-119).
-- Not built yet: `docs/design.md` / `docs/development.md` updates and the CI check (Iteration 4).
+- Docs: `docs/design.md` §4.1–4.3 match spec 01 (FR-120: required `removeRanksForPlayers: Record<string, Rank[]>`, `type PresetId` + `RuleSet.id: PresetId`, `offset` bound, all four preset sequences and hand counts). `docs/development.md` §9 "Domain model" documents the domain for developers; Known limitations is now §10.
+- Branch `spec/01-domain-model` pushed to `origin`; CI result recorded in `iterations/04-docs-ci.md`. No PR opened yet (orchestrator's job).
+- Phase 1 is complete; next is Phase 2 (engine).
 - Tests: `tests/unit/domain/cards.test.ts` (VC-101 to VC-105), `decks.test.ts` (VC-106 to VC-108 plus deck/card schema checks), `presets.test.ts` (VC-109 to VC-113), `rule-set-schema.test.ts` (VC-114), `game-state-schema.test.ts` (VC-115), `game-event-schema.test.ts` (VC-116), `types.test.ts` (VC-117, type-level). `pnpm test`: 10 files, 215 tests.
 
 ## File map
@@ -28,6 +30,8 @@ Last updated by: Iteration 3 (Game state and event schemas, shared types, type-l
 | `tests/unit/domain/types.test.ts` | VC-117: imports every Module-exports name from its module; `expectTypeOf` not-`any` checks, exact value signatures, and `toEqualTypeOf` of the 13 FR-118 types against hand-copied `Exp*` shapes (D-011). Checked by `pnpm typecheck`; runs as 7 trivial tests in Vitest. |
 | `src/config.ts` | Phase 0 env config; its `DEFAULT_RULES_PRESET` check stays a literal list (spec 01 Scope Out). |
 | `eslint.config.mjs`, `tools/eslint-rules/layer-boundaries.mjs` | Layer rule: `src/domain` may import only its own files and `zod` / `@noble/hashes`. |
+| `docs/design.md` | System design; §4.1–4.3 aligned with the domain (decks, `PresetId`, presets table, bounds incl. `offset`, four sequences + hands-per-game table). |
+| `docs/development.md` | Developer guide; §9 Domain model (module map, cards/decks, presets and how to add one, schemas as source of truth, domain imports, what is not there yet). |
 | `specs/01-domain-model-plan-artifacts/` | This artifact directory. |
 
 ## Public interfaces
@@ -198,5 +202,11 @@ pnpm prints an "Unsupported engine" WARN locally (Node 26 vs declared 24); not f
 - Score, view and player types (`HandScore` … `Decision`) are hand-written shapes with no behavior; Phases 2–4 implement them.
 - Hand-sequence expansion (bounds → hand plan) and the intended hand counts are Phase 2; nothing validates semantic sanity of a sequence (e.g. `range 5→max` with max < 5).
 - `DeckDefinitionSchema` does not restrict `suits`/`ranksHighToLow` to `KNOWN_SUITS`/`KNOWN_RANKS` (spec does not require it).
-- `docs/design.md` §4.1–4.3 not yet aligned (Iteration 4).
-- Branch not pushed; CI verification of Phase 1 happens in Iteration 4.
+- `src/config.ts`'s `DEFAULT_RULES_PRESET` literal list is kept in sync with `PRESET_IDS` by review only (documented in development.md §9.3).
+
+## Hand-off to Phase 2
+
+- Import map: see "Domain export map" above (no barrel).
+- `getPreset` returns a mutable deep clone; deck constants are deeply frozen; `buildDeck` order is suit-major (deck order), rank high→low, no shuffle.
+- Bound semantics: `max = floor(deckSize / players)` with `deckSize` after `removeRanksForPlayers`; `{min:[n,'max']}` = min(n, max); `{offset:['max', n]}` = max + n (n ≤ 0); `range` is inclusive, steps ±1.
+- Intended hand counts the `handPlan` expansion and fixtures must reproduce: argentina-fidepo 29/22/17/14 (3–6 players); spain-ludoteka 25/22/19/16 (3–6; max 12/10/8/6); gamerules 19/19/19/15/13 (3–7; start 10/10/10/8/7); mexico-bazas 11/12/13/14/15 (3–7).

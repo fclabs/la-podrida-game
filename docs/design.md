@@ -87,7 +87,8 @@ interface DeckDefinition {
   id: 'french-52' | 'spanish-40';
   suits: Suit[];
   ranksHighToLow: Rank[];        // ranking used to compare cards in the same suit
-  removeRanksForPlayers?: Record<number, Rank[]>; // e.g. Spanish deck, 3 players → remove '2'
+  removeRanksForPlayers: Record<string, Rank[]>; // keys are player counts as decimal strings; {} when none
+                                                  // e.g. Spanish deck: { '3': ['2'], '6': ['2'] }
 }
 ```
 
@@ -98,8 +99,10 @@ Card points do not exist in this game. Only rank order matters.
 The engine is **parameterized by a `RuleSet`**, and named presets choose the values. The MVP ships **`argentina-fidepo`** as the default; the other presets are covered by unit tests so adding them later is configuration, not engine work.
 
 ```ts
+type PresetId = 'argentina-fidepo' | 'spain-ludoteka' | 'gamerules' | 'mexico-bazas';
+
 interface RuleSet {
-  id: string;                               // 'argentina-fidepo' | 'spain-ludoteka' | 'gamerules' | 'mexico-bazas'
+  id: PresetId;
   deck: DeckDefinition;
   players: { min: number; max: number };
   handSequence: HandSequenceSpec;           // §4.3
@@ -127,7 +130,7 @@ Preset values (from `game_rules.md` §3):
 |---|---|---|---|---|
 | deck | french-52 | spanish-40 (A 3 R C S 7 6 5 4 2) | french-52 | french-52 |
 | players | 3–6 | 3–6 | 3–7 | 3–7 |
-| handSequence | max→5, N×4, 5→max | 1→max, N×max, max→1 | start→1→start | 3→7, N×7, 7→3 |
+| handSequence | max→5, N×4, 5→max | 1→max−1, N×max, max−1→1 | start→1→start | 3→6, N×7, 6→3 |
 | dealer restriction | yes | yes, except 1-card hands | yes | yes |
 | mustBeatLedSuit | no | yes | no | yes |
 | beatNotRequiredAfterTrumped | n/a | no | n/a | yes |
@@ -149,19 +152,56 @@ See open question 4 (§11).
 A small declarative list of segments, expanded into cards-per-hand when the game is created:
 
 ```ts
-type Bound = number | 'max' | { min: [number, 'max'] };          // { min: [10, 'max'] } = min(10, max)
+type Bound =
+  | number                                                        // a fixed card count (integer ≥ 1)
+  | 'max'
+  | { min: [number, 'max'] }                                      // { min: [10, 'max'] } = min(10, max)
+  | { offset: ['max', number] };                                  // { offset: ['max', -1] } = max − 1 (n ≤ 0)
 type Segment =
   | { kind: 'range'; from: Bound; to: Bound }                     // inclusive, steps ±1
   | { kind: 'repeat'; cards: Bound; times: number | 'players' };
 type HandSequenceSpec = Segment[];
+```
 
-// argentina-fidepo:
+`max = floor(deckSize / players)`, where `deckSize` is the deck after `removeRanksForPlayers` (36 for the Spanish deck with 3 or 6 players). The `{ min: [...] }` bound expresses starts like GameRules' 10/8/7 cards (`min(10, max)`). The `{ offset: ['max', n] }` bound means `max + n` with `n ≤ 0`; it lets a ramp stop one card short of `max` so that a preset plays exactly N hands at the top card count.
+
+The four presets:
+
+```ts
+// argentina-fidepo
 [{ kind: 'range', from: 'max', to: 5 },
  { kind: 'repeat', cards: 4, times: 'players' },
  { kind: 'range', from: 5, to: 'max' }]
+
+// spain-ludoteka
+[{ kind: 'range', from: 1, to: { offset: ['max', -1] } },
+ { kind: 'repeat', cards: 'max', times: 'players' },
+ { kind: 'range', from: { offset: ['max', -1] }, to: 1 }]
+
+// gamerules
+[{ kind: 'range', from: { min: [10, 'max'] }, to: 1 },
+ { kind: 'range', from: 2, to: { min: [10, 'max'] } }]
+
+// mexico-bazas
+[{ kind: 'range', from: 3, to: 6 },
+ { kind: 'repeat', cards: 7, times: 'players' },
+ { kind: 'range', from: 6, to: 3 }]
 ```
 
-`max = floor(deckSize / players)`. The `{ min: [...] }` bound expresses starts like GameRules' 10/8/7 cards (`min(10, max)`); its sequence is `range {min:[10,'max']}→1` then `range 2→{min:[10,'max']}`, so the 1-card hand is played once. For the default preset this gives 29 / 22 / 17 / 14 hands for 3 / 4 / 5 / 6 players, matching the F.I.DE.PO. table. The expanded sequence is stored in the game state, so later preset changes never affect a game in progress.
+Hands per game:
+
+| Preset | 3 players | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|
+| argentina-fidepo | 29 | 22 | 17 | 14 | – |
+| spain-ludoteka (max 12 / 10 / 8 / 6) | 25 | 22 | 19 | 16 | – |
+| gamerules (start 10 / 10 / 10 / 8 / 7) | 19 | 19 | 19 | 15 | 13 |
+| mexico-bazas | 11 | 12 | 13 | 14 | 15 |
+
+- **argentina-fidepo** brackets the N four-card hands with 5-card hands on both sides, matching the F.I.DE.PO. table.
+- **spain-ludoteka** and **mexico-bazas** play exactly N hands at the top card count (`max`, resp. 7); their ramps stop one card short.
+- **gamerules** plays its 1-card turning hand once.
+
+The expanded sequence is stored in the game state, so later preset changes never affect a game in progress.
 
 ### 4.4 Seats and turn order
 
