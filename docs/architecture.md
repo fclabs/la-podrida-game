@@ -184,7 +184,7 @@ interface ObjectStore {
 | Implementation | Used for | Notes |
 |---|---|---|
 | `MemoryObjectStore` | Unit, simulation and API tests | A `Map`. `create-only` checks `has()`. |
-| `FileObjectStore` | Local dev, contract tests | Root from `FILE_STORE_DIR` (default `.data/`). create-only = `fs.open(path, 'wx')` (atomic). overwrite = write temp file + `rename()` (atomic). `list` walks and sorts. |
+| `FileObjectStore` | Local dev, contract tests | Root from `FILE_STORE_DIR` (default `.data/`). create-only = write a temp file in the same directory, fsync, then `fs.link(temp, target)` (`EEXIST` → `ObjectExistsError`), so the body is published atomically and readers never see a partial file. overwrite = write temp file + `rename()` (atomic). `list` walks and sorts. |
 | `VercelBlobObjectStore` | Preview and production | `put(key, body, { access: 'private', addRandomSuffix: false, allowOverwrite: mode === 'overwrite' })`. Without `allowOverwrite`, a `put` on an existing pathname throws → create-only semantics. Reads of mutable keys (`head.json`) and `exists` probes use `get(key, { access: 'private', useCache: false })` so they are never served from a stale or negative cache. Immutable keys (commits, `meta.json`) may use cached reads. `list` uses `list({ prefix, cursor })` and is treated as a hint only, since list consistency is not documented. |
 
 The driver is chosen by `STORAGE_DRIVER` (§9). One **contract test suite** runs against every implementation (create-only conflict, overwrite, list ordering and pagination, missing keys). The Blob run is skipped unless Blob credentials are available (§9).

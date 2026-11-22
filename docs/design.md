@@ -149,9 +149,10 @@ See open question 4 (§11).
 A small declarative list of segments, expanded into cards-per-hand when the game is created:
 
 ```ts
+type Bound = number | 'max' | { min: [number, 'max'] };          // { min: [10, 'max'] } = min(10, max)
 type Segment =
-  | { kind: 'range'; from: number | 'max'; to: number | 'max' }  // inclusive, steps ±1
-  | { kind: 'repeat'; cards: number | 'max'; times: number | 'players' };
+  | { kind: 'range'; from: Bound; to: Bound }                     // inclusive, steps ±1
+  | { kind: 'repeat'; cards: Bound; times: number | 'players' };
 type HandSequenceSpec = Segment[];
 
 // argentina-fidepo:
@@ -160,7 +161,7 @@ type HandSequenceSpec = Segment[];
  { kind: 'range', from: 5, to: 'max' }]
 ```
 
-`max = floor(deckSize / players)`. For the default preset this gives 29 / 22 / 17 / 14 hands for 3 / 4 / 5 / 6 players, matching the F.I.DE.PO. table. The expanded sequence is stored in the game state, so later preset changes never affect a game in progress.
+`max = floor(deckSize / players)`. The `{ min: [...] }` bound expresses starts like GameRules' 10/8/7 cards (`min(10, max)`); its sequence is `range {min:[10,'max']}→1` then `range 2→{min:[10,'max']}`, so the 1-card hand is played once. For the default preset this gives 29 / 22 / 17 / 14 hands for 3 / 4 / 5 / 6 players, matching the F.I.DE.PO. table. The expanded sequence is stored in the game state, so later preset changes never affect a game in progress.
 
 ### 4.4 Seats and turn order
 
