@@ -29,3 +29,15 @@
 **Decision**: `vitest.config.ts` (default, `include: tests/{unit,contract,api}/**/*.test.ts`) and `vitest.sim.config.ts` (`include: tests/sim/**/*.test.ts`, `passWithNoTests: true`), selected by `vitest run` vs `vitest run --config vitest.sim.config.ts`. The sim config duplicates the small `resolve.alias`/`environment` block instead of importing the base config.
 **Rejected**: `mergeConfig(base, sim)` — concatenates `include` arrays, so sim would also run unit/contract/api. Importing `./vitest.config` and spreading — Vite 8 warns that extensionless TS imports in configs are unsupported by its future native config loader, and `.ts` extensions would need `allowImportingTsExtensions` in `tsconfig.json`. Vitest `projects` + `--project` — `passWithNoTests` is root-level, so scoping it is awkward.
 **Consequences**: Any change to alias/environment must be made in both configs. Vite 8.3.8 is an explicit devDependency (non-optional peer of Vitest 5).
+
+## D-006: Prettier scope excludes `docs/` and `specs/`  (Iteration 3)
+**Context**: The spec says `pnpm lint` checks formatting but does not say which files; `prettier --check .` would otherwise reformat the hand-written Markdown design docs and specs.
+**Decision**: `.prettierignore` lists `docs/`, `specs/`, `LICENSE`, `pnpm-lock.yaml`, `.next/`, `coverage/` (Prettier 3 also honours `.gitignore`). Prettier checks code and config: `app/`, `src/`, `tests/`, `scripts/`, root `*.ts`/`*.mjs`/`*.json`. Options: `singleQuote`, `semi`, `trailingComma: "all"`, `printWidth: 100`.
+**Rejected**: formatting everything (rewrites curated docs/spec tables and line breaks); restricting Prettier to an explicit glob list (new top-level folders would silently go unchecked).
+**Consequences**: Markdown under `docs/`/`specs/` is never checked or rewritten. A future root `README.md` *is* covered by Prettier unless added to `.prettierignore`.
+
+## D-007: ESLint 10 with `@next/eslint-plugin-next`, not `eslint-config-next`  (Iteration 3)
+**Context**: Plan allows either the Next plugin or `eslint-config-next`. ESLint 10.15.0 is latest stable (spec: ≥ 9); `typescript-eslint` 8.73.0 supports `^10`.
+**Decision**: `eslint` 10.15.0 + `@eslint/js` 10.0.1 + `typescript-eslint` 8.73.0 + `@next/eslint-plugin-next` 16.4.6 (its flat `core-web-vitals` config, scoped to `app/**/*.{ts,tsx}`) + `eslint-config-prettier` 10.1.8 (`/flat`, last). TypeScript rules are `tseslint.configs.recommended` (syntax-only, no type-aware linting), scoped to `**/*.{ts,tsx,mts,cts}`.
+**Rejected**: `eslint-config-next` (pulls react/react-hooks/import/jsx-a11y plugins not asked for, with ESLint 10 support not guaranteed); `recommendedTypeChecked` (needs a TS program; Iteration 4's `lintText` with virtual file paths outside the tsconfig project would fail or need `allowDefaultProject`).
+**Consequences**: Iteration 4 can call `ESLint#lintText` on virtual paths without type info. Next rules are `warn`-level, so `--max-warnings 0` makes them blocking.

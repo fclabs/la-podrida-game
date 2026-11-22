@@ -1,0 +1,7 @@
+# Hand-written design docs and specs are not reformatted (see DECISIONS.md D-006).
+docs/
+specs/
+LICENSE
+pnpm-lock.yaml
+.next/
+coverage/
