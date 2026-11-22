@@ -1,0 +1,566 @@
+# La Podrida — System Design
+
+> Status: draft v1 · Scope: MVP (one human + N AI players) with a path to multi-user games.
+> Rules reference: [`game_rules.md`](./game_rules.md). How it is built and deployed (stack, storage, API, security): [`architecture.md`](./architecture.md).
+
+This document describes **what** the system does: its components and their responsibilities, the domain model, and the game logic. Technical and infrastructure decisions live in `architecture.md`.
+
+---
+
+## 1. Goals and scope
+
+### 1.1 Goals
+
+1. Play La Podrida in the browser: **one human against 2–5 AI players** (3–6 seats total).
+2. The **backend is authoritative**. It holds the game state, computes each player's legal moves, and accepts the player's selection. The browser only renders the view it gets and sends back the chosen move.
+3. Every state change is **persisted**. A game can be resumed, audited and replayed.
+4. Clear component boundaries:
+   - **Game Engine** — validates state changes, runs the game forward, lists legal moves per player.
+   - **Game State Manager** — stores and loads state.
+   - **Score Engine** — computes each player's score from the state and keeps the score history.
+   - **Player** (generic, human or AI), with an **AI Player** subclass. The first AI strategy picks uniformly at random from the legal moves.
+5. **Multi-user games later** without redesigning the core.
+
+### 1.2 Non-goals for the MVP
+
+- Real-time push (the human gets results in the response to their move).
+- Accounts and login (a seat is identified by a secret token).
+- Special hands from §3.9 of the rules (Indias, Subastado, …).
+- Changing a bid after it is made (bids are final, as in the Spanish Wikipedia rules).
+- Revoke (*renuncio*) handling. The engine only offers legal moves, so a revoke can't happen.
+
+---
+
+## 2. Components
+
+```mermaid
+flowchart LR
+  UI[Browser UI<br/>renders PlayerView<br/>sends moveId] --> SVC[GameService<br/>orchestrator]
+  SVC --> ENG[Game Engine]
+  SVC --> SCO[Score Engine]
+  SVC --> PL[Players<br/>Human / AI]
+  SVC --> GSM[Game State Manager]
+  PL -. PlayerView +<br/>legal moves .-> ENG
+```
+
+| Component | Responsibility | Pure? |
+|---|---|---|
+| **Game Engine** | Rules: create a game, apply a move, list legal moves, build per-seat table views (cards, bids, tricks — no scores). | Yes |
+| **Score Engine** | Score a finished hand; build the score sheet and ranking from the state. | Yes |
+| **Players** | Decide a move for a seat. AIs decide immediately; humans answer in a later request. | Yes |
+| **Game State Manager** | Save and load game versions (commits). | No (storage) |
+| **GameService** | Orchestrates one turn: load → apply human move → run AIs → score → save. Composes the full `PlayerView` from the engine's table view and the Score Engine's scoreboard (§5.5). | No |
+
+The Game Engine and Score Engine do not depend on each other. Only `GameService` combines their outputs.
+| **UI** | Shows the view, lets the human pick one of the legal moves. Computes no rules. | – |
+
+---
+
+## 3. Game flow
+
+```mermaid
+stateDiagram-v2
+  [*] --> bidding: create game, deal hand 1
+  bidding --> bidding: bid (not last)
+  bidding --> playing: last bid
+  playing --> playing: play card / trick won
+  playing --> bidding: hand complete, deal next hand
+  playing --> game_over: last hand complete
+  game_over --> [*]
+```
+
+- A **turn** from the human's point of view: the human submits one move; the server applies it and then lets every AI act until it is the human's turn again or the game is over. The human receives the new view plus the list of events (AI bids, cards played, tricks won) to animate.
+- "Dealing" and "hand complete" are instant transitions inside the engine, not phases that wait for input.
+
+---
+
+## 4. Domain model
+
+### 4.1 Cards and decks
+
+```ts
+type Suit = string;             // 'S' | 'H' | 'D' | 'C' (French) or 'O' | 'C' | 'E' | 'B' (Spanish)
+type Rank = string;             // 'A','K','Q','J','10',...,'2' or 'A','3','R','C','S','7',...
+interface Card { suit: Suit; rank: Rank }   // serialized as "7H", "AS", "3O"
+
+interface DeckDefinition {
+  id: 'french-52' | 'spanish-40';
+  suits: Suit[];
+  ranksHighToLow: Rank[];        // ranking used to compare cards in the same suit
+  removeRanksForPlayers?: Record<number, Rank[]>; // e.g. Spanish deck, 3 players → remove '2'
+}
+```
+
+Card points do not exist in this game. Only rank order matters.
+
+### 4.2 Rule set (variants as configuration)
+
+The engine is **parameterized by a `RuleSet`**, and named presets choose the values. The MVP ships **`argentina-fidepo`** as the default; the other presets are covered by unit tests so adding them later is configuration, not engine work.
+
+```ts
+interface RuleSet {
+  id: string;                               // 'argentina-fidepo' | 'spain-ludoteka' | 'gamerules' | 'mexico-bazas'
+  deck: DeckDefinition;
+  players: { min: number; max: number };
+  handSequence: HandSequenceSpec;           // §4.3
+  trump: { source: 'next-stock-card-or-dealer-last' };
+  bidding: {
+    dealerRestriction: boolean;             // the "sucias" rule
+    dealerRestrictionExemptCardCounts: number[]; // Ludoteka: [1]
+  };
+  play: {
+    mustFollowSuit: true;
+    mustTrumpWhenVoid: true;
+    mustBeatLedSuit: boolean;               // montar / matar
+    beatNotRequiredAfterTrumped: boolean;   // once someone trumped, no need to beat
+    mustOvertrump: boolean;
+    whenCannotOvertrump: 'any-trump' | 'any-card';
+  };
+  scoring: ScoringSpec;                     // §6.2
+  tieBreak: 'fewest-misses' | 'shared';
+}
+```
+
+Preset values (from `game_rules.md` §3):
+
+| Field | argentina-fidepo (default) | spain-ludoteka | gamerules | mexico-bazas |
+|---|---|---|---|---|
+| deck | french-52 | spanish-40 (A 3 R C S 7 6 5 4 2) | french-52 | french-52 |
+| players | 3–6 | 3–6 | 3–7 | 3–7 |
+| handSequence | max→5, N×4, 5→max | 1→max, N×max, max→1 | start→1→start | 3→7, N×7, 7→3 |
+| dealer restriction | yes | yes, except 1-card hands | yes | yes |
+| mustBeatLedSuit | no | yes | no | yes |
+| beatNotRequiredAfterTrumped | n/a | no | n/a | yes |
+| mustOvertrump | no | yes | no | yes |
+| whenCannotOvertrump | n/a | any-trump | n/a | any-trump |
+| scoring | made: 10 + t · missed: t | made: 10 + 5t · missed: −5·\|t−b\| | made: 10 + b · missed: 0 | as Spain |
+| tieBreak | fewest-misses | fewest-misses | fewest-misses | fewest-misses |
+
+Every preset sets **every** field explicitly; there are no implicit defaults. Sources that differ on play rules (e.g. Fournier / Stay and Play "any card when you can't overtrump", Spanish Wikipedia "no need to beat after someone trumped") would be separate presets, not merged into `spain-ludoteka`.
+
+**Not supported (by design, for now):**
+- Ending a game early on a target score (GameRules). Every game ends after its `handPlan`.
+- Extra one-card tie-break hands (Ludoteka). Presets use `fewest-misses`, then `shared`.
+
+See open question 4 (§11).
+
+### 4.3 Hand sequence
+
+A small declarative list of segments, expanded into cards-per-hand when the game is created:
+
+```ts
+type Segment =
+  | { kind: 'range'; from: number | 'max'; to: number | 'max' }  // inclusive, steps ±1
+  | { kind: 'repeat'; cards: number | 'max'; times: number | 'players' };
+type HandSequenceSpec = Segment[];
+
+// argentina-fidepo:
+[{ kind: 'range', from: 'max', to: 5 },
+ { kind: 'repeat', cards: 4, times: 'players' },
+ { kind: 'range', from: 5, to: 'max' }]
+```
+
+`max = floor(deckSize / players)`. For the default preset this gives 29 / 22 / 17 / 14 hands for 3 / 4 / 5 / 6 players, matching the F.I.DE.PO. table. The expanded sequence is stored in the game state, so later preset changes never affect a game in progress.
+
+### 4.4 Seats and turn order
+
+Seats are indexed `0..N-1`. "Next player" is always `(i + 1) % N`. Clockwise vs counter-clockwise is a UI concern only.
+
+- The first dealer is chosen with the game's deal RNG (§4.5).
+- *Mano* (first to bid and to lead the first trick) = `next(dealer)`. The dealer bids last.
+- The deal passes to `next(dealer)` after each hand.
+- The winner of a trick leads the next one.
+
+### 4.5 Game state
+
+```ts
+type Phase = 'bidding' | 'playing' | 'game-over';
+
+interface GameState {
+  schemaVersion: 1;
+  gameId: string;
+  rules: RuleSet;                 // frozen copy
+  handPlan: number[];             // expanded hand sequence (cards per hand)
+  seats: SeatInfo[];              // { seat, playerId, name, kind: 'human'|'ai', strategy?: string }
+  seed: string;                   // server-generated secret; never leaves the server (§5.5)
+  aiDecisionCount: number;        // number of AI decisions so far; input to the AI RNG
+  phase: Phase;
+  handIndex: number;              // index into handPlan
+  hand: HandState | null;
+  completedHands: HandResult[];   // bids and tricks per finished hand (input to the Score Engine)
+  version: number;                // commit number; bumped on every commit
+}
+
+interface HandState {
+  cardsPerPlayer: number;
+  dealer: number;
+  trumpCard: Card;                // the turned card (or the dealer's last card if the whole deck was dealt)
+  trumpCardInDealerHand: boolean; // true when the whole deck was dealt (see below)
+  trumpSuit: Suit;
+  hands: Card[][];                // hidden information: one array per seat
+  bids: (number | null)[];
+  tricksWon: number[];
+  currentTrick: { leader: number; plays: { seat: number; card: Card }[] };
+  lastTrick?: { winner: number; plays: { seat: number; card: Card }[] };
+  toAct: number;                  // seat whose decision is pending
+}
+```
+
+**Randomness.** Deals and AI choices use **separate random streams**, both derived from the secret `seed`:
+
+- Deal RNG for hand `i` = `PRNG(hash(seed, 'deal', i))`. It shuffles and deals hand `i` (and, for `i = 0`, picks the first dealer).
+- AI RNG for a decision = `PRNG(hash(seed, 'ai', seat, aiDecisionCount))`.
+
+So AI choices never change later deals, and changing an AI strategy never changes the cards.
+
+**Trump card when the whole deck is dealt.** When there is no stock left, the dealer's last card sets trump. Following table practice, that card is **shown to everyone** and stays in the dealer's hand (`trumpCardInDealerHand = true`). It is the one hidden-hand card that appears in views and events, by design.
+
+### 4.6 Moves
+
+```ts
+type Move =
+  | { type: 'bid'; seat: number; tricks: number }
+  | { type: 'play'; seat: number; card: Card };
+
+interface LegalMove { id: string; move: Move }   // id: "bid:3", "play:QH"
+```
+
+The client sends back **only the `id`** of one of the legal moves it was given. The server recomputes the legal moves and rejects any `id` not in the list, so a tampered request can't produce an illegal move.
+
+### 4.7 Events
+
+Every state change produces domain events, stored with the commit and sent to the browser for animation.
+
+```ts
+type GameEvent =
+  | { type: 'game-started'; seats; handPlan }
+  | { type: 'hand-dealt'; handIndex; dealer; cardsPerPlayer; trumpCard; trumpCardInDealerHand }  // no hands inside
+  | { type: 'bid-made'; seat; tricks }
+  | { type: 'card-played'; seat; card }
+  | { type: 'trick-won'; seat; trickNumber }
+  | { type: 'hand-completed'; handIndex; result: HandResult }   // raw bids and tricks; points come from the Score Engine
+  | { type: 'game-over' };                                      // ranking is in view.scoreboard / view.finalRanking
+```
+
+Events contain **no hidden information**, so the same list can go to every player. The only exception is the publicly shown dealer trump card (§4.5). Events carry raw game facts only. Scores and rankings are always computed by the Score Engine from the state, never by the Game Engine.
+
+---
+
+## 5. Game Engine
+
+Pure, deterministic functions. No I/O.
+
+### 5.1 Interface
+
+```ts
+interface GameEngine {
+  createGame(input: { gameId: string; rules: RuleSet; seats: SeatInfo[]; seed: string }): Transition;
+  currentActor(state: GameState): number | null;            // null when game over
+  legalMoves(state: GameState, seat: number): LegalMove[];  // [] when it's not this seat's turn
+  applyMove(state: GameState, seat: number, moveId: string): Transition; // throws IllegalMoveError
+  tableViewFor(state: GameState, seat: number | 'spectator'): TableView; // §5.5, no scores
+}
+
+interface Transition { state: GameState; events: GameEvent[] }
+```
+
+`applyMove` never mutates its input; it returns a new state.
+
+`seed` is always supplied by `GameService`, which generates it on the server (§9). Clients can never choose it. Tests and `scripts/simulate.ts` call the engine directly with fixed seeds.
+
+### 5.2 Responsibilities
+
+1. **Validate.** The seat is the current actor and the `moveId` is in `legalMoves(state, seat)`.
+2. **Apply.** Record the bid or play.
+3. **Advance automatically** through transitions that need no decision:
+   - Bidding complete → phase `playing`, *mano* leads.
+   - Trick complete → find the winner, increment `tricksWon`, set `lastTrick`, the winner leads next.
+   - Hand complete → append a `HandResult`, emit `hand-completed`, then deal the next hand (shuffle, deal, turn trump, rotate dealer) or, after the last hand of `handPlan`, go to `game-over`.
+4. **List legal moves** (§5.3, §5.4).
+5. **Build per-seat table views** (§5.5).
+
+### 5.3 Legal bids
+
+```
+range = 0..cardsPerPlayer
+if seat == dealer and rules.bidding.dealerRestriction
+   and cardsPerPlayer not in dealerRestrictionExemptCardCounts:
+     forbidden = cardsPerPlayer − sum(other bids)          // "sucias"
+     remove forbidden from range (if it is inside the range)
+```
+
+### 5.4 Legal plays
+
+```
+if trick is empty: all cards in hand
+
+led          = suit of the first card in the trick
+highestLed   = highest card of suit `led` in the trick
+highestTrump = highest trump in the trick, or none
+inLed        = cards in hand of suit `led`
+
+if inLed is not empty:
+    if rules.mustBeatLedSuit
+       and not (rules.beatNotRequiredAfterTrumped and highestTrump exists and led != trump):
+         beaters = cards in inLed that beat `highestLed`
+         if beaters not empty: return beaters
+    return inLed
+
+trumps = cards in hand of trump suit
+if trumps is not empty:                      // must trump when void ("fallar")
+    if highestTrump exists and rules.mustOvertrump:
+         over = trumps higher than `highestTrump`
+         if over not empty: return over
+         return whenCannotOvertrump == 'any-trump' ? trumps : all cards
+    return trumps
+
+return all cards in hand
+```
+
+With the default preset this reduces to: follow suit → otherwise trump → otherwise anything.
+
+*Montar* compares against the highest card **of the led suit** (`game_rules.md` §3.4), not against the current trick winner. Example: spades are trump, hearts are led with 9H, then someone plays 2S, and you hold AH and 3H. With `beatNotRequiredAfterTrumped = false` you must play AH. With `true` you may play either.
+
+**Trick winner:** the highest trump if any trump was played, else the highest card of the led suit, using `deck.ranksHighToLow`.
+
+### 5.5 Player view (information hiding)
+
+```ts
+// Built by the Game Engine: cards and table only, no scores.
+interface TableView {
+  gameId: string; version: number; phase: Phase;
+  you: number | null;                       // seat, or null for spectator
+  seats: { seat; name; kind; cardCount; bid: number | null; tricksWon: number }[];
+  handIndex: number; handPlan: number[];
+  dealer: number; toAct: number | null;
+  trumpCard: Card | null;
+  trumpCardInDealerHand: boolean;           // §4.5: shown to everyone, still in the dealer's hand
+  yourHand: Card[];                         // empty for spectators
+  currentTrick: { seat: number; card: Card }[];
+  lastTrick: { winner: number; plays: { seat: number; card: Card }[] } | null;
+}
+
+// Composed by GameService: TableView + Score Engine output.
+interface PlayerView extends TableView {
+  scoreboard: ScoreBoard;                   // ScoreEngine.evaluate(state) (§6)
+  finalRanking?: { seat: number; total: number; place: number }[];  // = scoreboard.ranking when phase is game-over
+}
+```
+
+`GameService` builds every `PlayerView` the same way: `{ ...engine.tableViewFor(state, seat), scoreboard: scoreEngine.evaluate(state), finalRanking }`. This applies both to HTTP responses and to each AI `DecisionContext` inside the AI loop. Per-seat totals are read from `scoreboard.totals`.
+
+The view **never** contains other seats' hands (apart from the publicly shown dealer trump card, §4.5), the stock, the seed, or any RNG state. It is the only way state leaves the server, for both humans and AIs.
+
+### 5.6 Invariants
+
+Checked against the state after every move:
+
+- No card appears twice across all hands and the current trick (the dealer's shown trump card counts once, as part of the dealer's hand).
+- Each seat's hand size = `cardsPerPlayer` − completed tricks in this hand − (1 if the seat has already played to the current trick).
+- In `playing`, every bid is set. The sum of `tricksWon` equals the number of completed tricks.
+- Once bidding has closed on a hand where the dealer restriction applies (restriction on and `cardsPerPlayer` not exempt), the sum of bids ≠ `cardsPerPlayer`. During bidding, partial sums may equal it.
+- `legalMoves(state, toAct)` is never empty while the game is not over.
+
+Checked by the simulator only, which keeps its own ledger of the initial deal and every `card-played` event: cards are conserved for each hand (hands + played cards + stock = the deck).
+
+---
+
+## 6. Score Engine
+
+Pure functions.
+
+### 6.1 Interface
+
+```ts
+interface ScoreEngine {
+  scoreHand(rules: RuleSet, hand: HandResult): HandScore;
+  evaluate(state: GameState): ScoreBoard;
+}
+
+interface HandResult { handIndex; cardsPerPlayer; dealer; trumpSuit; bids: number[]; tricks: number[] }
+interface HandScore  { handIndex; perSeat: { seat; bid; tricks; made: boolean; points: number }[] }
+
+interface ScoreBoard {
+  hands: HandScore[];                          // one row per finished hand (the "planilla")
+  totals: number[];                            // running total per seat
+  madeCount: number[]; missedCount: number[];  // used for tie-breaks
+  live?: { seat; bid; tricksWon; status: 'on-track' | 'made-so-far' | 'busted' }[]; // current hand
+  ranking: { seat; total; place }[];
+}
+```
+
+`evaluate` is derived entirely from `state.completedHands` (plus the current hand for `live`), so the score can always be recomputed and can never drift from the state. A player is `busted` when `tricksWon > bid`, or when the tricks left can't bring them up to their bid.
+
+### 6.2 Scoring formulas
+
+```ts
+type ScoringSpec =
+  | { kind: 'bonus-plus-tricks'; bonus: 10; perTrick: 1; missedPerTrick: 1 }   // argentina-fidepo
+  | { kind: 'bonus-plus-bid';    bonus: 10 }                                   // gamerules
+  | { kind: 'spanish';           bonus: 10; perTrick: 5; missPenaltyPerTrick: 5 };
+```
+
+| Preset | Made (t = b) | Missed (t ≠ b) |
+|---|---|---|
+| argentina-fidepo | 10 + t | t |
+| gamerules | 10 + b | 0 |
+| spain / mexico | 10 + 5t | −5·\|t − b\| |
+
+### 6.3 Score history
+
+Every saved version of the game includes the `ScoreBoard` at that point, so the score at any moment (and a score-over-time chart) is available from the history. The terminal commit's `scoreboard` is the authoritative final result (ranking, totals, made/missed counts). When the game ends, a small `final.json` summary is also written **best-effort** as a convenience cache. If it is missing, readers fall back to the terminal commit.
+
+---
+
+## 7. Game State Manager
+
+Stores and loads versions of a game. Each accepted request produces one new immutable **commit**: `{ version, events, state, scoreboard, clientRequestId }`.
+
+```ts
+interface GameStateManager {
+  create(meta: GameMeta, initial: CommitBody): Promise<Commit>;        // writes meta + commit 0
+  loadLatest(gameId: string): Promise<Commit>;                         // throws GameNotFound
+  load(gameId: string, version: number): Promise<Commit>;
+  commit(gameId: string, next: CommitBody): Promise<Commit>;           // throws VersionConflict
+  eventsSince(gameId: string, version: number): Promise<GameEvent[]>;
+  writeFinalScores(gameId: string, board: ScoreBoard): Promise<void>;   // best-effort cache (§6.3)
+}
+```
+
+If two requests try to create the same version, exactly one wins; the other gets `VersionConflict`. Storage layout and how this is guaranteed on Vercel Blob: `architecture.md` §6.
+
+**Replay.** A game can be rebuilt from its seed and its event log without re-running any AI:
+
+1. Call `createGame` with the stored `seed`, rules and seats.
+2. Apply every `bid-made` and `card-played` event, in commit order and starting with commit 0, as a move via `applyMove`.
+
+Deals come from the deal RNG (§4.5), so they are reproduced exactly. Replay requires the same `engineVersion` that is stored in the game metadata (`architecture.md` §6.2).
+
+---
+
+## 8. Players
+
+### 8.1 Model
+
+```mermaid
+classDiagram
+  class Player {
+    <<abstract>>
+    +seat: number
+    +name: string
+    +kind: 'human' | 'ai'
+    +requestDecision(ctx: DecisionContext) Decision
+  }
+  class HumanPlayer {
+    +requestDecision() → await
+  }
+  class AIPlayer {
+    +strategy: AIStrategy
+    +requestDecision(ctx) → move
+  }
+  class AIStrategy {
+    <<interface>>
+    +name: string
+    +choose(view, moves, rng) LegalMove
+  }
+  class RandomStrategy
+
+  Player <|-- HumanPlayer
+  Player <|-- AIPlayer
+  AIPlayer o-- AIStrategy
+  AIStrategy <|.. RandomStrategy
+```
+
+```ts
+interface DecisionContext {
+  view: PlayerView;            // the same restricted view a human sees (composed by GameService)
+  legalMoves: LegalMove[];
+  rng: Rng;                    // the AI stream for this decision (§4.5); never the deal stream
+}
+type Decision = { type: 'move'; moveId: string } | { type: 'await' };
+
+interface PlayerUpdate { version: number; events: GameEvent[]; view: PlayerView; legalMoves: LegalMove[] }
+```
+
+- `AIPlayer` returns `{ type: 'move' }` right away.
+- `HumanPlayer` returns `{ type: 'await' }`. The orchestrator saves and stops; the human's answer arrives in a later request and goes through the same `applyMove`.
+
+Humans and AIs therefore go through the same `legalMoves` → choose → `applyMove` path and are validated identically. AIs see only the `PlayerView`; no strategy may read hidden state.
+
+### 8.2 `RandomStrategy` (first AI)
+
+```ts
+class RandomStrategy implements AIStrategy {
+  name = 'random';
+  choose(_view, moves, rng) { return moves[rng.int(0, moves.length - 1)]; }
+}
+```
+
+- Chooses uniformly from **all** legal moves (bids and card plays).
+- Uses the AI random stream, so its choices are deterministic for a given seed and never affect the cards dealt.
+- Future strategies (`heuristic`, `monte-carlo`, …) implement the same interface and are picked per seat by name (`seats[i].strategy`) through a registry.
+
+---
+
+## 9. GameService (orchestrator)
+
+The only place that combines the engine, scores, players and state manager.
+
+```ts
+class GameService {
+  createGame(req: { rulesPreset?: string; humanName: string; aiCount: number })
+    : Promise<{ gameId; seat; seatToken; update: PlayerUpdate }>;
+
+  getUpdate(gameId, seatToken, sinceVersion?): Promise<PlayerUpdate>;
+
+  submitMove(gameId, seatToken, req: { version; moveId; clientRequestId })
+    : Promise<PlayerUpdate>;           // throws VersionConflict | IllegalMove | NotYourTurn | Unauthorized
+}
+```
+
+`submitMove`:
+
+1. **Authenticate** the seat token against the game's metadata. This gives the requesting seat.
+2. Load the latest commit (the tip).
+3. **Retry check.** If `req.version` ≠ tip version, load commit `req.version + 1`. If its `clientRequestId` and `actorSeat` match this request, the move was already committed (for example, a retry after a lost response). Return that result projected for this seat. Otherwise return `VersionConflict` with the current update.
+4. Apply the human's move.
+5. **AI loop:** while the current actor is an AI, build its `PlayerView`, ask it for a decision and apply it (with a safety cap).
+6. Compute the scoreboard.
+7. Save commit `req.version + 1` (create-only). On `VersionConflict`, do the retry check from step 3 against the commit that won: if it is this request, return its result, otherwise return 409.
+8. If the game is over, write `final.json` best-effort (§6.3).
+9. Return the requesting seat's `PlayerUpdate`, with events since `req.version`.
+
+`createGame` generates a secret seed with a cryptographically secure RNG (`crypto.randomBytes(32)`), never accepts one from the client, and runs the same AI loop right after the first deal, because the first bidders may be AIs.
+
+---
+
+## 10. User experience
+
+- **Pages:** `/` (new game: name, number of AIs) and `/game/[id]` (the table).
+- **State:** the UI holds the latest `PlayerUpdate` and shows only what the server sent. It never computes rules. It ignores any response whose `version` is lower than the one it is showing.
+- **Bidding:** a row of bid buttons, one per legal `bid:n` move. The forbidden "sucias" value is simply missing.
+- **Playing:** legal cards in the hand are highlighted and clickable; the others are dimmed. A click sends the `moveId`.
+- **Animation:** the returned `events` (AI bids, cards to the table, trick collected) play in order before the new view is shown.
+- **Score sheet:** one row per hand (cards, then bid / tricks / points per seat) with running totals, from `ScoreBoard`.
+- **Resume:** `gameId` and seat token are kept in the browser; reloading the page fetches the current update.
+
+---
+
+## 11. Decisions and open questions
+
+**Game design decisions**
+
+- The default rule set is **Argentina (F.I.DE.PO.)**. Other variants are presets of one parameterized engine.
+- Bids are final. Revokes can't happen because only legal moves are offered.
+- Ties: **fewest missed bids** wins; if still tied, the win is shared. (F.I.DE.PO. doesn't say.)
+- AIs see only the `PlayerView`.
+- When the whole deck is dealt, the dealer's trump card is shown to everyone (table practice, §4.5).
+
+Technical decisions are listed in `architecture.md` §13.
+
+**Open questions**
+
+1. Should the MVP UI let the player choose a preset, or only use the default?
+2. For the Spanish deck, should we support the 8- and 9-card extension from Ludoteka for 6–8 players?
+3. Do we want "Pocha" bonuses and suit multipliers (Spanish optional rules) as preset flags?
+4. Are target-score endings (GameRules) or extra one-card tie-break hands (Ludoteka) needed for any preset? Both would need a decision step at the hand boundary in the engine.
