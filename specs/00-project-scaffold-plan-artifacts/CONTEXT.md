@@ -1,6 +1,6 @@
 # CONTEXT — Project Scaffold (Phase 0)
 
-Last updated by: Iteration 5 (Validated configuration, `src/config.ts`)
+Last updated by: Iteration 6 (CI workflow and developer documentation) — final state of Phase 0
 
 ## Current state
 
@@ -11,7 +11,9 @@ Last updated by: Iteration 5 (Validated configuration, `src/config.ts`)
 - `pnpm simulate` runs `scripts/simulate.ts` through `tsx` 4.23.15 and prints a Phase 4 stub line.
 - ESLint 10.15.0 (flat config, `eslint.config.mjs`) + `typescript-eslint` 8.73.0 + `@next/eslint-plugin-next` 16.4.6 + `eslint-config-prettier` 10.1.8, and Prettier 3.10.1. `pnpm lint` = ESLint with `--max-warnings 0` then `prettier --check .`; `pnpm format` = `prettier --write .`. Tree is clean under both.
 - Layer boundaries (spec FR-011–FR-020) are enforced by a local ESLint rule `layer-boundaries/imports` (`tools/eslint-rules/layer-boundaries.mjs`, D-008) configured with a declarative matrix in `eslint.config.mjs` section 5. No new dependency.
-- Not yet present: CI workflow, README / developer docs (Iteration 6).
+- GitHub Actions CI (`.github/workflows/ci.yml`) runs install → typecheck → lint → test → build on Node 24 with a cached pnpm store on every push and PR; green on `spec/00-project-scaffold` (run IDs in `iterations/06-ci-docs.md`).
+- Human docs: `README.md` (overview, prerequisites, getting started, command table, doc links) and `docs/development.md` (layout, layer rules with reasons, tests, configuration, linting/formatting, CI, conventions, known limitations).
+- Phase 0 is complete; no game code exists. Next: Phase 1 (domain model) per `docs/implementation.md`.
 
 ## File map
 
@@ -38,6 +40,10 @@ Last updated by: Iteration 5 (Validated configuration, `src/config.ts`)
 | `tests/unit/smoke.test.ts` | Trivial passing test. |
 | `scripts/simulate.ts` | CLI simulator stub: prints `simulate: not implemented until Phase 4`, exits 0. Implemented in Phase 4. |
 | `.gitignore` | Original Python template kept; Node/Next block appended at the end. |
+| `.github/workflows/ci.yml` | CI (D-011): job `check`, `ubuntu-latest`, `actions/checkout@v7`, `pnpm/action-setup@v6` (version from `packageManager`), `actions/setup-node@v7` (`.nvmrc`, `cache: pnpm`), steps Install/Typecheck/Lint/Test/Build. `permissions: contents: read`, no secrets/env. |
+| `README.md` | Project overview + getting started + command table + links to `docs/`. Prettier-checked (D-012). |
+| `docs/development.md` | Developer guide (§1 toolchain … §9 known limitations). Under `docs/`, so not Prettier-checked. Keep in sync when rules, config variables, scripts or CI change. |
+| `docs/{design,architecture,game_rules,implementation}.md` | Pre-existing design docs (not changed in Phase 0). |
 | `specs/00-project-scaffold-plan-artifacts/` | This artifact directory. |
 
 ## Public interfaces
@@ -101,7 +107,8 @@ Core = domain, engine, score, players: each may import only its own layer and `d
 - `typecheck` must keep working without `.next/` (CI runs it before `build`) — see D-001.
 - Tests are `*.test.ts` files under `tests/<folder>/**`. Folder roles: `unit` (pure logic, lint-boundary fixtures, config), `contract` (cross-module contracts), `api` (route handlers), `sim` (long-running simulations; excluded from `pnpm test`, run by `pnpm test:sim`). Test files anywhere else (e.g. `src/**`) are never run.
 - `@/` alias works in Vitest (`resolve.alias`) and in `tsx` (reads `tsconfig.json` `paths`); both verified with a temporary `@/src/...` import.
-- Formatting is owned by Prettier (single quotes, semicolons, 2-space indent, trailing commas, width 100); run `pnpm format` before committing. `docs/` and `specs/` are never formatted (D-006).
+- Formatting is owned by Prettier (single quotes, semicolons, 2-space indent, trailing commas, width 100); run `pnpm format` before committing. `docs/` and `specs/` are never formatted (D-006); `README.md` and `.github/` are (D-012).
+- Docs: user-facing rules live in `docs/development.md`; any change to the layer matrix, env variables, scripts or CI must update it (and `README.md` for scripts).
 - `pnpm lint` must pass with 0 errors **and 0 warnings** (`--max-warnings 0`); Next plugin rules are `warn`-level and therefore blocking.
 - ESLint covers every `.ts/.tsx/.mts/.cts/.js/.mjs/.cjs` file not ignored: `app/`, `src/`, `tests/`, `scripts/`, root configs. Linting is syntax-only (no type-aware rules, D-007).
 
@@ -118,6 +125,7 @@ Core = domain, engine, score, players: each may import only its own layer and `d
 | `pnpm test` | `vitest run` — runs `tests/{unit,contract,api}/**/*.test.ts` (uses `vitest.config.ts`). |
 | `pnpm test:sim` | `vitest run --config vitest.sim.config.ts` — runs `tests/sim/**/*.test.ts`; exits 0 when there are none. |
 | `pnpm simulate` | `tsx scripts/simulate.ts` — prints `simulate: not implemented until Phase 4`, exit 0. |
+| CI (GitHub Actions) | On push to any branch / PR: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm build` on Node 24. Inspect with `gh run list --branch <b>`, `gh run view <id> --log`. |
 
 ## Known gaps
 
@@ -126,5 +134,5 @@ Core = domain, engine, score, players: each may import only its own layer and `d
 
 - Layer rule does not check dynamic `import()`/`require()` (spec Out of scope) or `import x = require()`.
 - pnpm reports "Ignored build scripts: esbuild" (tsx/vite dependency); the platform binary ships as an optional package, so `tsx` works without the postinstall. Not approved in `package.json`.
-- No CI; Node 24 is only declared, local verification ran on Node 26.13.1 (engines are advisory in pnpm without `engine-strict`).
-- No README / developer docs yet (Iteration 6).
+- Local verification ran on Node 26.13.1 (engines are advisory in pnpm without `engine-strict`); CI runs Node 24.
+- `pnpm test:sim` is not in CI (added in Phase 4). No branch protection rules (spec Out).

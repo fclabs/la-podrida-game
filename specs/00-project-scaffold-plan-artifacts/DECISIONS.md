@@ -59,3 +59,15 @@
 **Decision**: `zod` 4.6.7 (latest stable, exact pin). VC-022 tests use `vi.resetModules()` + `await import('@/src/config')` instead of an exported test-only reset hook, keeping the public API exactly as typed in the spec.
 **Rejected**: an exported `resetConfigForTests()` (widens the public API).
 **Consequences**: `dependencies` = `next`, `react`, `react-dom`, `zod`. Tests that need a fresh `getConfig` cache must reset modules and import dynamically.
+
+## D-011: CI = one job, major-tag actions, pnpm version from `packageManager`, cache via setup-node  (Iteration 6)
+**Context**: FR-028 needs Node 24, a pnpm store cache keyed on `pnpm-lock.yaml` and five ordered steps; the plan names `actions/checkout`, `pnpm/action-setup`, `actions/setup-node`.
+**Decision**: `.github/workflows/ci.yml`, one job `check` on `ubuntu-latest`, triggers `push` (`branches: ['**']`) + `pull_request`, `permissions: contents: read`, no `env`/secrets. Actions on current majors: `actions/checkout@v7`, `pnpm/action-setup@v6` (no `version` input → reads `packageManager`), `actions/setup-node@v7` (`node-version-file: .nvmrc`, `cache: pnpm`, which keys the store cache on the lockfile hash). Then five named `run` steps: Install, Typecheck, Lint, Test, Build.
+**Rejected**: `pnpm/setup` (requires pnpm ≥ 11; project pins 10.15.1); `pnpm/action-setup`'s own `cache: true` (plan specifies setup-node's cache); SHA-pinned actions (no supply-chain policy in this phase; major tags keep the file readable); a `concurrency` group (not asked for).
+**Consequences**: Bumping pnpm = change `packageManager` only. Adding `test:sim` (Phase 4) = one more step after Test. Branch protection is not configured (spec Out).
+
+## D-012: README is Prettier-checked; `docs/development.md` is not  (Iteration 6)
+**Context**: D-006 left open whether a root `README.md` is formatted; Prettier's default `.` covers it unless ignored.
+**Decision**: Keep `README.md` (and `.github/workflows/ci.yml`) under Prettier — the README was written then `prettier --write`-formatted (table columns aligned). `docs/development.md` lives under `docs/`, which stays ignored like the other hand-written design docs.
+**Rejected**: adding `README.md` to `.prettierignore` (needless exception; the file is simple Markdown).
+**Consequences**: Edits to `README.md` must be re-formatted with `pnpm format` or `pnpm lint` fails. `.prettierignore` unchanged.
