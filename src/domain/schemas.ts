@@ -71,3 +71,90 @@ export const DeckDefinitionSchema = z
       });
     }
   });
+
+/** A positive integer (≥ 1): a card count, a repeat count or a player count. */
+const positiveInt = z.int().min(1);
+
+/**
+ * A card-count bound in a hand sequence: a fixed count (integer ≥ 1); `'max'`, the largest count
+ * the deck allows for this table; `{ min: [n, 'max'] }`, i.e. `min(n, max)` with n ≥ 1; or
+ * `{ offset: ['max', n] }`, i.e. `max + n` with n an integer ≤ 0.
+ */
+export const BoundSchema = z.union([
+  positiveInt,
+  z.literal('max'),
+  z.strictObject({ min: z.tuple([positiveInt, z.literal('max')]) }),
+  z.strictObject({ offset: z.tuple([z.literal('max'), z.int().max(0)]) }),
+]);
+
+/**
+ * One segment of a hand sequence: an inclusive `range` stepping ±1 from `from` to `to`, or a
+ * `repeat` of `cards` cards `times` times (an integer ≥ 1, or `'players'` for one per player).
+ */
+export const SegmentSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('range'), from: BoundSchema, to: BoundSchema }),
+  z.strictObject({
+    kind: z.literal('repeat'),
+    cards: BoundSchema,
+    times: z.union([positiveInt, z.literal('players')]),
+  }),
+]);
+
+/** The hand sequence of a rule set: a non-empty list of segments, played in order. */
+export const HandSequenceSpecSchema = z.array(SegmentSchema).min(1);
+
+/** How hands are scored. The numeric values are fixed per kind (literal types). */
+export const ScoringSpecSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('bonus-plus-tricks'),
+    bonus: z.literal(10),
+    perTrick: z.literal(1),
+    missedPerTrick: z.literal(1),
+  }),
+  z.strictObject({ kind: z.literal('bonus-plus-bid'), bonus: z.literal(10) }),
+  z.strictObject({
+    kind: z.literal('spanish'),
+    bonus: z.literal(10),
+    perTrick: z.literal(5),
+    missPenaltyPerTrick: z.literal(5),
+  }),
+]);
+
+/** The rule preset ids, in their canonical order. */
+export const PresetIdSchema = z.enum([
+  'argentina-fidepo',
+  'spain-ludoteka',
+  'gamerules',
+  'mexico-bazas',
+]);
+
+/**
+ * A complete rule set. Every field is required (no defaults, spec BR-101), unknown keys are
+ * rejected at every level, and the value is plain JSON data (BR-103).
+ */
+export const RuleSetSchema = z.strictObject({
+  id: PresetIdSchema,
+  deck: DeckDefinitionSchema,
+  players: z
+    .strictObject({ min: z.int().min(2), max: z.int().min(2) })
+    .refine((players) => players.min <= players.max, {
+      message: 'players.min must be <= players.max',
+      path: ['max'],
+    }),
+  handSequence: HandSequenceSpecSchema,
+  trump: z.strictObject({ source: z.literal('next-stock-card-or-dealer-last') }),
+  bidding: z.strictObject({
+    dealerRestriction: z.boolean(),
+    dealerRestrictionExemptCardCounts: z.array(positiveInt),
+  }),
+  play: z.strictObject({
+    mustFollowSuit: z.literal(true),
+    mustTrumpWhenVoid: z.literal(true),
+    mustBeatLedSuit: z.boolean(),
+    beatNotRequiredAfterTrumped: z.boolean(),
+    mustOvertrump: z.boolean(),
+    whenCannotOvertrump: z.enum(['any-trump', 'any-card']),
+  }),
+  scoring: ScoringSpecSchema,
+  tieBreak: z.enum(['fewest-misses', 'shared']),
+});
