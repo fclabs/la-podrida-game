@@ -23,3 +23,9 @@
 **Decision**: Set `agentRules: false` (a documented `NextConfig` option, verified in `next/dist/server/config-schema.js`).
 **Rejected**: committing the generated `AGENTS.md` (out of scope, not in the spec's file list); git-ignoring it (would hide a file a later phase may want).
 **Consequences**: `next.config.ts` is no longer empty; keep the option unless the project decides to adopt Next's agent rules file.
+
+## D-005: Two standalone Vitest configs for the sim split  (Iteration 2)
+**Context**: `pnpm test` must exclude `tests/sim`, while `pnpm test:sim` must run only `tests/sim` and pass when it is empty, without `passWithNoTests` leaking into `pnpm test`.
+**Decision**: `vitest.config.ts` (default, `include: tests/{unit,contract,api}/**/*.test.ts`) and `vitest.sim.config.ts` (`include: tests/sim/**/*.test.ts`, `passWithNoTests: true`), selected by `vitest run` vs `vitest run --config vitest.sim.config.ts`. The sim config duplicates the small `resolve.alias`/`environment` block instead of importing the base config.
+**Rejected**: `mergeConfig(base, sim)` — concatenates `include` arrays, so sim would also run unit/contract/api. Importing `./vitest.config` and spreading — Vite 8 warns that extensionless TS imports in configs are unsupported by its future native config loader, and `.ts` extensions would need `allowImportingTsExtensions` in `tsconfig.json`. Vitest `projects` + `--project` — `passWithNoTests` is root-level, so scoping it is awkward.
+**Consequences**: Any change to alias/environment must be made in both configs. Vite 8.3.8 is an explicit devDependency (non-optional peer of Vitest 5).
