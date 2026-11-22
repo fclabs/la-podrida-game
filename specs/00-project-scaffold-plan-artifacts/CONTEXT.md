@@ -1,17 +1,17 @@
 # CONTEXT — Project Scaffold (Phase 0)
 
-Last updated by: Iteration 4 (Lint-enforced layer boundaries with fixture tests)
+Last updated by: Iteration 5 (Validated configuration, `src/config.ts`)
 
 ## Current state
 
 - Next.js 16.4.6 App Router + React 19.3.1 + TypeScript 6.0.3 (`strict`) project, managed by pnpm 10.15.1, declared for Node 24.
 - Installs from the committed `pnpm-lock.yaml` (`pnpm install --frozen-lockfile`), typechecks on a clean checkout (no `.next/`, no `next-env.d.ts`), builds, and serves a placeholder home page at `/` with an `<h1>La Podrida</h1>`.
-- `src/` holds only seven empty layer folders, each with a `.gitkeep`.
-- Vitest 5.1.1 (with Vite 8.3.8 as its required peer) runs `tests/{unit,contract,api}` via `pnpm test` and `tests/sim` via `pnpm test:sim`. Tests: `tests/unit/smoke.test.ts` and `tests/unit/layer-boundaries.test.ts` (47 ESLint fixture rows).
+- `src/` holds seven empty layer folders (each with a `.gitkeep`) and `src/config.ts` (Zod 4.6.7-validated env configuration, see Public interfaces).
+- Vitest 5.1.1 (with Vite 8.3.8 as its required peer) runs `tests/{unit,contract,api}` via `pnpm test` and `tests/sim` via `pnpm test:sim`. Tests: `tests/unit/smoke.test.ts`, `tests/unit/layer-boundaries.test.ts` (47 ESLint fixture rows) and `tests/unit/config.test.ts` (26 cases, VC-022–VC-027); 74 tests total.
 - `pnpm simulate` runs `scripts/simulate.ts` through `tsx` 4.23.15 and prints a Phase 4 stub line.
 - ESLint 10.15.0 (flat config, `eslint.config.mjs`) + `typescript-eslint` 8.73.0 + `@next/eslint-plugin-next` 16.4.6 + `eslint-config-prettier` 10.1.8, and Prettier 3.10.1. `pnpm lint` = ESLint with `--max-warnings 0` then `prettier --check .`; `pnpm format` = `prettier --write .`. Tree is clean under both.
 - Layer boundaries (spec FR-011–FR-020) are enforced by a local ESLint rule `layer-boundaries/imports` (`tools/eslint-rules/layer-boundaries.mjs`, D-008) configured with a declarative matrix in `eslint.config.mjs` section 5. No new dependency.
-- Not yet present: `src/config.ts`, zod, CI workflow, README.
+- Not yet present: CI workflow, README / developer docs (Iteration 6).
 
 ## File map
 
@@ -25,6 +25,8 @@ Last updated by: Iteration 4 (Lint-enforced layer boundaries with fixture tests)
 | `app/layout.tsx` | Root layout: `<html lang="es"><body>`; metadata title `La Podrida`. |
 | `app/page.tsx` | Home page: `<main><h1>La Podrida</h1></main>`. |
 | `src/{domain,engine,score,players,state,storage,service}/.gitkeep` | Empty layer folders (the `.gitkeep` is their only content). |
+| `src/config.ts` | `Config` type, `ConfigError`, `loadConfig(env)`, `getConfig()`. Imports only `zod`. Not in a layer; importable from `state`, `storage`, `service`, `app/api/**`, `tests/**`, `scripts/**` (✗ from core and UI). |
+| `tests/unit/config.test.ts` | One test per VC-022–VC-027 case; `listedVariables()` parses the `  - NAME` lines of a `ConfigError` message; VC-022 uses `vi.resetModules()` + dynamic `import('@/src/config')` and restores the env vars it touches. |
 | `vitest.config.ts` | Config for `pnpm test`: `include: ['tests/{unit,contract,api}/**/*.test.ts']`, `environment: 'node'`, `resolve.alias` `'@'` → project root. |
 | `vitest.sim.config.ts` | Config for `pnpm test:sim`: `include: ['tests/sim/**/*.test.ts']`, `passWithNoTests: true`, same alias/environment. Standalone (D-005) — keep `resolve`/`environment` in sync with `vitest.config.ts`. |
 | `eslint.config.mjs` | Flat config via `defineConfig`, numbered sections: 1 global ignores (`.next/`, `node_modules/`, `coverage/`, `out/`, `next-env.d.ts`); 2 `@eslint/js` recommended; 3 `typescript-eslint` recommended (syntax-only) on `**/*.{ts,tsx,mts,cts}`; 4 Next `core-web-vitals` on `app/**/*.{ts,tsx}`; 5 one layer-boundary block (`src/**`, `app/**` minus `app/api/**`, all JS/TS extensions) running `layer-boundaries/imports` with the `LAYER_BOUNDARIES` options object (matrix) and `CORE_EXTERNALS` defined at the top of the file; 6 `eslint-config-prettier/flat` (must stay last). |
@@ -40,7 +42,32 @@ Last updated by: Iteration 4 (Lint-enforced layer boundaries with fixture tests)
 
 ## Public interfaces
 
-None yet (no exported modules in `src/`). Routes: `GET /` → static page containing `La Podrida`.
+Routes: `GET /` → static page containing `La Podrida`.
+
+### `@/src/config` (spec 00 FR-022–FR-027, Data & Interfaces)
+
+```ts
+export type Config = Readonly<{
+  storageDriver: 'memory' | 'file' | 'blob';          // STORAGE_DRIVER; default 'blob' if VERCEL === '1', else 'file'
+  fileStoreDir: string;                               // FILE_STORE_DIR; default '.data/'
+  blobStoreId?: string;                               // BLOB_STORE_ID
+  vercelOidcToken?: string;                           // VERCEL_OIDC_TOKEN (secret)
+  blobReadWriteToken?: string;                        // BLOB_READ_WRITE_TOKEN (secret)
+  defaultRulesPreset: 'argentina-fidepo' | 'spain-ludoteka' | 'gamerules' | 'mexico-bazas'; // DEFAULT_RULES_PRESET; default 'argentina-fidepo'
+  logLevel: 'debug' | 'info' | 'warn' | 'error';      // LOG_LEVEL; default 'info'
+  retentionDays: number;                              // RETENTION_DAYS: ^[0-9]+$, 1–3650; default 365
+  cronSecret?: string;                                // CRON_SECRET (secret); required when VERCEL_ENV ∈ {preview, production}
+  vercelEnv?: 'development' | 'preview' | 'production'; // VERCEL_ENV
+}>;
+export class ConfigError extends Error {}             // name === 'ConfigError'
+export function loadConfig(env: Record<string, string | undefined>): Config; // frozen result
+export function getConfig(): Config;                  // memoises loadConfig(process.env) on success only
+```
+
+- Full env table: spec 00 Data & Interfaces. An empty string counts as unset for every variable; values are not trimmed.
+- Any problem → **one** `ConfigError` whose message is `Invalid configuration:` followed by one `  - <ENV_VAR_NAME> <fixed description>` line per invalid variable, in table order, with the cross-field `CRON_SECRET` line last (D-009). Messages never contain any received value.
+- `DEFAULT_RULES_PRESET` is validated against the four literal names; Phase 1 may switch the check to the preset registry without changing behavior.
+- Nobody calls `getConfig()` yet (no `instrumentation.ts`); the first caller is the Phase 8 service factory.
 
 ## Conventions & invariants
 
@@ -67,7 +94,7 @@ Core = domain, engine, score, players: each may import only its own layer and `d
 
 - `@/` alias maps to the **project root**: imports read `@/src/engine/...`, `@/app/...`.
 - App Router lives in root `app/` (not `src/app`), per architecture §4.2.
-- `dependencies` must stay ⊆ {`next`, `react`, `react-dom`, `zod`, `@noble/hashes`} (NFR-004). Today exactly `next`, `react`, `react-dom`. Everything else is a devDependency. `@noble/hashes` is not installed in Phase 0.
+- `dependencies` must stay ⊆ {`next`, `react`, `react-dom`, `zod`, `@noble/hashes`} (NFR-004). Today exactly `next`, `react`, `react-dom`, `zod` (4.6.7). Everything else is a devDependency. `@noble/hashes` is not installed in Phase 0.
 - TypeScript is pinned to 6.0.x (not 7.x) — see D-002; do not upgrade past `typescript-eslint`'s peer range.
 - `@types/node` is pinned to the 24 line to match the runtime.
 - `next-env.d.ts`, `.next/`, `*.tsbuildinfo` are git-ignored and regenerated; never commit them.
@@ -93,6 +120,9 @@ Core = domain, engine, score, players: each may import only its own layer and `d
 | `pnpm simulate` | `tsx scripts/simulate.ts` — prints `simulate: not implemented until Phase 4`, exit 0. |
 
 ## Known gaps
+
+- Configuration is not validated at server startup: `getConfig()` has no caller until Phase 8 wires it (spec Scope Out). A misconfigured deployment would currently start.
+- Storage credentials for the `blob` driver are not checked (Phase 5).
 
 - Layer rule does not check dynamic `import()`/`require()` (spec Out of scope) or `import x = require()`.
 - pnpm reports "Ignored build scripts: esbuild" (tsx/vite dependency); the platform binary ships as an optional package, so `tsx` works without the postinstall. Not approved in `package.json`.
