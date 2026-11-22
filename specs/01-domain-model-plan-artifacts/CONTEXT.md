@@ -1,27 +1,31 @@
 # CONTEXT — Domain Model (Phase 1)
 
-Last updated by: Iteration 2 (Rule sets, presets and the RuleSet schema)
+Last updated by: Iteration 3 (Game state and event schemas, shared types, type-level tests)
 
 ## Current state
 
 - Phase 0 scaffold is complete (see `specs/00-project-scaffold-frozen.md`): Next.js 16.4.6, TypeScript 6.0.3 `strict`, pnpm 10.15.1, Node 24 declared, Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7, layer-boundary lint rule, GitHub Actions CI.
-- `src/domain` holds `schemas.ts`, `cards.ts`, `decks.ts` (spec 01 FR-101 to FR-109) and `rules.ts`, `presets.ts` (FR-110 to FR-115).
-- Not built yet: `GameState`/`GameEvent` schemas and `types.ts` (Iteration 3); `docs/design.md` / `docs/development.md` updates (Iteration 4).
-- Tests: `tests/unit/domain/cards.test.ts` (VC-101 to VC-105), `decks.test.ts` (VC-106 to VC-108 plus deck/card schema checks), `presets.test.ts` (VC-109 to VC-113), `rule-set-schema.test.ts` (VC-114). `pnpm test`: 7 files, 174 tests.
+- `src/domain` is code-complete for Phase 1: `schemas.ts`, `cards.ts`, `decks.ts` (spec 01 FR-101 to FR-109), `rules.ts`, `presets.ts` (FR-110 to FR-115), and the state/event schemas plus `types.ts` (FR-116 to FR-119).
+- Not built yet: `docs/design.md` / `docs/development.md` updates and the CI check (Iteration 4).
+- Tests: `tests/unit/domain/cards.test.ts` (VC-101 to VC-105), `decks.test.ts` (VC-106 to VC-108 plus deck/card schema checks), `presets.test.ts` (VC-109 to VC-113), `rule-set-schema.test.ts` (VC-114), `game-state-schema.test.ts` (VC-115), `game-event-schema.test.ts` (VC-116), `types.test.ts` (VC-117, type-level). `pnpm test`: 10 files, 215 tests.
 
 ## File map
 
 | Path | Purpose |
 |---|---|
-| `src/domain/schemas.ts` | Zod schemas + helper constants. Imports only `zod` (runtime). Card, deck and rule-set schemas; Iteration 3 adds state and event schemas here. |
+| `src/domain/schemas.ts` | Every Zod schema + helper constants. Imports only `zod` (runtime). Card, deck, rule-set, game-state and game-event schemas. |
 | `src/domain/cards.ts` | `Suit`, `Rank`, `Card` types; `InvalidCardError`, `cardId`, `parseCard`, `compareRanks`. |
 | `src/domain/decks.ts` | `DeckDefinition` type; frozen `FRENCH_52`, `SPANISH_40`; `buildDeck`. |
 | `src/domain/rules.ts` | Types only: `Bound`, `Segment`, `HandSequenceSpec`, `ScoringSpec`, `PresetId`, `RuleSet` (all `z.infer`). |
+| `src/domain/types.ts` | Types only. Inferred: `SeatInfo`, `TrickPlay`, `HandState`, `HandResult`, `GameState`, `GameEvent`; `Phase = GameState['phase']`; hand-written: `Move`, `LegalMove`, `Transition`, `Rng`, `HandScore`, `ScoreBoard`, `TableView`, `PlayerView`, `PlayerUpdate`, `DecisionContext`, `Decision`. |
 | `src/domain/presets.ts` | `PRESET_IDS`, `DEFAULT_PRESET_ID`, `UnknownPresetError`, `getPreset`; the four preset literals (private consts `ARGENTINA_FIDEPO`, `SPAIN_LUDOTEKA`, `GAMERULES`, `MEXICO_BAZAS`) in a deeply frozen null-prototype map. |
 | `tests/unit/domain/cards.test.ts` | VC-101 to VC-105, one `it`/`it.each` row per spec input. |
 | `tests/unit/domain/decks.test.ts` | VC-106 to VC-108; deep-freeze check; `DeckDefinitionSchema` parses both decks; `CardSchema` parses every built card. |
 | `tests/unit/domain/presets.test.ts` | VC-109 to VC-113; expected presets are hand-written literals (never imported from `presets.ts`); prototype-key ids. |
 | `tests/unit/domain/rule-set-schema.test.ts` | VC-114: one `it.each` row per mutation, each on a fresh `getPreset('spain-ludoteka')`; valid-bound rows. |
+| `tests/unit/domain/game-state-schema.test.ts` | VC-115: playing fixture (mexico-bazas, 3 seats, `lastTrick`, one completed hand, seat 2 `strategy: 'random'`) and its `hand: null`/`game-over` variant parse and deep-equal; one `it.each` row per mutation (VC list + FR-116 extras + D-009 + nested strictness). |
+| `tests/unit/domain/game-event-schema.test.ts` | VC-116: one valid example per event type (parse deep-equals input); the four invalid VC rows. |
+| `tests/unit/domain/types.test.ts` | VC-117: imports every Module-exports name from its module; `expectTypeOf` not-`any` checks, exact value signatures, and `toEqualTypeOf` of the 13 FR-118 types against hand-copied `Exp*` shapes (D-011). Checked by `pnpm typecheck`; runs as 7 trivial tests in Vitest. |
 | `src/config.ts` | Phase 0 env config; its `DEFAULT_RULES_PRESET` check stays a literal list (spec 01 Scope Out). |
 | `eslint.config.mjs`, `tools/eslint-rules/layer-boundaries.mjs` | Layer rule: `src/domain` may import only its own files and `zod` / `@noble/hashes`. |
 | `specs/01-domain-model-plan-artifacts/` | This artifact directory. |
@@ -55,6 +59,58 @@ export const RuleSetSchema;          // strict at every level, every field requi
   //           mustOvertrump: boolean, whenCannotOvertrump: 'any-trump' | 'any-card' },
   //   scoring: ScoringSpecSchema, tieBreak: 'fewest-misses' | 'shared' }
 ```
+
+```ts
+// Game state and events (Iteration 3). Private helpers: nonNegativeInt = z.int().min(0),
+// positiveInt = z.int().min(1), knownSuit = z.string() refined to KNOWN_SUITS, handPlan = z.array(positiveInt).
+export const SeatInfoSchema;    // strict { seat: >=0, playerId: string, name: string, kind: 'human'|'ai', strategy?: string }
+export const TrickPlaySchema;   // strict { seat: >=0, card: CardSchema }
+export const HandStateSchema;   // strict { cardsPerPlayer: >=1, dealer: >=0, trumpCard: Card, trumpCardInDealerHand: boolean,
+                                //   trumpSuit: knownSuit, hands: Card[][], bids: (>=0 | null)[], tricksWon: (>=0)[],
+                                //   currentTrick: strict { leader: >=0, plays: TrickPlay[] },
+                                //   lastTrick?: strict { winner: >=0, plays: TrickPlay[] }, toAct: >=0 }
+export const HandResultSchema;  // strict { handIndex: >=0, cardsPerPlayer: >=1, dealer: >=0, trumpSuit: knownSuit, bids: (>=0)[], tricks: (>=0)[] }
+export const GameStateSchema;   // strict { schemaVersion: 1, gameId: non-empty, rules: RuleSetSchema, handPlan, seats: SeatInfo[],
+                                //   seed: non-empty, aiDecisionCount: >=0, phase: 'bidding'|'playing'|'game-over', handIndex: >=0,
+                                //   hand: HandStateSchema.nullable() (key required), completedHands: HandResult[], version: >=0 }
+export const GameEventSchema;   // discriminatedUnion('type'), every variant strict:
+  // game-started { seats, handPlan } | hand-dealt { handIndex, dealer, cardsPerPlayer >=1, trumpCard, trumpCardInDealerHand }
+  // | bid-made { seat, tricks } | card-played { seat, card } | trick-won { seat, trickNumber >=1 }
+  // | hand-completed { handIndex, result: HandResult } | game-over {}
+```
+
+Only optional schema fields: `SeatInfo.strategy`, `HandState.lastTrick`.
+
+### `@/src/domain/types` (types only)
+
+```ts
+export type SeatInfo = z.infer<typeof SeatInfoSchema>;
+export type TrickPlay = z.infer<typeof TrickPlaySchema>;
+export type HandState = z.infer<typeof HandStateSchema>;
+export type HandResult = z.infer<typeof HandResultSchema>;
+export type GameState = z.infer<typeof GameStateSchema>;
+export type Phase = GameState['phase'];               // 'bidding' | 'playing' | 'game-over' (D-010)
+export type GameEvent = z.infer<typeof GameEventSchema>;
+// Hand-written, exactly as the spec's listings (never persisted, no schema):
+export type Move = { type: 'bid'; seat: number; tricks: number } | { type: 'play'; seat: number; card: Card };
+export interface LegalMove { id: string; move: Move }                 // "bid:3", "play:QH"
+export interface Transition { state: GameState; events: GameEvent[] }
+export interface Rng { int(min: number, max: number): number; shuffle<T>(items: readonly T[]): T[] }
+export interface HandScore; ScoreBoard; TableView; PlayerView extends TableView; PlayerUpdate; DecisionContext;
+export type Decision = { type: 'move'; moveId: string } | { type: 'await' };
+// Score/view/player shapes: see spec 01 "Score, view and player types"; behavior is Phases 2–4.
+```
+
+### Domain export map (spec FR-119; no barrel)
+
+| Module | Exports |
+|---|---|
+| `@/src/domain/schemas` | `CardSchema`, `DeckDefinitionSchema`, `BoundSchema`, `SegmentSchema`, `HandSequenceSpecSchema`, `ScoringSpecSchema`, `RuleSetSchema`, `SeatInfoSchema`, `TrickPlaySchema`, `HandStateSchema`, `HandResultSchema`, `GameStateSchema`, `GameEventSchema`; helpers `KNOWN_SUITS`, `KNOWN_RANKS`, `PresetIdSchema` |
+| `@/src/domain/cards` | types `Suit`, `Rank`, `Card`; `InvalidCardError`, `cardId`, `parseCard`, `compareRanks` |
+| `@/src/domain/decks` | type `DeckDefinition`; `FRENCH_52`, `SPANISH_40`, `buildDeck` |
+| `@/src/domain/rules` | types `Bound`, `Segment`, `HandSequenceSpec`, `ScoringSpec`, `PresetId`, `RuleSet` |
+| `@/src/domain/presets` | `PRESET_IDS`, `DEFAULT_PRESET_ID`, `UnknownPresetError`, `getPreset` |
+| `@/src/domain/types` | types `Phase`, `SeatInfo`, `TrickPlay`, `HandState`, `HandResult`, `GameState`, `Move`, `LegalMove`, `GameEvent`, `Transition`, `Rng`, `HandScore`, `ScoreBoard`, `TableView`, `PlayerView`, `PlayerUpdate`, `DecisionContext`, `Decision` |
 
 ### `@/src/domain/rules` (types only)
 
@@ -104,11 +160,14 @@ export function buildDeck(deck: DeckDefinition, players: number): Card[];
 ## Conventions & invariants
 
 - **Domain purity** (spec BR-104, plan rule 8): `src/domain` imports only `zod` and its own files; no randomness, I/O or `Date`. Purity grep: `grep -rnE 'Math\.random|new Date|Date\.now|crypto\.|fetch\(|process\.|performance\.' src/domain` must find nothing.
-- **Schemas are the source of truth** (FR-118): `Card`, `DeckDefinition` and later `Bound`, `Segment`, `HandSequenceSpec`, `ScoringSpec`, `RuleSet`, `SeatInfo`, `TrickPlay`, `HandState`, `HandResult`, `GameState`, `GameEvent` are `z.infer<typeof …Schema>`; never write them by hand.
+- **Schemas are the source of truth** (FR-118): `Card`, `DeckDefinition`, `Bound`, `Segment`, `HandSequenceSpec`, `ScoringSpec`, `RuleSet`, `SeatInfo`, `TrickPlay`, `HandState`, `HandResult`, `GameState`, `GameEvent` are `z.infer<typeof …Schema>`; never write them by hand.
 - **Type modules** = `cards.ts`, `decks.ts`, `rules.ts`, `types.ts`. They may import `schemas.ts`; between each other they use `import type` only (no runtime cycles). `schemas.ts` imports only `zod`. Today `cards.ts`, `decks.ts` and `rules.ts` import `zod` and `schemas.ts` as `import type` too (only `z.infer` is needed). `presets.ts` is not a type module: it value-imports `./decks` and `./schemas` and type-imports `./rules`.
 - `schemas.ts` may export helpers beyond the spec's Module exports table (e.g. `KNOWN_SUITS`, `KNOWN_RANKS`) — D-001.
 - Card schema uses `z.string().refine(...)`, not `z.enum`, so `Suit`/`Rank` infer as `string`. It validates against the union of both decks; per-game deck membership is the engine's job (Phase 2).
-- Schemas are strict objects (`z.strictObject`) at every level; unknown keys are rejected.
+- Schemas are strict objects (`z.strictObject`) at every level, including every union variant; unknown keys are rejected. `grep -nE 'z\.object\(|looseObject|passthrough' src/domain/schemas.ts` finds nothing.
+- `GameStateSchema` validates shape only (cards against the union of both decks, `KNOWN_*`); per-game consistency (deck membership, array lengths = seat count, phase/hand agreement) is Phase 2 invariants.
+- **Changing a persisted shape**: edit the schema, the spec listing, and the matching `Exp*` type in `tests/unit/domain/types.test.ts` (D-011); `pnpm typecheck` fails until they agree.
+- `DEFAULT_PRESET_ID` is a widening `const` literal: `expectTypeOf(DEFAULT_PRESET_ID)` sees `string`; use `typeof DEFAULT_PRESET_ID`.
 - Deck constants are deeply frozen (D-003); `buildDeck` returns fresh, unfrozen arrays and card objects. Presets clone decks with `structuredClone` (a clone of a frozen object is unfrozen) and are then deep-frozen themselves (D-006).
 - `removeRanksForPlayers` lookups use `Object.hasOwn` with `String(players)`.
 - **Presets**: `getPreset` returns a fresh deep clone (callers may mutate it). The internal presets are deeply frozen. Integers in schemas use `z.int()` (rejects non-integers and unsafe integers).
@@ -135,7 +194,8 @@ pnpm prints an "Unsupported engine" WARN locally (Node 26 vs declared 24); not f
 
 ## Known gaps
 
-- Game state/event schemas and `types.ts` not yet built (Iteration 3); the type-level `expectTypeOf` checks for rule types come with VC-117 there.
+- Persistence types `GameMeta`, `Commit`, `CommitBody` and their schemas are deferred to Phase 6 (`state/schemas.ts`), per spec 01 Scope Out.
+- Score, view and player types (`HandScore` … `Decision`) are hand-written shapes with no behavior; Phases 2–4 implement them.
 - Hand-sequence expansion (bounds → hand plan) and the intended hand counts are Phase 2; nothing validates semantic sanity of a sequence (e.g. `range 5→max` with max < 5).
 - `DeckDefinitionSchema` does not restrict `suits`/`ranksHighToLow` to `KNOWN_SUITS`/`KNOWN_RANKS` (spec does not require it).
 - `docs/design.md` §4.1–4.3 not yet aligned (Iteration 4).

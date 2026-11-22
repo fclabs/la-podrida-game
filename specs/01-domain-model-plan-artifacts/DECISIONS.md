@@ -47,3 +47,21 @@
 **Decision**: The segment mutation replaces `handSequence[0]`; every bound case (invalid `{offset:['max',1]}` and the three valid ones) is set as `handSequence[0].to` of a fresh `spain-ludoteka` preset. `players` is `strict { min: int >= 2, max: int >= 2 }` plus a refine `min <= max` (issue path `players.max`). Integers use Zod 4 `z.int()`.
 **Rejected**: appending extra segments (also valid, but replacing isolates the bound under test).
 **Consequences**: Each VC-114 row fails solely because of its mutation (the base preset parses).
+
+## D-009: Game-state schema latitude: non-empty `gameId`, known `trumpSuit`, positive `handPlan`  (Iteration 3)
+**Context**: The readiness review left latitude on a few `GameState` fields the spec types only as `string` / `number[]`.
+**Decision**: Plan decision. `gameId` is `z.string().min(1)`; `HandState.trumpSuit` and `HandResult.trumpSuit` are strings refined to `KNOWN_SUITS` (still infer `string`); `handPlan` entries are integers ≥ 1. The same private `handPlan` schema is reused for the `game-started` event, so the event and the state cannot disagree. `SeatInfo.playerId`/`name` stay plain `z.string()` (spec silent).
+**Rejected**: per-deck membership of `trumpSuit` (the schema validates shape; Phase 2 invariants check the game's deck).
+**Consequences**: `gameId: ''`, `trumpSuit: 'X'`, `handPlan: [0]` are rejected (tested in `game-state-schema.test.ts`).
+
+## D-010: `Phase` is `GameState['phase']`; other non-persisted types are hand-written  (Iteration 3)
+**Context**: `Phase` is listed separately in the spec but is also the inferred type of `GameState.phase` (R-016).
+**Decision**: Plan decision. `types.ts` defines `Phase = GameState['phase']`; `Move`, `LegalMove`, `Transition`, `Rng`, `HandScore`, `ScoreBoard`, `TableView`, `PlayerView`, `PlayerUpdate`, `DecisionContext`, `Decision` are written by hand exactly as in the spec (no schema; never persisted). `types.ts` type-imports `Card` from `./cards` and the schemas from `./schemas`.
+**Rejected**: a separate `PhaseSchema` export (not in the Module exports table; would add a second source).
+**Consequences**: The phase list lives only in `GameStateSchema`. Score/view/player types are shapes only; behavior arrives in Phases 2–4.
+
+## D-011: VC-117 expected shapes are self-contained `Exp*` types  (Iteration 3)
+**Context**: R-013/R-014: the type test must reference every import and compare each FR-118 type exactly.
+**Decision**: `types.test.ts` copies the spec listings into local `Exp*` types that reference each other (e.g. `ExpGameState.hand: ExpHandState | null`), never the imported inferred types, so one schema change fails every assertion that contains it. Values are checked with `not.toBeAny()` or exact function signatures; `DEFAULT_PRESET_ID` is checked as `typeof DEFAULT_PRESET_ID` because passing a widening `const` literal to `expectTypeOf(value)` infers `string`.
+**Rejected**: comparing against the imported types (a drift in `Card` would hide in `HandState`).
+**Consequences**: Changing a persisted shape requires updating the spec listing and the matching `Exp*` type.

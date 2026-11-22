@@ -158,3 +158,100 @@ export const RuleSetSchema = z.strictObject({
   scoring: ScoringSpecSchema,
   tieBreak: z.enum(['fewest-misses', 'shared']),
 });
+
+/** A non-negative integer (≥ 0): a seat index, a hand index, a bid, a trick count, a version. */
+const nonNegativeInt = z.int().min(0);
+
+/** A suit letter from `KNOWN_SUITS`, typed as `string` (like `CardSchema.suit`). */
+const knownSuit = z
+  .string()
+  .refine((suit) => KNOWN_SUITS.includes(suit), { message: 'Unknown suit' });
+
+/** A game's hand plan: the card count of each hand, in order (integers ≥ 1). */
+const handPlan = z.array(positiveInt);
+
+/** A seat at the table. `strategy` (optional) names the AI strategy of an `ai` seat. */
+export const SeatInfoSchema = z.strictObject({
+  seat: nonNegativeInt,
+  playerId: z.string(),
+  name: z.string(),
+  kind: z.enum(['human', 'ai']),
+  strategy: z.string().optional(),
+});
+
+/** One card played into a trick by a seat. */
+export const TrickPlaySchema = z.strictObject({
+  seat: nonNegativeInt,
+  card: CardSchema,
+});
+
+/** The hand in progress. `bids[i]` is `null` until seat `i` bids; `lastTrick` is optional. */
+export const HandStateSchema = z.strictObject({
+  cardsPerPlayer: positiveInt,
+  dealer: nonNegativeInt,
+  trumpCard: CardSchema,
+  trumpCardInDealerHand: z.boolean(),
+  trumpSuit: knownSuit,
+  hands: z.array(z.array(CardSchema)),
+  bids: z.array(nonNegativeInt.nullable()),
+  tricksWon: z.array(nonNegativeInt),
+  currentTrick: z.strictObject({ leader: nonNegativeInt, plays: z.array(TrickPlaySchema) }),
+  lastTrick: z.strictObject({ winner: nonNegativeInt, plays: z.array(TrickPlaySchema) }).optional(),
+  toAct: nonNegativeInt,
+});
+
+/** The outcome of a completed hand: every seat's bid and tricks taken. */
+export const HandResultSchema = z.strictObject({
+  handIndex: nonNegativeInt,
+  cardsPerPlayer: positiveInt,
+  dealer: nonNegativeInt,
+  trumpSuit: knownSuit,
+  bids: z.array(nonNegativeInt),
+  tricks: z.array(nonNegativeInt),
+});
+
+/**
+ * A game's full persisted state. `hand` is required and is `null` when no hand is in progress
+ * (e.g. at game over). Shape only: per-game consistency (deck membership, seat counts) is checked
+ * by the engine's invariants.
+ */
+export const GameStateSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  gameId: z.string().min(1),
+  rules: RuleSetSchema,
+  handPlan,
+  seats: z.array(SeatInfoSchema),
+  seed: z.string().min(1),
+  aiDecisionCount: nonNegativeInt,
+  phase: z.enum(['bidding', 'playing', 'game-over']),
+  handIndex: nonNegativeInt,
+  hand: HandStateSchema.nullable(),
+  completedHands: z.array(HandResultSchema),
+  version: nonNegativeInt,
+});
+
+/** A game event, discriminated by `type`. Every variant is strict (no missing or extra fields). */
+export const GameEventSchema = z.discriminatedUnion('type', [
+  z.strictObject({
+    type: z.literal('game-started'),
+    seats: z.array(SeatInfoSchema),
+    handPlan,
+  }),
+  z.strictObject({
+    type: z.literal('hand-dealt'),
+    handIndex: nonNegativeInt,
+    dealer: nonNegativeInt,
+    cardsPerPlayer: positiveInt,
+    trumpCard: CardSchema,
+    trumpCardInDealerHand: z.boolean(),
+  }),
+  z.strictObject({ type: z.literal('bid-made'), seat: nonNegativeInt, tricks: nonNegativeInt }),
+  z.strictObject({ type: z.literal('card-played'), seat: nonNegativeInt, card: CardSchema }),
+  z.strictObject({ type: z.literal('trick-won'), seat: nonNegativeInt, trickNumber: positiveInt }),
+  z.strictObject({
+    type: z.literal('hand-completed'),
+    handIndex: nonNegativeInt,
+    result: HandResultSchema,
+  }),
+  z.strictObject({ type: z.literal('game-over') }),
+]);
