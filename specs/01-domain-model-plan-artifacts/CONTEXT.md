@@ -7,7 +7,7 @@ Last updated by: Iteration 4 (Design doc alignment, developer docs and CI check)
 - Phase 0 scaffold is complete (see `specs/00-project-scaffold-frozen.md`): Next.js 16.4.6, TypeScript 6.0.3 `strict`, pnpm 10.15.1, Node 24 declared, Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7, layer-boundary lint rule, GitHub Actions CI.
 - `src/domain` is code-complete for Phase 1: `schemas.ts`, `cards.ts`, `decks.ts` (spec 01 FR-101 to FR-109), `rules.ts`, `presets.ts` (FR-110 to FR-115), and the state/event schemas plus `types.ts` (FR-116 to FR-119).
 - Docs: `docs/design.md` §4.1–4.3 match spec 01 (FR-120: required `removeRanksForPlayers: Record<string, Rank[]>`, `type PresetId` + `RuleSet.id: PresetId`, `offset` bound, all four preset sequences and hand counts). `docs/development.md` §9 "Domain model" documents the domain for developers; Known limitations is now §10.
-- Branch `spec/01-domain-model` pushed to `origin`; CI result recorded in `iterations/04-docs-ci.md`. No PR opened yet (orchestrator's job).
+- Branch `spec/01-domain-model` pushed to `origin`; CI run 45084646885 on `2d1fbfa` succeeded (install, typecheck, lint, test, build); details in `iterations/04-docs-ci.md`. No PR opened yet (orchestrator's job).
 - Phase 1 is complete; next is Phase 2 (engine).
 - Tests: `tests/unit/domain/cards.test.ts` (VC-101 to VC-105), `decks.test.ts` (VC-106 to VC-108 plus deck/card schema checks), `presets.test.ts` (VC-109 to VC-113), `rule-set-schema.test.ts` (VC-114), `game-state-schema.test.ts` (VC-115), `game-event-schema.test.ts` (VC-116), `types.test.ts` (VC-117, type-level). `pnpm test`: 10 files, 215 tests.
 

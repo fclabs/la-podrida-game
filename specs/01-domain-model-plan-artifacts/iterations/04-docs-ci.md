@@ -17,14 +17,20 @@
 | VC-119 suite | `pnpm install --frozen-lockfile && pnpm typecheck && pnpm lint && pnpm test && pnpm test:sim && pnpm build` | PASS — exit 0; ESLint 0 warnings, "All matched files use Prettier code style!", 10 files / 215 tests, sim "No test files found, exiting with code 0", build compiled |
 | VC-119 dependencies | `node -e "console.log(Object.keys(require('./package.json').dependencies).join(', '))"` | PASS — `next, react, react-dom, zod` |
 | VC-119 purity | `grep -rnE 'Math\.random\|new Date\|Date\.now\|crypto\.\|fetch\(\|process\.\|performance\.' src/domain` | PASS — no matches (exit 1) |
-| VC-119 CI | `git push -u origin spec/01-domain-model`; `gh run list --branch spec/01-domain-model`; `gh run watch <id>` | See "CI verification" below |
+| VC-119 CI | `git push -u origin spec/01-domain-model`; `gh run list --branch spec/01-domain-model`; `gh run watch <id>` | PASS — run 45084646885 `success` (see "CI verification" below) |
 | Docs section exists | `grep -n "^## 9. Domain model" docs/development.md` | PASS — line 229, subsections 9.1–9.6 |
 | No internal references | `grep -nE 'specs/\|VC-\|artifact' docs/development.md` | PASS — no matches (exit 1) |
 | Every decision reflected or internal | manual check | PASS — D-001 (helper exports) §9.4; D-002 (`import type`) §9.5; D-003 (frozen decks) §9.2; D-004 (quoted input) §9.2; D-005 (prototype keys) §9.3; D-006 (clones, two `deepFreeze` copies) §9.3/§9.5; D-007 (`PresetIdSchema` single id source) §9.3; D-009 (non-empty `gameId`, known `trumpSuit`, `handPlan` ≥ 1) §9.4; D-010 (`Phase`, hand-written types) §9.4; D-011 (`Exp*` shapes) §9.4 "Changing a persisted shape"; D-012 this record. **Internal**: D-008 (VC-114 test-row placement and `players` refine path) |
 
 ## CI verification
 
-Pending at the time of the main commit; recorded in the follow-up commit `Record Phase 1 CI verification results`.
+Recorded in the follow-up commit `Record Phase 1 CI verification results`.
+
+| Criterion | Command | Result |
+|---|---|---|
+| VC-119 CI (branch run) | `git push -u origin spec/01-domain-model` → new branch on `origin`; `gh run list --branch spec/01-domain-model`; `gh run watch 45084646885 --exit-status`; `gh run view 45084646885 --json conclusion,headSha,jobs` | PASS — run **45084646885** (https://github.com/fclabs/la-podrida-game/actions/runs/45084646885), head `2d1fbfa`, conclusion `success`; job "Install, typecheck, lint, test, build": Install, Typecheck, Lint, Test, Build all `success` |
+
+This follow-up commit (artifacts only) triggers one more CI run on the same code; its result is reported to the orchestrator, not recorded here.
 
 ## Files
 
