@@ -36,3 +36,31 @@ Decisions locked in while building `specs/04-players.md` from `specs/04-players-
 - **Decision**: at the top of each iteration, after `currentActor`, `if (moves >= maxMoves && state.seats[seat].kind === 'ai') throw new AiLoopLimitError(moves, state)`. A human actor at the cap is still asked (and answers `await`); game over at the cap returns normally. The kind is read from `state.seats` (already proven equal to `players[seat].kind` by FR-410's check).
 - **Rejected**: throwing right after the `maxMoves`-th move (would reject a game that ends or reaches a human on exactly that move).
 - **Consequences**: `error.state` is the state after `maxMoves` moves with an AI to act; `error.moves === maxMoves` (VC-409).
+
+## D-006: Simulated games use the P-4 input  (Iteration 3, plan P-4)
+
+- **Context**: the sim suite (and later the CLI) needs one fixed `createGame` input per seed so determinism and replay compare like with like.
+- **Decision**: `tests/sim/harness.ts` `simInput(presetId, players, seed)` = `{ gameId: 'sim', rules: getPreset(presetId), seats: simSeats(players), seed }` with `seats[i] = { seat: i, playerId: 'ai-<i>', name: 'AI <i>', kind: 'ai' }` (no `strategy` → `random`). Test seeds are `sim-<presetId>-<players>-<i>`.
+- **Rejected**: reusing `tests/unit/engine/helpers.ts` `makeSeats` (human seats, other ids).
+- **Consequences**: Iteration 4's CLI should build the same input (seeds `<prefix>-<i>`).
+
+## D-007: Sim deep equality via `isDeepStrictEqual`, `expect` only on mismatch  (Iteration 3, plan P-6)
+
+- **Context**: replay compares ~1,000 states and scoreboards per game; `expect(...).toEqual` per step is slow.
+- **Decision**: `expectDeepEqual(actual, expected, label)` in the harness calls `node:util` `isDeepStrictEqual` and only on a mismatch calls `expect({ label, actual }).toEqual({ label, actual: expected })` to get vitest's diff. Per-move FR-414 checks throw a plain `Error` (`move <k>: …`) from `onTransition` instead of calling `expect`.
+- **Rejected**: `expect().toEqual` per step; custom JSON-string comparison (hides `undefined` vs absent keys).
+- **Consequences**: a failure message names the move (`move <k>` / `replayed state after move <k>`); the seed is in the test name.
+
+## D-008: Ledger also checks the card was dealt to the seat that plays it  (Iteration 3)
+
+- **Context**: FR-415 requires a played card to be in the dealt set and not yet played; VC-412 corrupts a `card-played` to "a card not in that seat's hand", which may still be in the dealt set (another seat's card).
+- **Decision**: the ledger records, per hand, card id → seat dealt to; a `card-played` whose card was dealt to another seat fails at that event (`card X played by seat s was dealt to seat t`). Everything FR-415 lists is checked too.
+- **Rejected**: only the FR-415 minimum (such a corruption would still fail, but later, at the after-transition conservation check, with a less direct message).
+- **Consequences**: stricter than the spec, never looser. Ledger errors are `LedgerError` with messages `ledger: hand <k>: …`.
+
+## D-009: `SIM_SEEDS` is validated when the harness module loads; determinism re-runs without checks  (Iteration 3)
+
+- **Context**: FR-413 says an invalid `SIM_SEEDS` fails "at load"; FR-416 needs a second run of the first 10 seeds.
+- **Decision**: `harness.ts` exports `SIM_SEEDS = simSeeds(process.env.SIM_SEEDS)` at module scope (`^[1-9][0-9]*$`, unset/empty → 200, else `Error` containing `"<value>"`). Every sim file imports the harness (the ledger test too), so all 5 files fail to load and `pnpm test:sim` exits 1. The FR-416 second run uses `playSimGame(..., { check: false })` and compares the full event log (`createGame`'s events included).
+- **Rejected**: checking `SIM_SEEDS` inside a test (a typo would still register 0 or 200 tests); repeating the per-move checks on the second run (same moves, same states — pure cost).
+- **Consequences**: `pnpm test:sim` has 18 × S + 5 tests (3,605 at S = 200; 59 at S = 3).
