@@ -1,11 +1,11 @@
 # CONTEXT — Game Engine (Phase 2)
 
-Last updated by: Reconciliation of group A (Iterations 6 table view and 7 invariants)
+Last updated by: Iteration 8 (design and developer documentation). **Phase 2 is complete**; next is verify-spec.
 
 ## Current state
 
 - Phase 0 scaffold and Phase 1 domain model are complete (see `specs/00-project-scaffold-frozen.md`, `specs/01-domain-model-frozen.md`). Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (no `noUncheckedIndexedAccess`), pnpm 10.15.1, Node 24 declared, Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7, layer-boundary lint rule, GitHub Actions CI.
-- `@noble/hashes` 2.4.0 is now a runtime dependency (exact pin). `dependencies` = `@noble/hashes, next, react, react-dom, zod` (spec NFR-202).
+- `@noble/hashes` 2.4.0 is a runtime dependency (exact pin). `dependencies` = `@noble/hashes, next, react, react-dom, zod` (spec NFR-202).
 - `src/engine/rng.ts` is done (spec FR-200 to FR-205): `rngFromSource`, `createXoshiro128ss`, `deriveRng`. `src/engine/.gitkeep` was deleted.
 - `src/engine/sequence.ts` is done (spec FR-207 to FR-210): `maxCardsPerPlayer`, `expandHandSequence`.
 - `src/engine/bidding.ts` (FR-222 `legalBids`), `src/engine/play.ts` (FR-224 `legalPlays`), `src/engine/trick.ts` (FR-225 `trickWinner`) are done.
@@ -13,7 +13,7 @@ Last updated by: Reconciliation of group A (Iterations 6 table view and 7 invari
 - `tests/unit/engine/helpers.ts` has builders `card`, `cards`, `trick`, `rulesWith`, `makeHand`, `makeSeats`, `newGame`, `withHand`, and the game driver `playGame` with policies `firstMove` / `lastMove` (types `Policy`, `PlayedMove`, `PlayedGame`). **Frozen for Iterations 6–7: import, never modify.**
 - `src/engine/view.ts` is done (spec FR-219 for views, FR-236 to FR-238, BR-205): `tableViewFor`.
 - `src/engine/invariants.ts` is done (spec FR-239, FR-240): `checkInvariants`.
-- Not yet built: docs (8).
+- Docs are done: `docs/design.md` §4.4 (first dealer drawn before the shuffle) and §4.5 (exact stream derivation, dealing order, sorted hands, game-over shape); `docs/development.md` §10 Engine (10.1 module map … 10.8 gotchas), Known limitations renumbered to §11, §1/§2/§9 cross-references updated.
 - Tests: `pnpm test` = 22 files, 481 tests (engine dir: 12 files, 266 tests; Iteration 6 added view 24, Iteration 7 added invariants 35).
 - NFR-203 measured locally: 981 moves, median ≈ 45 ms (limit 250 ms).
 
@@ -45,8 +45,8 @@ Last updated by: Reconciliation of group A (Iterations 6 table view and 7 invari
 | `src/domain/*.ts` | Phase 1 domain (schemas, cards, decks, rules, types, presets). Use, never redefine. |
 | `eslint.config.mjs`, `tools/eslint-rules/layer-boundaries.mjs` | Layer rule. `CORE_EXTERNALS = ['zod', '@noble/hashes']` (subpaths allowed). `engine` may import only `domain`. |
 | `vitest.config.ts` | Includes `tests/{unit,contract,api}/**/*.test.ts`. |
-| `docs/development.md` | Developer guide (§1–§10). Iteration 8 adds an "Engine" section. |
-| `docs/design.md` | System design. Iteration 8 edits §4.4–4.5 (FR-242). |
+| `docs/development.md` | Developer guide. §10 Engine (module map, usage example, determinism, invariants, `ENGINE_VERSION`, `@noble/hashes`, tests, gotchas); §11 Known limitations. README links `#5-configuration`: never renumber §1–§9. |
+| `docs/design.md` | System design. §4.4–4.5 describe dealing and the random streams exactly as implemented. |
 | `specs/02-engine-plan-artifacts/` | This artifact directory. |
 
 ## Public interfaces
@@ -268,10 +268,18 @@ pnpm prints an "Unsupported engine" WARN locally (Node 26 vs declared 24) and "I
 
 ## Known gaps
 
-- Docs (8) are not built yet.
 - `view.ts` duplicates `engine.ts`'s private `assertSeatInRange` (D-006); a later change could export it from `engine.ts` and drop the copy.
 - `checkInvariants` has no rule bounding `cardsPerPlayer` by the deck: a state with an oversized `cardsPerPlayer` that still satisfies (c) and (h) reports nothing, and (f) is skipped for it (D-009).
 - With the first-legal-move policy every bid is `0` (the dealer's forbidden value is `cardsPerPlayer`), so golden `completedHands` bids are all zero; `lastMove` gives non-trivial bids.
 - `legalPlays` / `trickWinner` assume cards belong to `deck` (`compareRanks` throws `InvalidCardError` otherwise); they do not validate seats or turn.
 - `int` accepts any `Number.isInteger` bounds, including unsafe integers beyond 2^53 (results there are imprecise); the spec only requires integers. Engine callers use small ranges.
-- `docs/development.md` still says `@noble/hashes` "is added when the engine needs hashing"; Iteration 8 updates the docs.
+- `docs/design.md` §5.6 (invariants) is a prose summary; the authoritative rule list with tags is `checkInvariants` and `docs/development.md` §10.4. §5.1's `GameEngine` interface is conceptual (functions live in `engine.ts` and `view.ts`; `aiRng` is not listed there).
+
+## Hand-off to Phase 3/4
+
+- **Score Engine (Phase 3)** reads state only, never calls the engine and is never imported by it. Input: `GameState.completedHands: HandResult[]`, each `{ handIndex, cardsPerPlayer, dealer, trumpSuit, bids: number[], tricks: number[] }` with `sum(tricks) === cardsPerPlayer` and every bid set; one entry per finished hand, in order (`handPlan.length` entries at game over). For `live` status read `state.hand` (`bids` may hold `null` during bidding; `tricksWon`, `cardsPerPlayer`, completed tricks = `sum(tricksWon)`). `hand` is `null` at game over; `handIndex` stays at the last hand. Raw facts also arrive as `hand-completed { handIndex, result }` events.
+- **AI randomness (Phase 4)**: `aiRng(state, seat)` = `deriveRng(state.seed, 'ai', seat, state.aiDecisionCount)`. Call it for the deciding AI seat *before* `applyMove` (which then increments `aiDecisionCount` for AI seats only). Never use the deal stream; the engine never draws from the AI stream, so strategies cannot change deals.
+- **Game loop / simulator (Phase 4)**: the `playGame`-style loop is `for (seat = currentActor(s); seat !== null; seat = currentActor(s)) { moves = legalMoves(s, seat); s = applyMove(s, seat, choose(moves).id).state }` (see `tests/unit/engine/helpers.ts` and `docs/development.md` §10.2). `legalMoves` is never empty for the actor of a valid state. Call `checkInvariants(state)` after every move and assert `[]`; card conservation across a hand (hands + played + stock = deck) is the simulator's own ledger from `hand-dealt`/`card-played` events plus the initial state, since the stock is not stored.
+- **Views (Phase 4/7)**: `PlayerView = { ...tableViewFor(state, seat), scoreboard, finalRanking }`; the table view is already a fresh copy and leaks nothing (no other hands except the public dealer trump, no seed/rules/`aiDecisionCount`).
+- **Service/persistence (Phases 6–8)**: generate the seed server-side; `createGame` validates input (`InvalidGameSetupError.problems`); set `version` per commit (the engine never changes it); store `ENGINE_VERSION` in game metadata for replay. Replay = `createGame` + apply each `bid-made` (`bid:<tricks>`) / `card-played` (`play:<cardId>`) event in order.
+- **Changing engine behaviour**: bump `ENGINE_VERSION` and `GOLDEN_ENGINE_VERSION` together before updating `golden.test.ts` literals (`docs/development.md` §10.5).
