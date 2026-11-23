@@ -90,3 +90,9 @@
 ## D-020: Blob contract wrapper and cleanup  (Iteration 3)
 **Decision**: `PrefixedObjectStore(inner, namespace)` in `tests/contract/prefixed-store.ts` (validates the namespace as a prefix in the constructor). The Blob file's `afterAll` first lists every page under `contract/<runId>/`, then deletes page by page, so deletions never disturb an open cursor. Each test's `cleanup` is a no-op.
 **Consequences**: verified ad hoc over a shared `MemoryObjectStore` (not committed; outside Touches).
+
+## D-021: Documentation scope choices  (Iteration 4)
+**Context**: The plan limits doc edits to architecture §6.1, a new development.md §13, stale lines elsewhere in development.md, and README lines that are now false.
+**Decision**: (1) architecture §6.3 item 3 keeps its "optionally with `ifMatch`" design note but gains a clause that the `ObjectStore` interface does not offer `ifMatch` yet (§6.1 now says so explicitly; otherwise the two would contradict). (2) development.md §1 (dependency table and list) is also updated for `@vercel/blob`, and §5 gains a rule that `createObjectStore`, not `loadConfig`, checks the Blob credentials; both were stale. (3) README is left unchanged: no line describes storage, and its pre-existing "currently holds the project foundation" sentence predates this phase.
+**Rejected**: rewriting §6.3/§5 of the architecture for the uncached-everywhere reads (§6.3 item 2 states a fact — immutable data is safe to cache — not what the driver does; §6.1 covers the current behaviour).
+**Consequences**: when Phase 5b verifies the Blob assumptions, update architecture §6.1 "Blob caveats", development.md §13.7 and §14.

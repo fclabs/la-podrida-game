@@ -168,26 +168,70 @@ sequenceDiagram
 
 ### 6.1 `ObjectStore` abstraction
 
+`src/storage` stores **bytes under string keys** and knows nothing about games: the key layout (§6.2) and the document schemas (§6.4) belong to the state layer. It works this way so the three drivers stay interchangeable and each can be tested on its own (AD-3). Inside `src`, storage imports only `src/config.ts`; otherwise it uses `zod` types, Node built-ins and `@vercel/blob`.
+
 ```ts
+// src/storage/object-store.ts
+interface StoredObject { body: Uint8Array }
+interface PutOptions  { mode?: 'create-only' | 'overwrite'; contentType?: string }  // mode defaults to 'create-only'
+interface ListOptions { cursor?: string; limit?: number }                          // limit: integer 1–1000, default 1000
+interface ListResult  { keys: string[]; cursor?: string }
+
 interface ObjectStore {
-  get(key: string): Promise<StoredObject | null>;          // null if missing
-  put(key: string, body: Uint8Array | string,
-      opts?: { mode?: 'create-only' | 'overwrite'; contentType?: string }): Promise<void>;
-                                                           // create-only on existing key → ObjectExistsError
+  get(key: string): Promise<StoredObject | null>;                      // null if missing
+  put(key: string, body: Uint8Array | string, opts?: PutOptions): Promise<void>;
   exists(key: string): Promise<boolean>;
-  list(prefix: string, opts?: { cursor?: string; limit?: number }): Promise<{ keys: string[]; cursor?: string }>;
-  delete(keys: string[]): Promise<void>;
+  list(prefix: string, opts?: ListOptions): Promise<ListResult>;
+  delete(keys: readonly string[]): Promise<void>;
 }
-// Helpers: getJson(store, key, zodSchema), putJson(store, key, value, opts)
+
+getJson(store, key, zodSchema): Promise<z.output<typeof zodSchema> | null>;
+putJson(store, key, value, opts?: { mode?: 'create-only' | 'overwrite' }): Promise<void>;
+
+// src/storage/index.ts
+createObjectStore(config: Config): ObjectStore;   // picks the driver from STORAGE_DRIVER (§9)
 ```
 
-| Implementation | Used for | Notes |
-|---|---|---|
-| `MemoryObjectStore` | Unit, simulation and API tests | A `Map`. `create-only` checks `has()`. |
-| `FileObjectStore` | Local dev, contract tests | Root from `FILE_STORE_DIR` (default `.data/`). create-only = write a temp file in the same directory, fsync, then `fs.link(temp, target)` (`EEXIST` → `ObjectExistsError`), so the body is published atomically and readers never see a partial file. overwrite = write temp file + `rename()` (atomic). `list` walks and sorts. |
-| `VercelBlobObjectStore` | Preview and production | `put(key, body, { access: 'private', addRandomSuffix: false, allowOverwrite: mode === 'overwrite' })`. Without `allowOverwrite`, a `put` on an existing pathname throws → create-only semantics. Reads of mutable keys (`head.json`) and `exists` probes use `get(key, { access: 'private', useCache: false })` so they are never served from a stale or negative cache. Immutable keys (commits, `meta.json`) may use cached reads. `list` uses `list({ prefix, cursor })` and is treated as a hint only, since list consistency is not documented. |
+**Semantics (every driver).**
 
-The driver is chosen by `STORAGE_DRIVER` (§9). One **contract test suite** runs against every implementation (create-only conflict, overwrite, list ordering and pagination, missing keys). The Blob run is skipped unless Blob credentials are available (§9).
+- **`put` is create-only by default.** A create-only `put` on an existing key rejects with `ObjectExistsError` and leaves the stored body unchanged; of N concurrent create-only puts to one missing key, exactly one succeeds. `mode: 'overwrite'` replaces the body whether or not the key exists. A `string` body is stored as UTF-8; an empty body is allowed. The default is create-only because that write is the system's only concurrency primitive (§6.3): an accidental overwrite of a commit would be a lost update, while an accidental conflict is loud and safe.
+- **No partial reads.** While a put is in progress, a concurrent `get` of the same key returns `null` (create-only, not yet published), the previous body (overwrite) or the complete new body.
+- **`get`** resolves to `{ body }` or `null`; **`exists`** to `true` or `false`.
+- **`list(prefix)`** returns the keys that start with `prefix` (a plain string prefix: `list('a')` matches `a/1` and `ab`), in ascending code-unit order, at most `limit` per page. `limit` must be an integer from 1 to 1000 (default 1000), otherwise the call rejects with `RangeError`. `cursor` is present when another page may follow; pass it back with the same prefix to get the next page. A prefix that matches nothing gives `{ keys: [] }` and no cursor.
+- **`delete(keys)`** is idempotent: missing keys and duplicates are fine, and `delete([])` does nothing.
+- **Validation comes first.** Every method checks its keys (and the prefix, `limit` and cursor) before any I/O and reports a problem as a rejected promise, never a synchronous throw. `delete` validates every key before deleting any.
+- **Nothing else.** There is no locking, no compare-and-swap, no ETag-conditional write (`ifMatch`), no cached read, no metadata (size, timestamps) and no content type on reads. `contentType` is a write-only hint that only the Blob driver forwards.
+
+**Keys.** A key is 1–512 characters made of one or more segments joined by `/`. Each segment matches `^[A-Za-z0-9_-][A-Za-z0-9._-]*$`, so there are no empty segments, no leading or trailing `/`, no `.` or `..` segments and no segment starting with `.` (names starting with `.` are reserved for the file store's temp files). A list prefix is valid if it is `''` or if `prefix + 'x'` is a valid key (`games/`, `games/ab` and `index/created/2026-` are valid; `/games`, `games//x` and `../` are not). The rule is strict on every driver, so a key that works in tests works on Blob and on disk, and no key can escape the file store's root folder. Callers must never create two keys where one is a path prefix of the other (`a` and `a/b`): a filesystem cannot hold both a file and a folder with one name.
+
+**Errors.** Each message holds the key and a fixed reason, never a body or a credential, because stored objects hold the secret seed and every hand (§8).
+
+| Error | When | Properties |
+|---|---|---|
+| `ObjectExistsError` | A create-only `put` (or `putJson`) finds the key already stored | `key` |
+| `InvalidKeyError` | A key or prefix breaks the key rule | `key` (the rejected string) |
+| `CorruptObjectError` | `getJson` finds a body that is not valid UTF-8 JSON (`reason: 'invalid-json'`) or fails the schema (`reason: 'schema'`, with `issuePath`, the first Zod issue's path joined with `.`) | `key`, `reason`, `issuePath` |
+| `RangeError` | `limit` outside 1–1000; on memory and file, a cursor that does not belong to the prefix | – |
+
+**JSON helpers.** `putJson` writes `JSON.stringify(value)` with `contentType: 'application/json'` and is create-only unless `{ mode: 'overwrite' }` is passed; a value that `JSON.stringify` cannot encode (`undefined`, a function) rejects with `TypeError` before anything is written. `getJson` returns `null` for a missing key, otherwise decodes the body as strict UTF-8, parses it and validates it with `schema.safeParse`, returning the schema's output. Persisted schemas include `schemaVersion` (§6.4), so an unknown version surfaces as `CorruptObjectError` with `reason: 'schema'`.
+
+**Drivers.**
+
+| Implementation | Used for | Behaviour |
+|---|---|---|
+| `MemoryObjectStore` | Unit, simulation and API tests (`STORAGE_DRIVER=memory`) | A `Map` owned by the instance. Bodies are copied on `put` and on `get`, so mutating a buffer never changes a stored object. A create-only put checks and sets the map with no `await` in between, which makes concurrent creates atomic within a process. `createObjectStore` returns **one shared instance per process**, so every caller sees the same data; `new MemoryObjectStore()` always starts empty. |
+| `FileObjectStore` | Local development (the default driver), contract tests | Key `a/b/c` is the file `<FILE_STORE_DIR>/a/b/c` (default `.data/`, resolved against the working directory; nothing is created until the first put). A put writes the body to a temp file `.tmp-<uuid>` in the target's folder, fsyncs and closes it, then publishes it: create-only with `fs.link(temp, target)` (`EEXIST` → `ObjectExistsError`), overwrite with `fs.rename(temp, target)`. The temp file is always removed, and the parent folder is then fsynced (best effort). Because the body is complete and on disk before an atomic `link` or `rename` makes it visible, a reader, or a restart after a crash, sees either the old state or the whole new body. `list` walks the folder tree, skips every name starting with `.` (so temp files never appear) and sorts. A missing path or a folder counts as a missing key. `delete` leaves emptied folders behind; they never appear in `list`. |
+| `VercelBlobObjectStore` | Preview and production | Writes use `put(key, body, { access: 'private', addRandomSuffix: false, allowOverwrite: mode === 'overwrite' })`; the SDK's "already exists" error becomes `ObjectExistsError`. **Every `get` and every `exists` probe** uses `get(key, { access: 'private', useCache: false })`, immutable keys included, so a read is never served from a stale or negative cache; cached reads of immutable keys are a possible later optimisation, once measured. `exists` uses `get` and cancels the body unread, because `head()` throws for a missing key and has no uncached option. `list` calls `list({ prefix, cursor, limit, mode: 'expanded' })`, sorts the page and returns the SDK cursor while `hasMore` is true. `delete` calls `del` in batches of up to 1000 distinct keys and ignores `BlobNotFoundError`. Every other SDK error propagates unchanged. No call ever uses public access or a cached read (AD-10, §6.3). |
+
+**Blob credentials.** `createObjectStore` gives the Blob driver `BLOB_READ_WRITE_TOKEN` when it is set (it is passed to every SDK call; this is how code outside Vercel, such as a CI contract run, connects). Otherwise `BLOB_STORE_ID` must be set, and the SDK authenticates itself with the project's OIDC token (from `VERCEL_OIDC_TOKEN` or the request context on Vercel) and reports a missing token on its first call. With neither variable, `createObjectStore` throws `ConfigError` naming `BLOB_READ_WRITE_TOKEN` and `BLOB_STORE_ID`, without any value.
+
+**Blob caveats.** The memory and file drivers are proven by the contract suite on every test run; the Blob driver is so far tested only against a mocked SDK. Until the preview Blob checks (§11) have run against a real store, callers must allow for the following.
+
+- **A create-only conflict may hide the caller's own success.** The SDK retries failed requests (network errors and 5xx responses) up to `VERCEL_BLOB_RETRIES` times (default 10). If a create-only `put` reached the store but its response was lost, the retry finds the key and the driver reports `ObjectExistsError` although the stored body is the caller's. The stored body is still exactly one writer's, but the winner may also see a conflict. A caller that must tell the two apart reads the object back and compares it with what it wrote; for commits this is the `clientRequestId` comparison of §6.3 item 5.
+- **A Blob listing is a hint.** Ascending order across pages and completeness are assumed, not verified, and list consistency is not documented by Vercel. Callers never trust a listing alone; they confirm with consistent reads and probes (§6.3).
+- **Assumed SDK behaviour.** A create-only conflict is recognised by the text `already exists` in the SDK's error (the SDK has no dedicated error class); `get` of a missing key returns `null`; `del` of a batch with missing keys either succeeds or throws `BlobNotFoundError` after deleting the rest. A multi-batch `delete` is not atomic: if one batch fails, earlier batches are already deleted and later ones are not sent, so callers simply retry (deletes are idempotent).
+
+One **contract test suite** (`tests/contract/`) runs against every driver: key validation, create-only conflicts and races, overwrite, missing keys, reads during a slow write, list ordering and pagination, idempotent deletes and the JSON helpers. The Blob run is skipped unless `BLOB_READ_WRITE_TOKEN` is set, since it writes to a real store ([development guide](./development.md) §13).
 
 ### 6.2 Storage layout
 
@@ -212,7 +256,7 @@ Vercel Blob has no transactions. It does support ETag-conditional writes (`put` 
 
 1. **Optimistic concurrency via create-only keys.** Writing commit `v+1` is a create-only `put`. If two requests race from `v`, exactly one succeeds. The other gets `ObjectExistsError` → `VersionConflict`. This is the system's only "lock", and it works the same on the file and memory stores. The Vercel docs say a create-only `put` on an existing pathname fails. They do not explicitly promise that exactly one of two *concurrent* creates wins, so this is verified by a preview test (§11) before launch.
 2. **Immutable data is safe to cache.** Commits and `meta.json` never change after they are written.
-3. **Finding the tip.** Read `head.json` with a consistent read for a hint `h`, then probe commit `h+1`, `h+2`, … with consistent reads until one is missing. Because `head.json` is rewritten after every commit, the hint is normally exact or one behind. If `head.json` is missing, use `list(prefix)` as a hint only and confirm by probing forward from the highest listed key. `head.json` is updated best-effort after each commit, optionally with `ifMatch` so it never moves backwards. A stale tip can only cause a create-only collision (409), never a lost update.
+3. **Finding the tip.** Read `head.json` with a consistent read for a hint `h`, then probe commit `h+1`, `h+2`, … with consistent reads until one is missing. Because `head.json` is rewritten after every commit, the hint is normally exact or one behind. If `head.json` is missing, use `list(prefix)` as a hint only and confirm by probing forward from the highest listed key. `head.json` is updated best-effort after each commit, optionally with `ifMatch` so it never moves backwards (the `ObjectStore` interface does not offer `ifMatch` yet, §6.1; without it a hint can briefly move backwards, which only costs extra probes). A stale tip can only cause a create-only collision (409), never a lost update.
 4. **Client-declared version.** Each move request carries the `version` the client saw. A mismatch returns 409 with the current update, so moves are never applied to a view the player didn't see. After a create-only collision on `v+1`, the server knows `v+1` exists, so it loads forward from `v+1` with consistent reads before building the 409 body. That way the 409 never carries a stale update.
 5. **Idempotent retries.** Each move carries a `clientRequestId`. The server compares it, together with the authenticated seat, against commit `req.version + 1`, not the tip. It does this both when the version is stale and after a create-only collision. On a match it returns that commit's result for this seat instead of 409 (design §9 step 3). This covers a retry after a lost response, a retry after later commits landed, and two concurrent copies of the same request.
 

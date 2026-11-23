@@ -1,17 +1,16 @@
 # CONTEXT — Storage (Phase 5)
 
-Last updated by: Iteration 3 (Vercel Blob driver + factory). Next: Iteration 4 (storage documentation).
+Last updated by: Iteration 4 (storage documentation). Phase 5 is complete; next: verify-spec, push, CI check of NFR-503, then Phase 5b (real Blob store) and Phase 6 (Game State Manager).
 
 ## Current state
 
-- Phases 0–4 are complete (`specs/00-…-frozen.md` to `specs/04-players-frozen.md`). Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (no `noUncheckedIndexedAccess`; target ES2022, so class fields are *defined* properties), pnpm 10.15.1, Node 24 declared (local Node may differ: pnpm prints an "Unsupported engine" WARN, not fatal), Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7, `@noble/hashes` 2.4.0, project-local layer-boundary lint rule, GitHub Actions CI (install, typecheck, lint, test, Simulation tests, build).
-- `dependencies` = `@noble/hashes, @vercel/blob, next, react, react-dom, zod` (`@noble/hashes` 2.4.0, `@vercel/blob` 2.9.0 exact, NFR-502); `devDependencies` unchanged. The SDK is in `node_modules/@vercel/blob` (types in `dist/index.d.ts`).
-- **Iteration 1 shipped** `src/storage/object-store.ts` (interface, errors, key/prefix validation, list helpers, `getJson`/`putJson`) and `src/storage/memory-store.ts` (`MemoryObjectStore`); the shared contract suite `tests/contract/object-store.contract.ts` and its memory run; unit tests in `tests/unit/storage/`. `src/storage/.gitkeep` and `tests/contract/.gitkeep` are deleted.
-- **Iteration 2 shipped** `src/storage/file-store.ts` (`FileObjectStore`, FR-512), its contract run `tests/contract/file-store.contract.test.ts` and `tests/unit/storage/file-store.test.ts` (VC-513, P-11).
-- **Iteration 3 shipped** `src/storage/vercel-blob-store.ts` (`VercelBlobObjectStore`, FR-513), `src/storage/index.ts` (`createObjectStore`, FR-514), the FR-515 wrapper `tests/contract/prefixed-store.ts`, the Blob contract run `tests/contract/blob-store.contract.test.ts` (skipped without `BLOB_READ_WRITE_TOKEN`), and unit tests `tests/unit/storage/vercel-blob-store.test.ts` (VC-514, mocked SDK) and `factory.test.ts` (VC-515). `@vercel/blob@2.9.0` added.
-- All storage code is built. Not yet done: docs (Iteration 4: `docs/architecture.md` §6.1, `docs/development.md` "Storage" section). `src/state` still holds only `.gitkeep` (Phase 6).
-- Tests: `tests/unit/storage/` 6 files / 106 tests; contract: memory 30 tests (~16 ms), file 30 tests (~970 ms), blob 30 skipped; full `pnpm test` 42 passed + 1 skipped files / 772 passed + 30 skipped tests. `pnpm build` green.
-- NFR-503 local measure (Apple Silicon macOS, APFS): memory + file contract files ≈ 16 ms + 950 ms ≈ 1 s (budget 30 s; early-warning threshold 15 s).
+- Phases 0–5 are complete. Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (no `noUncheckedIndexedAccess`; target ES2022, so class fields are *defined* properties), pnpm 10.15.1, Node 24 declared (local Node may differ: pnpm prints an "Unsupported engine" WARN, not fatal), Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7, `@noble/hashes` 2.4.0, `@vercel/blob` 2.9.0, project-local layer-boundary lint rule, GitHub Actions CI (install, typecheck, lint, test, Simulation tests, build).
+- `dependencies` = `@noble/hashes, @vercel/blob, next, react, react-dom, zod` (`@noble/hashes` 2.4.0, `@vercel/blob` 2.9.0 exact, NFR-502); `devDependencies` unchanged from Phase 4.
+- **Shipped in Phase 5**: `src/storage` — `object-store.ts` (contract, errors, key/prefix validation, list helpers, `getJson`/`putJson`), `memory-store.ts`, `file-store.ts`, `vercel-blob-store.ts`, `index.ts` (`createObjectStore`); the shared contract suite in `tests/contract/` with one run per driver (Blob skipped without `BLOB_READ_WRITE_TOKEN`); unit tests in `tests/unit/storage/` (6 files / 106 tests). `src/storage/.gitkeep` and `tests/contract/.gitkeep` are deleted.
+- **Docs** (Iteration 4): `docs/architecture.md` §6.1 rewritten to the shipped interface (semantics, key rule, errors, JSON helpers, driver table, Blob credentials, Blob caveats incl. `VERCEL_BLOB_RETRIES` and "listing is a hint"); one clarifying clause in §6.3 item 3 (`ifMatch` not offered by the interface yet). `docs/development.md` gained `## 13. Storage` (13.1 Module map, 13.2 Keys, 13.3 Choosing a driver, 13.4 Using a store, 13.5 The file store on disk, 13.6 Storage tests, 13.7 Gotchas and limitations); "Known limitations" is now §14; §1, §2, §4, §5, §7 and §14 updated. README unchanged (no line about storage was false).
+- `src/state` still holds only `.gitkeep` (Phase 6). Nothing in `src` calls `createObjectStore` yet.
+- Tests: full `pnpm test` 42 passed + 1 skipped files / 772 passed + 30 skipped tests; `pnpm test:sim` 5 files / 3,605 tests; `pnpm build` green.
+- NFR-503 local measure (Apple Silicon macOS, APFS): memory + file contract files ≈ 15 ms + 985 ms ≈ 1 s (budget 30 s in the CI "Test" step; CI value still to be read after the push).
 
 ## File map
 
@@ -33,6 +32,8 @@ Last updated by: Iteration 3 (Vercel Blob driver + factory). Next: Iteration 4 (
 | `tests/unit/storage/keys.test.ts` | VC-501/VC-502 tables, exact `InvalidKeyError` messages. |
 | `tests/unit/storage/json.test.ts` | P-1 `CorruptObjectError` messages (incl. root `(root)`), nested `issuePath`, schema output (transforms), `putJson` arguments and `TypeError` cases (undefined, function, symbol). |
 | `tests/unit/storage/memory-store.test.ts` | VC-512 copies (incl. subarray view), separate instances, VC-508 1,001-key default-limit paging, P-3 cursor rule + errors, P-2 validation order and "no synchronous throw". |
+| `docs/architecture.md` §6.1 | Shipped `ObjectStore` design: interface, semantics, key rule, errors, JSON helpers, driver table, Blob credentials and caveats. §6.3 item 3 notes `ifMatch` is not offered yet. |
+| `docs/development.md` §13 (13.1–13.7) | Storage guide: module map, keys, choosing a driver, usage example + error table, file store on disk, storage tests (incl. Blob run, SDK mocking, adding a driver), gotchas. §14 = Known limitations. |
 
 ## Public interfaces
 
@@ -114,7 +115,7 @@ export function createObjectStore(config: Config): ObjectStore;
 //   : throw new ConfigError('Invalid configuration:\n  - BLOB_READ_WRITE_TOKEN or BLOB_STORE_ID is required when STORAGE_DRIVER is blob').
 ```
 
-How a driver implements `list` with the shared helpers (memory does exactly this; the file store should too):
+How a driver implements `list` with the shared helpers (memory and file both do exactly this):
 
 ```ts
 async list(prefix: string, opts?: ListOptions): Promise<ListResult> {
@@ -179,13 +180,24 @@ Contract keys used: `../x`, `ok`, `s`, `bytes`, `empty`, `k`, `race`, `o`, `m`, 
 
 ## Known gaps
 
-- Docs not written yet (Iteration 4).
+- **NFR-503 CI part pending**: the memory + file contract durations must be read from the CI "Test" step after the branch is pushed (< 30 s; ≈ 1 s locally).
 - **Blob behaviour is unverified against a real store** (Phase 5b): the `already exists` message on a create-only conflict, `get` → `null` for a missing pathname, cross-page `list` order/completeness, `del` with missing pathnames, and the SDK-retry case (FR-503/FR-513: `VERCEL_BLOB_RETRIES`, default 10 — a create-only `ObjectExistsError` may mean the caller's own retried write won). Blob `list` stays a hint (architecture §6.3).
 - Blob `delete` with several batches is not atomic: a non-`BlobNotFoundError` failure stops later batches; earlier batches are already deleted. Callers retry (deletes are idempotent).
 - The prefixing wrapper was verified only ad hoc (a temporary, uncommitted contract run over `PrefixedObjectStore(MemoryObjectStore)` passed 29 + 1 skipped); there is no committed test of it without a token.
-- **Case-insensitive filesystems** (macOS APFS default, Windows): on the file store, keys differing only in letter case (`A/1` vs `a/1`) map to the same file, so the second create-only put fails with `ObjectExistsError`. The spec does not cover it; the contract keys are all lowercase. Phase 6 key builders should use one case (worth a line in the Iteration 4 docs).
+- **Case-insensitive filesystems** (macOS APFS default, Windows): on the file store, keys differing only in letter case (`A/1` vs `a/1`) map to the same file, so the second create-only put fails with `ObjectExistsError`. The spec does not cover it; the contract keys are all lowercase. Phase 6 key builders should use one case (documented in `docs/development.md` §13.2).
 - File store `put` costs two fsyncs (file + folder): ~14 ms per put on macOS APFS. Fine for dev; tests needing many keys should write files directly (as the P-11 test does) or keep counts small.
 - A key whose path is an existing folder, or whose parent is an existing file, has unspecified behaviour on the file store (FR-512); not tested. `get`/`exists` treat both as missing.
 - The P-3 cursor rule is implemented in the shared `checkListArgs`/`pageKeys`; Blob cursors are opaque SDK strings and must NOT go through `checkListArgs` (Blob uses `assertValidPrefix` + `resolveListLimit` directly).
 - The 8 MiB VC-507 test on memory is trivially satisfied (the memory put completes synchronously inside the call); the counter still proves one read was issued before the put settled. The file store is where it is meaningful.
 - `MemoryObjectStore.put` does not validate `opts.mode` values outside the type (anything other than `'create-only'`/undefined behaves as overwrite); TypeScript callers cannot pass one.
+
+## Hand-off to Phase 5b and 6
+
+- **Building a store**: `createObjectStore(getConfig())` from `@/src/storage` (the only export of `index.ts`); types, errors and helpers from `@/src/storage/object-store`. Build it once and pass it down (GameService factory, Phase 8, is the first caller of `getConfig()`). Tests use `new MemoryObjectStore()` for isolation; the factory's `memory` store is one per process.
+- **JSON documents**: `putJson(store, key, value, { mode })` (create-only by default, `contentType: 'application/json'`), `getJson(store, key, schema)` → schema output or `null`. Every persisted schema must carry `schemaVersion` (e.g. `z.literal(1)`), so an unknown version surfaces as `CorruptObjectError` with `reason: 'schema'`, `issuePath: 'schemaVersion'`. Bad JSON → `reason: 'invalid-json'`. Messages never contain bodies; safe to log.
+- **Commits (Phase 6)**: write commit `v+1` with create-only `putJson`; map `ObjectExistsError` → `CommitConflictError`. **Blob retry caveat**: the SDK retries network errors/5xx (`VERCEL_BLOB_RETRIES`, default 10), so on Blob an `ObjectExistsError` may mean the caller's own write landed. Before reporting a conflict, re-read commit `v+1` and compare (its `clientRequestId` + seat, or the full body — commit bodies are unique per request); a match is a success.
+- **Key builders (Phase 6)**: keys must satisfy the key rule (segments `^[A-Za-z0-9_-][A-Za-z0-9._-]*$`, ≤ 512 chars), use one letter case, zero-pad numbers that must sort, and **never create two keys where one is a path prefix of the other** (`a` vs `a/b`; the file store cannot hold both). Run builders through `assertValidKey` in their unit tests.
+- **Listing**: on Blob a listing is a hint (cross-page order/completeness unverified); confirm with uncached `get`/`exists`. Cursors are opaque to callers; pass them back with the same prefix only.
+- **Phase 5b — Blob contract run** (preview store only, real objects written under `contract/<runId>/<testId>/`, `afterAll` deletes `contract/<runId>/`): `BLOB_READ_WRITE_TOKEN=… pnpm vitest run tests/contract/blob-store.contract.test.ts`. Note that an exported `BLOB_READ_WRITE_TOKEN` also enables it inside `pnpm test`.
+- **Phase 5b — assumptions to verify against a real store**: (1) a create-only conflict raises an SDK error whose message contains `already exists`; (2) `get` of a missing pathname returns `null`; (3) `list` returns pathnames in ascending order across pages and covers every key; (4) `del` with missing pathnames succeeds or throws `BlobNotFoundError` after deleting the rest; (5) the SDK-retry case (a create-only put whose retry collides with its own write). Also: N parallel create-only puts → exactly one stored body (architecture §11 preview checks). If (1) or (2) is wrong, the driver's mapping changes in a new spec. The prefixing wrapper `tests/contract/prefixed-store.ts` has no committed test of its own (verified ad hoc over memory); the first real run exercises it.
+- **Docs to update later**: when Phase 5b verifies the assumptions, update `docs/architecture.md` §6.1 "Blob caveats" and `docs/development.md` §13.7 / §14 (the "not run against a real store" bullets).
