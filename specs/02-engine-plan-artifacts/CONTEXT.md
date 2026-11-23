@@ -1,6 +1,6 @@
 # CONTEXT — Game Engine (Phase 2)
 
-Last updated by: Iteration 5 (Applying moves and automatic transitions)
+Last updated by: Reconciliation of group A (Iterations 6 table view and 7 invariants)
 
 ## Current state
 
@@ -11,8 +11,10 @@ Last updated by: Iteration 5 (Applying moves and automatic transitions)
 - `src/engine/bidding.ts` (FR-222 `legalBids`), `src/engine/play.ts` (FR-224 `legalPlays`), `src/engine/trick.ts` (FR-225 `trickWinner`) are done.
 - `src/engine/engine.ts` is **complete** (spec FR-206, FR-211 to FR-235, FR-241): `ENGINE_VERSION`, `IllegalMoveError`, `InvalidGameSetupError`, `CreateGameInput`, `createGame`, `currentActor`, `legalMoves`, `applyMove`, `aiRng`, plus internal `dealHand`, `handDealtEvent`, `assertSeatInRange`, `nextSeat`. Games play to completion deterministically for every preset.
 - `tests/unit/engine/helpers.ts` has builders `card`, `cards`, `trick`, `rulesWith`, `makeHand`, `makeSeats`, `newGame`, `withHand`, and the game driver `playGame` with policies `firstMove` / `lastMove` (types `Policy`, `PlayedMove`, `PlayedGame`). **Frozen for Iterations 6–7: import, never modify.**
-- Not yet built: `view.ts` (6), `invariants.ts` (7), docs (8).
-- Tests: `pnpm test` = 20 files, 422 tests (engine dir: 10 files, 207 tests; Iteration 5 added engine-apply 40, determinism 4, golden 4, perf 1).
+- `src/engine/view.ts` is done (spec FR-219 for views, FR-236 to FR-238, BR-205): `tableViewFor`.
+- `src/engine/invariants.ts` is done (spec FR-239, FR-240): `checkInvariants`.
+- Not yet built: docs (8).
+- Tests: `pnpm test` = 22 files, 481 tests (engine dir: 12 files, 266 tests; Iteration 6 added view 24, Iteration 7 added invariants 35).
 - NFR-203 measured locally: 981 moves, median ≈ 45 ms (limit 250 ms).
 
 ## File map
@@ -36,6 +38,10 @@ Last updated by: Iteration 5 (Applying moves and automatic transitions)
 | `tests/unit/engine/trick.test.ts` | VC-221 (french + spanish decks, leader ≠ seat 0). |
 | `tests/unit/engine/sequence.test.ts` | VC-207 to VC-210; the 18 preset hand plans as hand-written literal arrays (`PLANS`, `// prettier-ignore`). |
 | `tests/unit/engine/rng.test.ts` | VC-201 to VC-205; includes an independent BigInt xoshiro128** reference and a golden test computed in-test from `@noble/hashes`. |
+| `src/engine/view.ts` | `tableViewFor` (FR-236–238): per-seat/spectator `TableView`, copies only, game-over shape, private FR-219 seat check. |
+| `src/engine/invariants.ts` | `checkInvariants` (FR-239/240): structural (s) checks, rules (a)–(i), skip rules; pure, never throws on schema-valid state. |
+| `tests/unit/engine/view.test.ts` | VC-216 view part, VC-218 `tableViewFor` rows, VC-228, VC-229 (+ multi-seed game-over dealer), VC-230 full-game leak sweep; test-local `collectCards` / `collectKeys` walks. |
+| `tests/unit/engine/invariants.test.ts` | VC-233: valid sweeps (4 presets at 3p, first move; argentina/mexico last move), every mutation row, off-deck-rank (f) skip, FR-240 schema-valid oddities, no-mutation checks. |
 | `src/domain/*.ts` | Phase 1 domain (schemas, cards, decks, rules, types, presets). Use, never redefine. |
 | `eslint.config.mjs`, `tools/eslint-rules/layer-boundaries.mjs` | Layer rule. `CORE_EXTERNALS = ['zod', '@noble/hashes']` (subpaths allowed). `engine` may import only `domain`. |
 | `vitest.config.ts` | Includes `tests/{unit,contract,api}/**/*.test.ts`. |
@@ -141,6 +147,31 @@ export function aiRng(state: GameState, seat: number): Rng;      // deriveRng(se
   9. Not last hand: `handIndex++`, `phase 'bidding'`, `hand = dealHand(next, handIndex, oldDealer)`, event `handDealtEvent(...)`. Last hand: `phase 'game-over'`, `hand = null`, `handIndex` unchanged, event `game-over`.
 - **Event order per `applyMove`** (FR-235): `bid-made | card-played` → `trick-won` → `hand-completed` → `hand-dealt | game-over`, each only when it occurs. Events never share objects with the returned state (D-003). No Zod parsing in `applyMove`; schema conformance is test-side.
 
+### `@/src/engine/view`
+
+```ts
+export function tableViewFor(state: GameState, seat: number | 'spectator'): TableView;
+```
+
+- Numeric seat: `RangeError` unless an integer in `0 … N − 1` (same check and message as `engine.ts`'s private `assertSeatInRange`, duplicated privately in `view.ts`, D-006). `'spectator'` → `you: null`, `yourHand: []`.
+- From the state: `gameId`, `version`, `phase`, `handIndex`, `[...handPlan]`; `seats[i] = { seat: i, name, kind, cardCount = hand.hands[i].length, bid = hand.bids[i], tricksWon = hand.tricksWon[i] }`.
+- Hand in progress: `dealer`, `trumpCard` (copy), `trumpCardInDealerHand` from the hand; `toAct = currentActor(state)`; `yourHand` = copy of the viewer's hand; `currentTrick` = copy of `currentTrick.plays`; `lastTrick` = copy or `null`.
+- **Game-over view** (`phase 'game-over'` or `hand === null`, D-007): `toAct`, `trumpCard`, `lastTrick` `null`; `trumpCardInDealerHand false`; `yourHand`, `currentTrick` `[]`; each seat `cardCount 0`, `bid null`, `tricksWon 0`; `dealer = completedHands.at(-1)?.dealer ?? 0`.
+- Never contains another seat's cards (except the public `trumpCard`), undealt cards, `seed`, `rules` or `aiDecisionCount`. Shares no object with the state (cards copied as `{ suit, rank }`).
+
+### `@/src/engine/invariants`
+
+```ts
+export function checkInvariants(state: GameState): string[];
+// [] when valid; one message per violation, each starting with its tag:
+// '(s) …' structural, '(a) …' … '(i) …' rules, followed by the offending values.
+```
+
+- Order: (s) first; if any (s) fails, only the (s) messages are returned. Otherwise messages come in rule order a … i.
+- (s): `handIndex < handPlan.length`; with `hand`: `hands`/`bids`/`tricksWon` length N; `toAct`/`dealer`/`currentTrick.leader` integers in `0…N−1`.
+- (a) one message per duplicated `cardId`; (b) one per distinct off-deck `cardId` (deck = `buildDeck(rules.deck, N)`); (c) one per seat; (d) one per seat with a null bid (playing only); (e) playing only, restriction applies, all bids set (D-008); (f) `legalMoves(state, toAct)` empty, only when hand non-null, phase ≠ game-over, (a) and (b) passed, and `cardsPerPlayer ≤ deck size` (D-009); (g) hand null iff game-over; (h) hand non-null only; (i) always.
+- Imports `legalMoves` from `./engine` (no cycle: `engine.ts` does not import it).
+
 ### Test helpers — `tests/unit/engine/helpers.ts` (import as `./helpers`)
 
 ```ts
@@ -216,6 +247,9 @@ Key domain facts for later iterations (from the Phase 1 hand-off):
 - **Events carry copies** (D-003): cards, results and seat lists in events are copies, never objects of the returned state.
 - **Event order** (FR-235): `bid-made|card-played`, `trick-won`, `hand-completed`, `hand-dealt|game-over`.
 - `tests/unit/engine/golden.test.ts` literals change only together with an `ENGINE_VERSION` bump.
+- **Views carry copies** (like D-003 for events): `tableViewFor` returns fresh arrays and cards; nothing in a view is reachable from the state.
+- Leak tests walk the view for objects with exactly the string keys `suit` and `rank` and compare by `cardId`.
+- Invariant messages start with `(<tag>) ` (`s`, `a`–`i`); tests assert on tags, not full text.
 
 ## Commands
 
@@ -234,8 +268,9 @@ pnpm prints an "Unsupported engine" WARN locally (Node 26 vs declared 24) and "I
 
 ## Known gaps
 
-- View (6), invariants (7) and docs (8) are not built yet.
-- Still open for Iteration 6: VC-216 view part, VC-218 `tableViewFor(state, N)` rows (bidding and game-over).
+- Docs (8) are not built yet.
+- `view.ts` duplicates `engine.ts`'s private `assertSeatInRange` (D-006); a later change could export it from `engine.ts` and drop the copy.
+- `checkInvariants` has no rule bounding `cardsPerPlayer` by the deck: a state with an oversized `cardsPerPlayer` that still satisfies (c) and (h) reports nothing, and (f) is skipped for it (D-009).
 - With the first-legal-move policy every bid is `0` (the dealer's forbidden value is `cardsPerPlayer`), so golden `completedHands` bids are all zero; `lastMove` gives non-trivial bids.
 - `legalPlays` / `trickWinner` assume cards belong to `deck` (`compareRanks` throws `InvalidCardError` otherwise); they do not validate seats or turn.
 - `int` accepts any `Number.isInteger` bounds, including unsafe integers beyond 2^53 (results there are imprecise); the spec only requires integers. Engine callers use small ranges.
