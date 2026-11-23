@@ -39,5 +39,10 @@ jobs:
       - name: Test
         run: pnpm test
 
+      # Seeded all-AI simulation: 18 preset × player-count combinations × 200 seeds (`SIM_SEEDS`
+      # unset). Budget: < 10 minutes.
+      - name: Simulation tests
+        run: pnpm test:sim
+
       - name: Build
         run: pnpm build

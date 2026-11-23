@@ -48,7 +48,7 @@ tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
 
-Apart from `src/domain` (§9), `src/engine` (§10) and `src/score` (§11), the layer folders under `src/` are empty for now (each holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
+`src/domain` (§9), `src/engine` (§10), `src/score` (§11) and `src/players` (§12) are built, and `src/service` holds the two pure helpers `buildPlayerView` and `runAiLoop` (§12) but not `GameService` yet. `src/state` and `src/storage` are still empty (each holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
 
 **Import alias.** `@/` maps to the **project root**, so imports read `@/src/engine/...` or `@/app/...`. It works in TypeScript, Next.js, Vitest and `tsx`.
 
@@ -106,7 +106,7 @@ Tests are Vitest files named `*.test.ts`, placed in the folder that matches what
 | `tests/api/` | Route handlers, called directly. | `pnpm test` |
 | `tests/sim/` | Long-running simulations (many full games). | `pnpm test:sim` only |
 
-Test files anywhere else (for example next to the code in `src/`) are **never run**. `pnpm test:sim` exits 0 when `tests/sim` has no tests.
+Test files anywhere else (for example next to the code in `src/`) are **never run**. The simulation suite, its `SIM_SEEDS` setting and its helpers are described in §12.5.
 
 Example:
 
@@ -200,16 +200,17 @@ It works this way because a misconfigured deployment should be fixed in one pass
 5. `pnpm typecheck`
 6. `pnpm lint`
 7. `pnpm test`
-8. `pnpm build`
+8. `pnpm test:sim` (step "Simulation tests": the seeded all-AI simulation with the default 200 seeds, §12.5; budget < 10 minutes)
+9. `pnpm build`
 
 The run fails as soon as one step fails. CI needs no secrets and sets no environment variables: tests pass explicit environment maps to `loadConfig`. The workflow has read-only access to the repository.
 
-**Why `build` is in CI.** `next build` catches errors that typecheck and lint don't (for example invalid page exports or prerendering failures), and there are no preview deployments yet to catch them. `pnpm test:sim` is not part of CI yet; it is added once the simulations exist.
+**Why `build` is in CI.** `next build` catches errors that typecheck and lint don't (for example invalid page exports or prerendering failures), and there are no preview deployments yet to catch them.
 
 Every change must keep CI green. Run the same commands locally before pushing:
 
 ```sh
-pnpm install --frozen-lockfile && pnpm typecheck && pnpm lint && pnpm test && pnpm build
+pnpm install --frozen-lockfile && pnpm typecheck && pnpm lint && pnpm test && pnpm test:sim && pnpm build
 ```
 
 ---
@@ -301,7 +302,7 @@ Domain tests live in `tests/unit/domain/<topic>.test.ts`.
 ### 9.6 Not in the domain yet
 
 - **Engine behaviour** lives in `src/engine` (§10): expanding a hand sequence into the game's `handPlan`, dealing, legal moves, transitions, table views, invariants and the seeded RNG.
-- **Scoring** lives in `src/score` (§11), which computes `HandScore` and `ScoreBoard` from the state. **Players and strategies** arrive in Phase 4; `PlayerView`, `PlayerUpdate` and `DecisionContext` / `Decision` exist only as shapes.
+- **Scoring** lives in `src/score` (§11), which computes `HandScore` and `ScoreBoard` from the state. **Players and strategies** live in `src/players`, and `PlayerView` is built by `buildPlayerView` in `src/service` (§12); `PlayerUpdate` exists only as a shape.
 - **Persistence types** `GameMeta`, `Commit` and `CommitBody` and their schemas (Phase 6, in the state layer).
 - No schema checks that a hand sequence makes sense for a player count (for example `range 5→max` when `max` is below 5); `expandHandSequence` checks it, and `createGame` reports it as a setup problem.
 
@@ -426,7 +427,7 @@ Some checks are skipped so that no check runs on data it cannot handle, and so t
 - `(f)` calls `legalMoves`, so it is skipped when `(a)` or `(b)` fails (ranking a card from another deck throws), and also when `cardsPerPlayer` exceeds the deck size (listing the bids of such a "hand" would allocate an enormous array). Neither situation can arise in a real game.
 - `(e)` runs only when every bid is set; a missing bid is reported once, by `(d)`.
 
-**When to call it.** In tests and in the simulator, after every move, asserting `[]`; that is how the engine's own tests sweep full games for every preset. It is not called inside `applyMove`: legal moves cannot produce an invalid state, and the engine keeps the move path free of extra work. Card conservation across a whole hand (hands + played cards + stock = deck) needs the history of the hand, so it is not an invariant of a single state; the simulator checks it from the event log ([`design.md`](./design.md) §5.6). Tests should assert on the tags, not the full message text.
+**When to call it.** In tests and in the simulator, after every move, asserting `[]`; that is how the engine's own tests sweep full games for every preset. It is not called inside `applyMove`: legal moves cannot produce an invalid state, and the engine keeps the move path free of extra work. Card conservation across a whole hand (hands + played cards + stock = deck) needs the history of the hand, so it is not an invariant of a single state; the simulation suite checks it from the event log with its card-conservation ledger (§12.6, [`design.md`](./design.md) §5.6). Tests should assert on the tags, not the full message text.
 
 ### 10.5 `ENGINE_VERSION`
 
@@ -470,7 +471,7 @@ Shared helpers live in `tests/unit/engine/helpers.ts` (not a `*.test.ts`, so not
 - **`rngFromSource` reads each draw as `next() >>> 0`**, the identity for valid uint32 values, so a stub that returns `-1` is read as `2^32 − 1` instead of producing out-of-range results. Stubs should still return uint32 values.
 - **`rng.int(0, 2 ** 32 − 1)` returns raw generator outputs** (nothing is rejected at that range); use it to compare streams in tests. `int` accepts any integer bounds, including unsafe integers beyond 2^53 where results are imprecise; the engine only uses small ranges.
 - **`checkInvariants` does not bound `cardsPerPlayer` by the deck.** A state with an oversized `cardsPerPlayer` that still passes `(c)` and `(h)` reports nothing (and `(f)` is skipped for it). It also does not check the `trumpCard` itself in `(a)`/`(b)`; when the trump is in the dealer's hand it is checked as one of the dealer's cards.
-- **Not in the engine:** scoring and `live` hand status (Score Engine, §11), `PlayerView`, players, strategies, the AI loop and the simulator, seed generation and setting `version` (GameService and the Game State Manager); see [`implementation.md`](./implementation.md) for when each arrives. Bid changes, revokes, target-score endings, tie-break hands and special hands are out of scope by design ([`design.md`](./design.md) §1.2, §4.2).
+- **Not in the engine:** scoring and `live` hand status (Score Engine, §11); `PlayerView`, players, strategies, the AI loop and the simulator (§12); seed generation and setting `version` (GameService and the Game State Manager; see [`implementation.md`](./implementation.md) for when they arrive). Bid changes, revokes, target-score endings, tie-break hands and special hands are out of scope by design ([`design.md`](./design.md) §1.2, §4.2).
 
 ---
 
@@ -560,8 +561,8 @@ The full rules, with the per-preset table, are in [`design.md`](./design.md) §6
 ### 11.4 How the score relates to the engine
 
 - **The engine hands over raw facts.** Each finished hand becomes a `HandResult` in `GameState.completedHands` (`bids`, `tricks`, `cardsPerPlayer`, `handIndex`, `dealer`, `trumpSuit`); the hand in progress is `state.hand` (bids may still be `null`, `tricksWon` so far). `evaluate` needs nothing else.
-- **Neither imports the other.** `src/score` never imports `src/engine` and the engine never imports `src/score` (both purity greps check it). Only tests and, later, `GameService` use both.
-- **`PlayerView` is composed outside both.** The engine's `tableViewFor` has no scores; `GameService` builds `{ ...tableViewFor(state, seat), scoreboard: evaluate(state), finalRanking }`, with `finalRanking = scoreboard.ranking` at game over ([`design.md`](./design.md) §5.5). The same view goes to AI decisions, so `evaluate` runs on every request and every AI move.
+- **Neither imports the other.** `src/score` never imports `src/engine` and the engine never imports `src/score` (both purity greps check it). Only `src/service`, the simulator and tests use both.
+- **`PlayerView` is composed outside both.** The engine's `tableViewFor` has no scores; `buildPlayerView` in `src/service/player-view.ts` (§12) builds `{ ...tableViewFor(state, seat), scoreboard: evaluate(state) }`, plus `finalRanking = scoreboard.ranking` at game over ([`design.md`](./design.md) §5.5). It is the only caller of `evaluate` in `src` outside `src/score`. The same view goes to AI decisions, so `evaluate` runs on every request and every AI move.
 - **No defensive copy.** `evaluate` and `scoreHand` never mutate their input and build every returned array and object fresh (they do not `structuredClone` the state; nothing in the output is taken from it by reference). A caller may mutate a board freely.
 - **Engine states never throw.** A state produced by `createGame` / `applyMove` always satisfies the checks below; they exist for hand-built or corrupted states.
 
@@ -609,15 +610,280 @@ Score-only builders live in `tests/unit/score/helpers.ts` (not collected): `make
 - **`makeState` states are shape-valid, not real games.** Their hands hold no cards (the schema accepts empty hands and scoring never reads cards), so they fail `checkInvariants`; never feed them to engine functions that read cards.
 - **What `evaluate` does not check.** It does not cross-check the state beyond the checks in §11.5: not that `completedHands[k].handIndex === k`, not `handIndex` against `handPlan`, not `phase` against `hand`. `handPoints` trusts the `ScoringSpec` numbers and `rankSeats` checks only the lengths of its arrays, not that the values are integers. Engine states satisfy all of these by the engine's invariants (§10.4); callers hold schema-valid rule sets.
 - **`LiveStatus` is defined twice.** `ScoreBoard.live[].status` in `src/domain/types.ts` is an inline union equal to `LiveStatus`, because the domain may not import the score layer. Change both together.
-- **Not in the score engine:** composing `PlayerView` and `finalRanking` (GameService), persisting the scoreboard with each commit and writing `final.json` (Game State Manager), and target-score endings, tie-break hands, "Pocha" bonuses and suit multipliers ([`design.md`](./design.md) §4.2 and its open questions).
+- **Not in the score engine:** composing `PlayerView` and `finalRanking` (`buildPlayerView`, §12), persisting the scoreboard with each commit and writing `final.json` (Game State Manager), and target-score endings, tie-break hands, "Pocha" bonuses and suit multipliers ([`design.md`](./design.md) §4.2 and its open questions).
 
 ---
 
-## 12. Known limitations
+## 12. Players, views and simulation
+
+Three pieces sit on top of the engine and the score engine:
+
+- **`src/players`** decides moves: the `Player` and `AIStrategy` shapes, their factories, the first AI (`randomStrategy`) and the strategy registry.
+- **Two service helpers** turn a game state into what a seat sees and play the AI turns: `buildPlayerView` (`src/service/player-view.ts`) and `runAiLoop` (`src/service/ai-loop.ts`). They are what `GameService` will call; the simulator and the tests call them today.
+- **Simulation** proves that the whole core holds together over thousands of games: the `pnpm simulate` command-line simulator (`scripts/simulate.ts`) and the `pnpm test:sim` suite (`tests/sim/`).
+
+The model and the loop's contract are in [`design.md`](./design.md) §8; this section is about using, extending and testing the code.
+
+**Purity.** `src/players` is part of the core (§3): it imports only `@/src/domain/*` and its own files, and never sees a `GameState` (strategies get a `DecisionContext` only). No classes are used there except `Error` subclasses. The two service helpers are pure too: they import only `src/domain`, `src/engine`, `src/score`, `src/players` and each other (`ai-loop.ts` imports `./player-view`), with no storage, state, configuration, clock, I/O or ambient randomness. The layer rule would let `src/service` import `state`, `storage` and `src/config.ts`, so for these two files the rule is kept by this grep, not by the linter:
+
+```sh
+grep -rnE 'src/(storage|state)|@/src/config|Math\.random|new Date|Date\.now|crypto\.|fetch\(|process\.|performance\.' src/service/player-view.ts src/service/ai-loop.ts src/players   # must find nothing
+grep -rnE 'src/(engine|score|service)|GameState' src/players                                  # must find nothing
+grep -rn 'class ' src/players | grep -v 'extends Error'                                         # must find nothing
+grep -rln 'evaluate(' src | grep -v '^src/score/'                                               # only src/service/player-view.ts
+```
+
+As in the engine, the greps also match comments, so keep those words out of comments in these files.
+
+### 12.1 Module map
+
+Import from each module directly (`import { runAiLoop } from '@/src/service/ai-loop'`); there is no barrel `index.ts`.
+
+| Module | Exports | What it does |
+|---|---|---|
+| `@/src/players/player` | types `Player`, `AIStrategy` | The two shapes ([`design.md`](./design.md) §8.1). Types only. |
+| `@/src/players/human-player` | `createHumanPlayer(seat, name)` | A player whose `requestDecision` always answers `{ type: 'await' }`. |
+| `@/src/players/ai-player` | `createAiPlayer(seat, name, strategy)` | A player that answers `{ type: 'move', moveId: strategy.choose(view, legalMoves, rng).id }`. |
+| `@/src/players/strategies/random` | `randomStrategy` | Name `'random'`; one draw `rng.int(0, moves.length − 1)` over all legal moves. Never reads the view. |
+| `@/src/players/registry` | `STRATEGY_NAMES`, `UnknownStrategyError`, `getStrategy(name)`, `createPlayers(seats)` | Strategy lookup by name (`undefined` or `''` → `randomStrategy`, unknown → `UnknownStrategyError`, message `Unknown AI strategy "<name>" (known: random)`), and one `Player` per seat of a game. |
+| `@/src/service/player-view` | `buildPlayerView(state, seat \| 'spectator')` | The only builder of a `PlayerView`: table view + `scoreboard`, plus `finalRanking` only at game over. |
+| `@/src/service/ai-loop` | `runAiLoop(state, players, options?)`, `AiLoopLimitError`, types `AiLoopOptions`, `AiLoopResult` | Plays turns until a human must act or the game ends. |
+| `scripts/simulate.ts` | – (a script) | `pnpm simulate`: plays a batch of all-AI games and prints a summary (§12.4). |
+| `tests/sim/harness.ts`, `tests/sim/ledger.ts` | Simulation helpers and the card-conservation ledger | Used by the `pnpm test:sim` suite (§12.5, §12.6). Never imported from `src` or `scripts`. |
+
+### 12.2 Running the AI loop
+
+A game with one human and two AIs, played the way `GameService` plays it: run the loop at creation (the first bidders may be AIs), then after every human move.
+
+```ts
+import { getPreset } from '@/src/domain/presets';
+import type { SeatInfo } from '@/src/domain/types';
+import { applyMove, createGame, legalMoves } from '@/src/engine/engine';
+import { createPlayers } from '@/src/players/registry';
+import { runAiLoop } from '@/src/service/ai-loop';
+import { buildPlayerView } from '@/src/service/player-view';
+
+const seats: SeatInfo[] = [
+  { seat: 0, playerId: 'p0', name: 'Ana', kind: 'human' },
+  { seat: 1, playerId: 'p1', name: 'Bot 1', kind: 'ai', strategy: 'random' },
+  { seat: 2, playerId: 'p2', name: 'Bot 2', kind: 'ai' }, // no strategy: plays 'random'
+];
+const players = createPlayers(seats); // one Player per seat; UnknownStrategyError for an unknown name
+
+const start = createGame({
+  gameId: 'game-1',
+  rules: getPreset('argentina-fidepo'),
+  seats,
+  seed: 'secret-seed',
+});
+
+// The AIs act until seat 0 must act (or the game is over).
+let state = runAiLoop(start.state, players).state;
+
+while (state.phase !== 'game-over') {
+  // What the human receives: its view and its legal moves.
+  const update = { view: buildPlayerView(state, 0), legalMoves: legalMoves(state, 0) };
+  const moveId = update.legalMoves[0].id; // in the app: the moveId the human sent
+  state = applyMove(state, 0, moveId).state;
+  state = runAiLoop(state, players).state; // the AIs answer
+}
+
+const final = buildPlayerView(state, 0);
+// final.finalRanking deep-equals final.scoreboard.ranking; before game over the key is absent.
+```
+
+Observing every AI move and handling the safety cap:
+
+```ts
+import type { GameEvent } from '@/src/domain/types';
+import { checkInvariants } from '@/src/engine/invariants';
+import { AiLoopLimitError } from '@/src/service/ai-loop';
+
+const events: GameEvent[] = [...start.events]; // runAiLoop's events exclude createGame's own
+try {
+  const result = runAiLoop(start.state, players, {
+    maxMoves: 1000, // the default
+    onTransition: (prev, transition) => {
+      // Called after each move, before the next decision. Throwing here stops the loop;
+      // the move it was called for is already applied.
+      if (checkInvariants(transition.state).length > 0) throw new Error('broken state');
+    },
+  });
+  events.push(...result.events); // every applied move's events, in engine order
+} catch (error) {
+  if (error instanceof AiLoopLimitError) {
+    // error.moves moves were applied and an AI is still to act; error.state is where it stopped.
+    throw new Error(`AI loop stuck after ${error.moves} moves`, { cause: error });
+  }
+  throw error; // RangeError (players do not match the seats), IllegalMoveError, …
+}
+```
+
+`runAiLoop` checks the players against the state before doing anything: the same number as the seats, `players[i].seat === i` and the same `kind` as `state.seats[i]`, else `RangeError` (`players length 3 does not match the game's 4 seats`, `seat 2: …`). Build the players with `createPlayers(state.seats)` and this always holds.
+
+**Who supplies what.** The seed comes from the caller (in the app, `GameService` generates it on the server); the loop adds no randomness of its own: every AI draw comes from `aiRng(state, seat)`, so the same state and players always give the same moves, and replaying the move events reproduces the game without any player (§12.6).
+
+### 12.3 Adding a strategy
+
+1. **Write it** in `src/players/strategies/<name>.ts` as a plain object:
+
+   ```ts
+   import type { AIStrategy } from '../player';
+
+   export const cautiousStrategy: AIStrategy = {
+     name: 'cautious',
+     choose: (view, moves, rng) => { /* return one of `moves` */ },
+   };
+   ```
+
+   - Return **one of the `moves` objects**, never a move you build yourself; the AI player sends its `id` to `applyMove`, and an id that is not legal throws `IllegalMoveError`.
+   - Use **only `rng`** for randomness and only `view` and `moves` for information. The view is what a human in that seat would see; there is no way, and no need, to read the state. `Math.random` and the clock are forbidden by the purity grep, and they would break replay.
+   - `moves` is never empty when the loop asks; the view's `scoreboard` has totals and `live` status for the hand in progress.
+2. **Register it**: add `[cautiousStrategy.name, cautiousStrategy]` to the `STRATEGIES` map in `registry.ts`. `STRATEGY_NAMES` is built from the map, so it follows. A seat then picks it with `strategy: 'cautious'` in its `SeatInfo`.
+3. **Test it** in `tests/unit/players/<name>.test.ts`, and update the `STRATEGY_NAMES` expectation in `registry.test.ts` (it deep-equals the list).
+
+Changing or adding a strategy never changes a deal (the deal streams do not depend on AI choices), so strategies can be compared on the same seeds. The simulator and the simulation suite play `random` on every seat; the random AI's made-bid rate (about 11 % for `argentina-fidepo` with 3 players, §12.4) is the baseline a new strategy should beat.
+
+### 12.4 The simulator: `pnpm simulate`
+
+```sh
+pnpm simulate [--preset <id>] [--players <n>] [--games <n>] [--seed <prefix>]
+```
+
+| Flag | Default | Accepted values |
+|---|---|---|
+| `--preset` | `argentina-fidepo` | a preset id (`argentina-fidepo`, `spain-ludoteka`, `gamerules`, `mexico-bazas`) |
+| `--players` | the preset's minimum player count | a decimal integer within the preset's player range |
+| `--games` | `100` | a positive decimal integer |
+| `--seed` | `sim` | any non-empty string; game `i` uses seed `<prefix>-<i>` |
+
+Every seat is an AI playing `random` (seat `i` is `{ seat: i, playerId: 'ai-<i>', name: 'AI <i>', kind: 'ai' }`, `gameId: 'sim'`). Each game is created with `createGame`, played to the end with one `runAiLoop` call and scored with `evaluate`. After the last game it prints four lines to stdout and exits 0:
+
+```sh
+$ pnpm --silent simulate --preset gamerules --players 4 --games 5 --seed t
+preset: gamerules  players: 4  games: 5  hands/game: 19
+average total per seat: 0: 29.0  1: 33.8  2: 40.2  3: 28.2
+made-bid rate: 15.5%
+duration: 0.2 s
+```
+
+- `hands/game` is the number of hands in the game's hand plan.
+- `average total per seat` is each seat's final total averaged over the games.
+- `made-bid rate` is Σ `madeCount` / (Σ hands × players) × 100, summed over every game and seat (not an average of per-game rates).
+- `duration` is the wall-clock time of the games only (not start-up or argument parsing), in seconds.
+- Every number has one decimal (never `-0.0`). The same flags always print the same lines except `duration`, so two runs can be diffed.
+
+The default run (`argentina-fidepo`, 3 players, 100 games) takes about 6 seconds locally and prints a made-bid rate of about 11 %.
+
+**Errors.** Arguments are parsed with Node's `util.parseArgs` in strict mode, so an unknown flag, a flag without a value and any positional argument are rejected. Then the values are checked in the order preset → players → games → seed, and the first problem is reported. `--players` and `--games` must be written as plain decimal digits (`2.5`, `abc`, `0`, `+3` and `1e2` are rejected). A repeated flag keeps its last value. Any problem prints exactly one line to stderr, nothing to stdout, plays nothing and exits 1:
+
+```
+simulate: unknown preset "nope" (known: argentina-fidepo, spain-ludoteka, gamerules, mexico-bazas)
+simulate: --players must be an integer from 3 to 6 for argentina-fidepo, got "9"
+simulate: --games must be a positive integer, got "2.5"
+simulate: --seed must not be empty
+simulate: Unknown option '--bogus'
+simulate: Option '--games <value>' argument missing
+```
+
+A game that throws (for example `AiLoopLimitError`) or stops before game over prints `simulate: game <prefix>-<i> failed: <message>` to stderr, nothing to stdout, and exits 1.
+
+**Clean output.** `pnpm simulate …` also prints pnpm's own lines (the `> la-podrida-game@0.0.0 simulate …` banner, an "Unsupported engine" warning on other Node versions and, on failure, `ELIFECYCLE …`) to stdout; the script itself writes nothing there on error. Use `pnpm --silent simulate …` (or `pnpm exec tsx scripts/simulate.ts …`) when you pipe, diff or check the output.
+
+**Replaying a simulation-test seed.** The suite's seeds are `sim-<presetId>-<players>-<i>` with the same seats and `gameId`, so `pnpm simulate --preset gamerules --players 4 --seed sim-gamerules-4 --games 18` plays exactly the games of tests `gamerules 4p seed 0` to `17`.
+
+### 12.5 Simulation tests: `pnpm test:sim`
+
+`pnpm test:sim` runs `vitest.sim.config.ts`, which collects only `tests/sim/**/*.test.ts`. For every preset and every valid player count (18 combinations: `argentina-fidepo` and `spain-ludoteka` with 3–6 players, `gamerules` and `mexico-bazas` with 3–7) it plays `S` seeded all-AI games through `runAiLoop`, with seeds `sim-<presetId>-<players>-<i>` for `i = 0 … S − 1`, and every game must reach `game-over`.
+
+**`SIM_SEEDS`** sets `S`:
+
+| `SIM_SEEDS` | Seeds per combination |
+|---|---|
+| unset or empty | 200 (the default, and what CI runs) |
+| a positive integer in decimal digits, e.g. `3`, `2000` | that number |
+| anything else, e.g. `2k`, `0`, `1e3` | every sim file fails at load with `SIM_SEEDS must be a positive integer in decimal digits, got "<value>"`, and the run exits 1 |
+
+The value is validated when `tests/sim/harness.ts` is loaded, which every sim file does, so a typo can never silently run 200 seeds (vitest prints the load error once per file).
+
+```sh
+pnpm test:sim                                   # 18 × 200 games + the ledger tests: 3,605 tests, about 46 s locally
+SIM_SEEDS=3 pnpm test:sim                       # quick smoke run: 59 tests, about 2 s
+SIM_SEEDS=2000 pnpm test:sim                    # the long run, before a release or after an engine change
+SIM_SEEDS=3 pnpm exec vitest run --config vitest.sim.config.ts --reporter verbose tests/sim/mexico-bazas.sim.test.ts
+pnpm exec vitest run --config vitest.sim.config.ts tests/sim/gamerules.sim.test.ts -t "^gamerules 4p seed 17$"
+```
+
+The last command reruns one failing game; `-t` is a regular expression, so anchor it (`seed 17` alone also matches seeds 170–179).
+
+**Layout and naming.**
+
+| File | Contents |
+|---|---|
+| `tests/sim/<presetId>.sim.test.ts` (one per preset) | One line: `defineSimTests('<presetId>')`. One file per preset so vitest runs presets in parallel workers. |
+| `tests/sim/harness.ts` | `SIM_SEEDS`, the seed and seat recipes (`simSeed`, `simSeats`, `simInput`), `playSimGame`, the scoreboard check, `replay`, `checkDeterminismAndReplay`, `defineSimTests`. |
+| `tests/sim/ledger.ts` | The card-conservation ledger (`createLedger`, `LedgerError`); no vitest import. |
+| `tests/sim/ledger.sim.test.ts` | Shows that the ledger fails loudly: a recorded game is accepted unchanged, and a `card-played` changed to another seat's card or to a card never dealt, or a deal with a duplicated card, is rejected with an error naming the hand. |
+
+There is one test per player count and seed, named exactly `<presetId> <players>p seed <i>` (no `describe` wrapper), so the failing seed is always in the name. Each test is one game with its checks, well inside vitest's default 5-second timeout.
+
+**What each test checks.** After every move, from `runAiLoop`'s `onTransition`:
+
+- `checkInvariants(state)` returns `[]` (§10.4);
+- `evaluate(state)` does not throw, every seat's total equals the sum of its points, its made and missed counts add up to the hands scored, and the board has a `live` key exactly while a hand is in progress (§11);
+- the card-conservation ledger holds (§12.6).
+
+A failure throws out of the loop with the move number: `move 312: invariants: …`, `move 312: scoreboard: …` or `move 312: ledger: hand 9: …`. At the end the game must be at `game-over` and its last event must be `game-over`. For the first `min(S, 10)` seeds of each combination the same test also checks **determinism** (a second run of the same seed gives a deep-equal event log, `createGame`'s events included) and **replay** (§12.6).
+
+**CI and time budget.** CI runs `pnpm test:sim` with the default 200 seeds as the step "Simulation tests", right after "Test" (§7). The budget for that step is **10 minutes**. A local default run takes about 46 seconds (the `argentina-fidepo` file dominates: its 3-player games have 981 moves). If a change makes the local default run take more than about 5 minutes, the CI budget is at risk: make the checks cheaper before pushing. The `SIM_SEEDS=2000` run is local only; there is no nightly workflow.
+
+### 12.6 How the ledger and replay checks work
+
+**The card-conservation ledger** (`tests/sim/ledger.ts`) checks what no single state can show: that every card dealt in a hand is accounted for until the hand ends. It is fed the `createGame` state, then every transition in order:
+
+- **Opening a hand.** Hand 0 is opened from the `createGame` state; each later hand from the state of the transition whose events contain `hand-dealt`. The *dealt set* is every seat's hand right after the deal. It must hold `N × cardsPerPlayer` distinct cards, all from `buildDeck(rules.deck, N)`; the trump card must be in the deck, and in the dealt set exactly when `trumpCardInDealerHand` is true. The ledger also records which seat each card was dealt to.
+- **Events, in order.** `card-played`: the card was dealt in this hand, **to the seat that plays it**, and has not been played yet. `hand-completed`: it names the open hand and every dealt card was played exactly once; the hand is closed. `hand-dealt`: no hand is open; the next hand is opened from `transition.state`. `game-over`: no hand is open; nothing is checked after it.
+- **After each transition** that has a hand and no `hand-dealt` event: (cards still in hands) ∪ (cards played in the open hand) equals the dealt set, with no card counted twice.
+
+The move that ends a hand produces `hand-completed` and then `hand-dealt` in the same transition, so the ledger closes the old hand and opens the new one in that order, and skips the after-transition check (the new deal was just checked when it was opened). Failures throw `LedgerError` with a message starting `ledger: hand <k>: `, e.g. `ledger: hand 2: card 7H played by seat 1 was dealt to seat 3`.
+
+**Replay** (`replay` in `tests/sim/harness.ts`) rebuilds a game from its events alone, the way a stored game is rebuilt ([`design.md`](./design.md) §7): `createGame` with the same input, then `applyMove(state, event.seat, moveId)` for every `bid-made` (`bid:<tricks>`) and `card-played` (`play:<cardId>`) event in order, with no player or strategy. The test compares the initial state and, after every replayed move, the full state (including `aiDecisionCount`, which `applyMove` increments for AI seats) and `evaluate(state)` with those of the original run.
+
+**Fast deep equality.** Replay compares about a thousand states per game, so the harness compares with `node:util`'s `isDeepStrictEqual` and calls `expect(…).toEqual(…)` only on a mismatch, to get vitest's diff (`expectDeepEqual(actual, expected, label)`; the label names the step, e.g. `replayed state after move 57`). Per-move checks throw a plain `Error` instead of calling `expect`. Keep it that way: an `expect(…).toEqual(…)` per step is slow at this volume.
+
+### 12.7 Players and service tests
+
+Unit tests live in `tests/unit/players/` and `tests/unit/service/` and run with `pnpm test`.
+
+| File | Protects |
+|---|---|
+| `players/players.test.ts` | Both factories: shapes, `await` for humans, the AI passes exactly its context to the strategy and answers with the chosen move's id; players are plain objects. |
+| `players/random.test.ts` | `randomStrategy` returns `moves[rng.int(0, n − 1)]` over 20 seeds, is uniform over 6,000 draws from one stream, and works with a view whose every property access throws. |
+| `players/registry.test.ts` | `getStrategy` defaults and errors (including inherited names such as `'constructor'`), `STRATEGY_NAMES`, `createPlayers` kinds, seats and names. |
+| `service/player-view.test.ts` | The view equals the table view plus the scoreboard, `finalRanking` only at game over, spectators, and a leak sweep over every state of a 4-player game for every viewer (no other seat's card except the trump card, no seed, rules or `aiDecisionCount`). |
+| `service/ai-loop.test.ts` | Stops for the human and resumes, `onTransition` order and errors, the player checks, the cap, illegal moves, and every preset at its minimum and maximum player count played to game over in one call (`argentina-fidepo` with 3 players in exactly 981 moves). |
+
+Test helpers: a stub view needs `{ … } as unknown as PlayerView`; wrap a stub strategy with `createAiPlayer` and count its `choose` calls to prove the loop asked (or did not ask) it. All-AI games use the same seat recipe as the simulator (§12.4). The engine helpers (`newGame`, `makeSeats`, `playGame`, §10.7) can be imported as `../engine/helpers`.
+
+### 12.8 Gotchas and limitations
+
+- **`result.events` holds only the moves the loop applied**, not `createGame`'s `game-started` and first `hand-dealt`. A full event log is `[...start.events, ...result.events]`.
+- **`prev` in `onTransition` is the loop's own state object** (for the first move, the state you passed in), not a copy. The engine never mutates states, so keeping it is safe.
+- **The cap is checked before each decision, and only for AI seats.** A human to act at the cap is still asked (and answers `await`), and a game that ends on exactly the `maxMoves`-th move returns normally. `AiLoopLimitError.state` is the state after `maxMoves` moves, with an AI to act. `maxMoves` itself is not validated; pass the default or a positive integer.
+- **`createPlayers` does not validate.** It maps `seats` in array order and trusts their seat numbers; `runAiLoop` reports a mismatch with `RangeError`. A game's `state.seats` is always in seat order.
+- **`randomStrategy` with no moves** throws the RNG's `RangeError`. The loop never asks a player with no legal moves (invariant `(f)`, §10.4).
+- **`scripts/` never imports `tests/`.** The simulator re-creates the all-AI seat recipe instead of importing `simSeats`; keep the two identical, or simulator runs stop matching test seeds (§12.4).
+- **The simulator has no `--help` and no `--strategy`**, so every seat plays `random`. Its failing-game path (`game <seed> failed`) has no automated test.
+- **Memory.** A simulated game keeps every intermediate state for replay (about a thousand for `argentina-fidepo` with 3 players). Fine at today's sizes; stream the comparison if games grow much longer.
+- **In `tests/sim/ledger.ts`, failure helpers are function declarations returning `never`**, so TypeScript narrows after them; an arrow function assigned to a `const` does not narrow. Inside callbacks, copy a narrowed `let` into a `const` first.
+- **Not here yet:** seed generation, seat tokens, persistence, `PlayerUpdate` assembly and versions are `GameService`'s and the storage layers' job (later phases); only the `random` strategy exists.
+
+---
+
+## 13. Known limitations
 
 - **Configuration is not validated at server startup yet.** `getConfig()` has no caller; it is wired in by its first user, the GameService factory (Phase 8 in [`implementation.md`](./implementation.md)). Until then a misconfigured deployment would still start.
 - **Storage credentials for the `blob` driver are not checked** by `loadConfig`; that check arrives with the storage layer (Phase 5).
-- **`pnpm simulate` is a stub** that prints `simulate: not implemented until Phase 4` and exits 0. The simulator and the `tests/sim` suite arrive in Phase 4.
 - **The layer rule does not check dynamic `import()` or `require()`.** Use static `import` statements.
-- **No players, persistence or API yet:** `src/domain` (§9), `src/engine` (§10) and `src/score` (§11) exist; `src/players`, `src/state`, `src/storage` and `src/service` are empty, and `/` is a placeholder page. A game can be played and scored only from code or tests.
-- **Engine limitations** are listed in §10.8, **score limitations** in §11.7.
+- **No persistence, `GameService` or API yet:** the game core (`src/domain` §9, `src/engine` §10, `src/score` §11, `src/players` §12) and the two pure service helpers (§12) exist; `src/state` and `src/storage` are empty, `GameService` is not written, and `/` is a placeholder page. A game can be played and scored only from code, tests or `pnpm simulate`.
+- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8.
