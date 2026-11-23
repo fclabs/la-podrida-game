@@ -22,21 +22,21 @@ No environment variables are needed for local development; every setting has a d
 
 ## Commands
 
-| Command          | What it does                                                                                          |
-| ---------------- | ----------------------------------------------------------------------------------------------------- |
-| `pnpm dev`       | Start the Next.js development server on <http://localhost:3000/>.                                     |
-| `pnpm build`     | Production build (`next build`).                                                                      |
-| `pnpm typecheck` | Type-check the whole project (`app/`, `src/`, `tests/`, `scripts/`) with TypeScript `strict`.         |
-| `pnpm lint`      | Run ESLint (zero warnings allowed) and check formatting with Prettier. Also enforces the layer rules. |
-| `pnpm format`    | Rewrite files to the project format with Prettier.                                                    |
-| `pnpm test`      | Run the tests in `tests/unit`, `tests/contract` and `tests/api` with Vitest.                          |
-| `pnpm test:sim`  | Run the long-running simulation tests in `tests/sim` (not part of `pnpm test`).                       |
-| `pnpm simulate`  | Run the command-line game simulator (a stub for now).                                                 |
+| Command          | What it does                                                                                             |
+| ---------------- | -------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`       | Start the Next.js development server on <http://localhost:3000/>.                                        |
+| `pnpm build`     | Production build (`next build`).                                                                         |
+| `pnpm typecheck` | Type-check the whole project (`app/`, `src/`, `tests/`, `scripts/`) with TypeScript `strict`.            |
+| `pnpm lint`      | Run ESLint (zero warnings allowed) and check formatting with Prettier. Also enforces the layer rules.    |
+| `pnpm format`    | Rewrite files to the project format with Prettier.                                                       |
+| `pnpm test`      | Run the tests in `tests/unit`, `tests/contract` and `tests/api` with Vitest.                             |
+| `pnpm test:sim`  | Run the long-running simulation tests in `tests/sim` (not part of `pnpm test`).                          |
+| `pnpm simulate`  | Play batches of all-AI games and print average scores and the made-bid rate (see the development guide). |
 
 Before pushing, run the same checks CI runs:
 
 ```sh
-pnpm typecheck && pnpm lint && pnpm test && pnpm build
+pnpm typecheck && pnpm lint && pnpm test && pnpm test:sim && pnpm build
 ```
 
 ## Documentation
