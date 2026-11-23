@@ -1,8 +1,8 @@
 # CONTEXT — Players, Player View, AI Loop and Simulation (Phase 4)
 
-Last updated by: Iteration 3 (simulation suite and CI step). Next: Iteration 4 (simulator CLI, `scripts/simulate.ts`).
+Last updated by: Iteration 4 (simulator CLI, `scripts/simulate.ts`). Next: Iteration 5 (docs: `docs/design.md` §8, `docs/development.md` §12).
 
-**Protocol note (orchestrator):** the plan's parallel group A (Iterations 3–4) has been downgraded to sequential. **All iterations use the full artifact protocol** (each one rewrites this file, appends to `DECISIONS.md` and writes its own record); the plan's "reduced protocol" sections for Iterations 3 and 4 do not apply.
+**Protocol note (orchestrator):** the plan's parallel group A (Iterations 3–4) has been downgraded to sequential. Iterations 3 and 4 both used the full artifact protocol (rewrote this file, appended to `DECISIONS.md`, wrote their own records); no reconciliation commit is needed before Iteration 5 and no `D-?` placeholders exist.
 
 ## Current state
 
@@ -11,9 +11,11 @@ Last updated by: Iteration 3 (simulation suite and CI step). Next: Iteration 4 (
 - **Iteration 1 shipped `src/players`**: `player.ts` (types `Player`, `AIStrategy`), `human-player.ts`, `ai-player.ts`, `strategies/random.ts`, `registry.ts`. `src/players/.gitkeep` is deleted.
 - **Iteration 2 shipped `src/service`**: `player-view.ts` (`buildPlayerView`), `ai-loop.ts` (`runAiLoop`, `AiLoopLimitError`, `AiLoopOptions`, `AiLoopResult`). `src/service/.gitkeep` is deleted.
 - **Iteration 3 shipped `tests/sim`**: `harness.ts`, `ledger.ts`, `ledger.sim.test.ts` and one `<presetId>.sim.test.ts` per preset; `tests/sim/.gitkeep` is deleted; `.github/workflows/ci.yml` runs `pnpm test:sim` (step "Simulation tests") right after "Test".
-- Not yet built: `scripts/simulate.ts` (still the scaffold stub; Iteration 4), docs (Iteration 5).
+- **Iteration 4 shipped `scripts/simulate.ts`** (`pnpm simulate`, FR-418/FR-419; see "Simulator CLI" below).
+- Not yet built: docs (Iteration 5).
 - Tests: `tests/unit/players/` 3 files / 13 tests; `tests/unit/service/` 2 files / 24 tests; full `pnpm test` 34 files / 606 tests green. `pnpm test:sim` 5 files / 3,605 tests (18 combinations × 200 seeds + 5 ledger tests) green.
 - **Measured sim time**: default `pnpm test:sim` (S = 200) **45.9 s wall** (`/usr/bin/time -p`: real 45.94, user 172.09 s) on the dev machine; vitest "Duration 45.52s". `SIM_SEEDS=3` ≈ 2 s. The argentina-fidepo file dominates (3p games ≈ 60 ms of play + checks).
+- **Measured CLI time**: default `pnpm simulate` (argentina-fidepo, 3 players, 100 games) prints `duration: 5.6 s`; `/usr/bin/time -p pnpm --silent simulate` real 6.03 s. `--preset gamerules --players 4 --games 5 --seed t` ≈ 0.2 s.
 - **Measured speed**: one argentina-fidepo 3-player all-AI game (981 moves) through `runAiLoop(createGame(P-4 input).state, createPlayers(seats))` takes **~58–60 ms** warm (74 ms first run) on the dev machine (`pnpm exec tsx`, 6 seeds `sim-argentina-fidepo-3-<k>`); ~0.06 ms per move including `buildPlayerView` + `evaluate`. Other presets/counts take 7–40 ms per game in vitest.
 
 ## File map
@@ -40,6 +42,7 @@ Last updated by: Iteration 3 (simulation suite and CI step). Next: Iteration 4 (
 | `tests/sim/ledger.sim.test.ts` | VC-412: unaltered game passes; corrupted `card-played` (other seat's card; never-dealt stock trump) and duplicated card in a `hand-dealt` state (hand 2) and in the hand-0 deal → `LedgerError` naming the hand. |
 | `tests/sim/<presetId>.sim.test.ts` ×4 | `argentina-fidepo`, `spain-ludoteka`, `gamerules`, `mexico-bazas`: each is just `defineSimTests('<presetId>')` (VC-411). |
 | `.github/workflows/ci.yml` | CI: checkout, pnpm, node, install, typecheck, lint, test, **Simulation tests** (`pnpm test:sim`), build. |
+| `scripts/simulate.ts` | `pnpm simulate` CLI (FR-418, FR-419). Self-contained, no exports; private `UsageError`, `parseOptions`, `aiSeats` (P-4 recipe, re-created inline — `scripts/` never imports `tests/`), `oneDecimal`, `main`. Covered by `pnpm typecheck` (tsconfig `include` has `scripts/**/*.ts`), ESLint (`eslint .`, no layer rule outside `src/`/`app/`) and Prettier. |
 | `tests/unit/engine/helpers.ts` | `newGame`, `makeSeats`, `playGame`, `firstMove`, … — import only, **never modify**. |
 
 ## Public interfaces
@@ -130,6 +133,26 @@ export function createLedger(): Ledger;
 - Each sim test: play with checks, expect `phase 'game-over'` and last event `game-over`; for `i < min(S, 10)` also a second unchecked run whose full event log must deep-equal (FR-416), and a replay whose initial state, every state and every `evaluate` deep-equal the original (FR-417).
 - Ledger (FR-415, D-008): `openHand` checks the deal (distinct, `N × cardsPerPlayer`, in `buildDeck`, trump in deck and dealt iff `trumpCardInDealerHand`) and records card → seat; events in order: `card-played` (dealt, dealt to that seat, not yet played), `hand-completed` (same hand index; every dealt card played), `hand-dealt` (no hand open; opens from `transition.state`), `game-over` (no hand open; stop checking). After a transition with no `hand-dealt` and a non-null hand: `check` = held ∪ played equals the dealt set, nothing twice.
 
+### Simulator CLI (`scripts/simulate.ts`)
+
+```
+pnpm simulate [--preset <id>] [--players <n>] [--games <n>] [--seed <prefix>]
+# defaults: argentina-fidepo, preset's players.min, 100, 'sim'; game i uses seed '<prefix>-<i>'
+```
+
+- Parsing (P-5, D-010): `node:util` `parseArgs` `{ strict: true, allowPositionals: false }`, all four options `type: 'string'`; values validated in order preset → players → games → seed, first problem wins. `--players` and `--games` must match `/^[1-9][0-9]*$/` (players also within `rules.players.min..max`).
+- Errors (FR-419): exactly one stderr line `simulate: <problem>`, nothing on stdout, exit 1, no game played. Messages: `unknown preset "<id>" (known: …)`; `--players must be an integer from <min> to <max> for <preset>, got "<v>"`; `--games must be a positive integer, got "<v>"`; `--seed must not be empty`; parseArgs errors use the first line of its message (`Unknown option '--bogus'`, `Option '--games <value>' argument missing`, `Unexpected argument 'x'. …`). A game that throws (or ends before `game-over`) → `simulate: game <prefix>-<i> failed: <message>`, exit 1, nothing on stdout.
+- Games: P-4 seats, `createGame({ gameId: 'sim', rules, seats, seed })`, `runAiLoop(start.state, createPlayers(seats))`, `evaluate(final state)`. Only play is timed (`performance.now()`, around the game loop).
+- Output (FR-418, P-1, D-011), stdout only after all games, exit 0:
+  ```
+  preset: <id>  players: <n>  games: <n>  hands/game: <handPlan.length>
+  average total per seat: 0: <x.x>  1: <x.x>  …
+  made-bid rate: <Σ madeCount / (Σ hands × players) × 100, x.x>%
+  duration: <seconds, x.x> s
+  ```
+  Numbers use `toFixed(1)`; `-0.0` prints as `0.0`.
+- `pnpm simulate …` (without `--silent`) also prints pnpm's own banner (`> la-podrida-game@0.0.0 simulate …`, engine WARN, `ELIFECYCLE` on failure) to **stdout**; the script itself writes nothing there on error. Use `pnpm --silent simulate …` or `pnpm exec tsx scripts/simulate.ts …` to see only the program's output (D-012).
+
 Details:
 - `UnknownStrategyError` message: `Unknown AI strategy "<name>" (known: random)`.
 - `createPlayers` maps `seats` in array order (a `GameState`'s seats are in seat order); `player.seat` = `info.seat`. It does not re-validate seat numbers; `runAiLoop` checks `players[i].seat === i` and kinds (FR-410). Unknown strategy → `UnknownStrategyError` from `getStrategy`.
@@ -148,6 +171,7 @@ Details:
   - `grep -rnE "src/(storage|state)|@/src/config|Math\.random|new Date|Date\.now|crypto\.|fetch\(|process\.|performance\." src/service/player-view.ts src/service/ai-loop.ts src/players`
 - Import players and service modules directly (`@/src/players/registry`, `@/src/service/ai-loop`, …); no barrel `index.ts`.
 - **Tests**: `tests/unit/players/*.test.ts`, `tests/unit/service/*.test.ts` (collected by `pnpm test`); `tests/sim/*.sim.test.ts` (only `pnpm test:sim`; `tests/sim/*.ts` helpers without `.test.ts` are not collected). Sim test names are exactly `<presetId> <players>p seed <i>` (no `describe` wrapper); every sim file imports the harness, so an invalid `SIM_SEEDS` fails all of them at load (D-009). Header comment names the FRs/VCs; one `describe` per VC. Tests may use `deriveRng` from `@/src/engine/rng`. Stub views: `{ … } as unknown as PlayerView`. Stub strategies are wrapped with `createAiPlayer` and count their `choose` calls. Heavy deep-equality loops report via `if (bad) expect(detail).toBeNull()` to stay fast.
+- **Scripts** (`scripts/`): outside the layer rule; may use `process`, `performance`, `node:util`; must not import from `tests/` (re-create helpers such as the P-4 seat recipe inline). Errors go to stderr with a `simulate: ` prefix and `process.exitCode = 1` (no `process.exit`).
 - **Formatting**: Prettier formats `src/`, `tests/`, `scripts/`, config files; `docs/` and `specs/` are in `.prettierignore`. Run `pnpm exec prettier --write <paths>` before linting.
 - `docs/development.md` §1–§11 numbering is fixed until Iteration 5 (README links `#5-configuration`); Iteration 5 inserts "Players, views and simulation" as §12 and renumbers "Known limitations".
 - **Commits**: one per iteration, staged by explicit path (never `git add -A`); message ends with a blank line + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never push, PR or merge.
@@ -163,7 +187,7 @@ Details:
 | `SIM_SEEDS=<n> pnpm test:sim` | `n` seeds per combination (positive decimal integer; `2k`, `0` → load error naming the value). `SIM_SEEDS=2000` is the NFR-404 long run (orchestrator, before the PR). |
 | `pnpm vitest run --config vitest.sim.config.ts tests/sim/ledger.sim.test.ts` | Ledger tests only (VC-412). |
 | `SIM_SEEDS=3 pnpm exec vitest run --config vitest.sim.config.ts --reporter verbose tests/sim/<presetId>.sim.test.ts` | One preset, test names visible. |
-| `pnpm simulate` | `tsx scripts/simulate.ts` (stub until Iteration 4). |
+| `pnpm simulate [--preset <id>] [--players <n>] [--games <n>] [--seed <prefix>]` | `tsx scripts/simulate.ts`: all-AI batch + 4-line summary (~6 s default). Add `--silent` (`pnpm --silent simulate …`) to suppress pnpm's banner on stdout. |
 | `pnpm exec tsx <file.ts>` | Run a scratch TS script (resolves `@/`). |
 | `pnpm build` | `next build` (CI runs it). |
 | `node -e "const d=require('./package.json').dependencies;console.log(Object.keys(d).sort().join(','),d['@noble/hashes'])"` | NFR-402 check → `@noble/hashes,next,react,react-dom,zod 2.4.0`. |
@@ -175,6 +199,7 @@ pnpm prints an "Unsupported engine" WARN locally (Node 26 vs declared 24) and "I
 - `createPlayers` trusts `seats` order and seat numbers; validation of players vs. state is `runAiLoop`'s job (FR-410, implemented).
 - `runAiLoop` does not validate `maxMoves` (a negative/NaN value just means "throw at the first AI decision" / "never cap"); callers pass the default or a positive integer.
 - `randomStrategy.choose` on an empty `moves` throws the engine Rng's `RangeError` (`int(0, -1): min must not exceed max`); the engine never offers an empty list to an actor, so there is no extra guard (FR-403 says "non-empty").
-- No CLI yet (Iteration 4); docs not updated (Iteration 5).
+- Docs not updated (Iteration 5).
+- The CLI's runtime-error path (`game <prefix>-<i> failed`) has no automated test; it was checked once by hand with a scratch copy using `maxMoves: 10` (see `iterations/04-simulate-cli.md`). The CLI has no `--help` and no `--strategy` (out of scope).
 - VC-411 / VC-416 CI parts (the branch CI run and its "Simulation tests" duration < 10 min) and VC-413's `SIM_SEEDS=2000` run are pending: the orchestrator does them before/at the PR.
 - The sim keeps every step's state of a game in memory (≈ 1,000 states for argentina 3p) for replay; fine at current sizes.

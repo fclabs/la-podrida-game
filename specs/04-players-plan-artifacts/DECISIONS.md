@@ -64,3 +64,24 @@ Decisions locked in while building `specs/04-players.md` from `specs/04-players-
 - **Decision**: `harness.ts` exports `SIM_SEEDS = simSeeds(process.env.SIM_SEEDS)` at module scope (`^[1-9][0-9]*$`, unset/empty → 200, else `Error` containing `"<value>"`). Every sim file imports the harness (the ledger test too), so all 5 files fail to load and `pnpm test:sim` exits 1. The FR-416 second run uses `playSimGame(..., { check: false })` and compares the full event log (`createGame`'s events included).
 - **Rejected**: checking `SIM_SEEDS` inside a test (a typo would still register 0 or 200 tests); repeating the per-move checks on the second run (same moves, same states — pure cost).
 - **Consequences**: `pnpm test:sim` has 18 × S + 5 tests (3,605 at S = 200; 59 at S = 3).
+
+## D-010: CLI parsing with strict `parseArgs`, positionals rejected, first problem wins  (Iteration 4, plan P-5)
+
+- **Context**: FR-419 lists the invalid arguments; P-5 fixes `node:util` `parseArgs` (`strict: true`, string options) with no new dependency.
+- **Decision**: `scripts/simulate.ts` calls `parseArgs({ strict: true, allowPositionals: false, options: { preset, players, games, seed: { type: 'string' } } })`. A parseArgs error (unknown flag, missing value, positional) is reported with the first line of its message (some span several lines). Values are then validated in the order preset → players → games → seed; the first problem is the one stderr line. `--players`/`--games` must match `/^[1-9][0-9]*$/` (so `2.5`, `abc`, `0`, `+3`, `1e2` are rejected); a repeated flag keeps its last value (parseArgs default).
+- **Rejected**: reporting every problem (FR-419 wants one line); `Number()`/`parseInt` checks (accept `1e2`, `2abc`); accepting positionals (P-5 strict).
+- **Consequences**: error lines are `simulate: <problem>`; exit code via `process.exitCode = 1`, no game played.
+
+## D-011: CLI summary math and formatting  (Iteration 4, plan P-1)
+
+- **Context**: FR-418 lists the summary values; P-1 fixes the made-bid rate; the spec sample fixes labels, order, two-space separators and one decimal.
+- **Decision**: per game, `evaluate(finalState)`; average total per seat = Σ `totals[seat]` / games; made-bid rate = Σ `madeCount` over all games and seats / (Σ `board.hands.length` × players) × 100; `hands/game` = `state.handPlan.length` (same for every game of a preset × player count); duration = `performance.now()` around the game loop only (not parsing or module load), in seconds. All numbers `toFixed(1)`, `-0.0` normalised to `0.0`. A game that does not end at `game-over` is treated as a failure (`simulate: game <seed> failed: …`).
+- **Rejected**: averaging per-game rates (P-1 says sums); timing the whole process (includes tsx start-up).
+- **Consequences**: two runs with the same flags print identical lines except `duration` (VC-414).
+
+## D-012: pnpm's banner is not the program's stdout; verify with `pnpm --silent`  (Iteration 4)
+
+- **Context**: FR-419/VC-415 say "nothing on stdout". `pnpm simulate …` itself prints `> la-podrida-game@0.0.0 simulate …`, an "Unsupported engine" WARN and `ELIFECYCLE …` to stdout, independent of the script.
+- **Decision**: the script never writes to stdout on error; VC-414/VC-415 are verified with `pnpm --silent simulate …` (identical script invocation, pnpm's banner suppressed). No `package.json`/`.npmrc` change (out of scope).
+- **Rejected**: changing the `simulate` script or adding `.npmrc` `loglevel` (touches files outside this iteration; changes every script).
+- **Consequences**: docs (Iteration 5) should show `pnpm simulate …` and mention `--silent` for clean, pipeable output.
