@@ -1,0 +1,43 @@
+# DECISIONS — Game State Manager (Phase 6)
+
+## D-001: Error classes and messages  (Iteration 1)
+**Context**: Spec Data & Interfaces lists six error classes; BR-604 forbids secrets in messages.
+**Decision**: Applied P-1 in `src/state/errors.ts`. Each class extends `Error`, sets `this.name` to its class name, has the spec's `readonly` fields and the exact P-1 message (`Invalid game id: "<id>"`, `Game not found: <id>`, `Game already exists: <id>`, `Commit <v> not found in game <id>`, `Commit <v> already exists in game <id>`, `Invalid document: <reason>`).
+**Rejected**: A shared base class (no caller needs it; `instanceof` per class suffices). Putting Zod messages in errors (can echo values).
+**Consequences**: Messages are safe to log. Iteration 3's `errors.test.ts` (VC-624) checks them.
+
+## D-002: InvalidCommitError reasons and the `firstIssuePath` helper  (Iteration 1)
+**Context**: P-2 fixes the reason tokens; a Zod failure must become `meta-schema:<path>` etc. without the issue message.
+**Decision**: `src/state/schemas.ts` exports `firstIssuePath(error: z.ZodError): string`: the first issue's path joined with `.`, or `(root)` when empty. Iteration 2/3 build reasons as `` `meta-schema:${firstIssuePath(e)}` ``, `commit-schema:…`, `board-schema:…`, plus the fixed tokens `initial-version`, `initial-state-version`, `state-game-id`, `seats-mismatch`, `commit-version`, `state-version`, `final-version`.
+**Rejected**: Inline path joining in each manager method (duplicated); exposing `issue.message`.
+**Consequences**: One extra export of `schemas.ts` beyond the spec table (listed in CONTEXT.md).
+
+## D-003: Schema construction  (Iteration 1)
+**Context**: P-3; FR-602 rules must apply on every read and write.
+**Decision**: Every document schema is a `z.strictObject` with `schemaVersion: z.literal(1)`. Single-field rules sit on the field (`gameId` regex, `createdAt`/`at` via a `toISOString` round-trip refine, `version` 0–`MAX_COMMIT_VERSION`, `clientRequestId` 1–128). Cross-field rules use `.superRefine`, one issue per broken rule with a path at the field (`seats.<i>.seat`, `seatTokenHashes` for the length, `seatTokenHashes.<i>`, `actorSeat`, `clientRequestId`). `CommitSchema` validates the full document (with `schemaVersion`); there is no body schema: validate a `CommitBody` by parsing `{ schemaVersion: 1, ...next }`. Types are `z.infer`; `CommitBody = Omit<Commit, 'schemaVersion'>`. Domain parts reuse `PresetIdSchema`, `SeatInfoSchema`, `GameEventSchema`, `GameStateSchema`.
+**Rejected**: A separate `CommitBodySchema` (two sources of truth).
+**Consequences**: `superRefine` runs only once the object's shape parsed, so a document breaking a shape rule and a cross-field rule reports only the shape issue first. An extra top-level key reports `issuePath ''` (Zod `unrecognized_keys` has an empty path).
+
+## D-004: Imports inside `src/state`  (Iteration 1)
+**Context**: P-8 / BR-603 layer purity.
+**Decision**: `keys.ts` imports `./errors`; `schemas.ts` imports `zod`, `@/src/domain/schemas` and `./keys`. No `../`, no `@/src/config`, engine, score, players or service. Storage will be imported only from `@/src/storage/object-store` (Iteration 2).
+**Rejected**: A barrel `index.ts` (spec: none).
+**Consequences**: The two BR-603 greps print nothing; `pnpm lint` enforces the layer rule.
+
+## D-005: Compile-time ScoreBoard check uses strict Equals  (Iteration 1)
+**Context**: P-12 allows relaxing `Equals` to mutual `extends` if `readonly`/optional differences break it.
+**Decision**: The strict identity-based `Equals` passes as is (no `exactOptionalPropertyTypes`, so `live?: X[] | undefined` equals `live?: X[]`). No relaxation. `tests/unit/state/types.test-d.ts` exports `type _ScoreBoardMatches` (exported so ESLint's unused-vars rule does not flag it).
+**Rejected**: Mutual-`extends` form (weaker, not needed).
+**Consequences**: Verified to bite: adding a field to `ScoreBoardSchema` makes `pnpm typecheck` fail with TS2344.
+
+## D-006: Extra exports of `keys.ts`  (Iteration 1)
+**Context**: `schemas.ts` needs the FR-600 pattern for `GameMeta.gameId` and `FinalScores.gameId`.
+**Decision**: `keys.ts` also exports `GAME_ID_PATTERN` (`/^[a-z2-7]{26}$/`). `parseCommitKey` validates its `gameId` (throws `InvalidGameIdError`), like every builder. All builders compose through `gameKeyPrefix`, so the id check is always first; `indexCreatedKey(date, id)` checks the id before the date; `commitKey` checks the id before the version.
+**Rejected**: Duplicating the regex in `schemas.ts`; `parseCommitKey` returning `null` for a bad id (would hide caller bugs).
+**Consequences**: Callers must pass a validated id to `parseCommitKey` (the manager always does).
+
+## D-007: Numeric field typing in the schemas  (Iteration 1)
+**Context**: The domain `ScoreBoard` and the spec documents type numbers as `number`; the spec bounds only some.
+**Decision**: Seats, indices, bids, trick counts and made/missed counts are `z.int().min(0)`; `ranking[].place` is `z.int().min(1)`; `points`, `totals` and `ranking[].total` are `z.number()` (scores may be negative). `actorSeat` is a non-negative int or `null`. `engineVersion` is `z.int().min(1)`. `FinalScores.version` is `z.int().min(0)` (FR-616 states only "integer ≥ 0"); `Commit.version` and `Head.version` are bounded by `MAX_COMMIT_VERSION`.
+**Rejected**: Plain `z.number()` everywhere (would accept `1.5` seats).
+**Consequences**: VC-604 proves every engine-produced scoreboard parses under these bounds for all four presets.
