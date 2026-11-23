@@ -19,8 +19,9 @@ This guide explains how the repository is organised, which rules the tooling enf
 | Prettier | 3 | Checked by `pnpm lint`. |
 | Zod | 4 | Runtime dependency, used for configuration and the domain schemas (§9). |
 | `@noble/hashes` | 2.4.0 (exact) | Runtime dependency, used by the engine's seeded random streams (§10.6). |
+| `@vercel/blob` | 2.9.0 (exact) | Runtime dependency, used only by the Vercel Blob storage driver (§13). |
 
-**Dependencies.** Runtime `dependencies` are limited to `next`, `react`, `react-dom`, `zod` and `@noble/hashes` (SHA-256 for the engine's random streams, §10.6). Everything else is a `devDependency`. All versions in `package.json` are **exact pins** (no `^`/`~`): add packages with an explicit version, e.g. `pnpm add -D some-tool@1.2.3`, so every upgrade is a visible, deliberate change.
+**Dependencies.** Runtime `dependencies` are limited to `next`, `react`, `react-dom`, `zod`, `@noble/hashes` (SHA-256 for the engine's random streams, §10.6) and `@vercel/blob` (the Blob storage driver, §13). Everything else is a `devDependency`. All versions in `package.json` are **exact pins** (no `^`/`~`): add packages with an explicit version, e.g. `pnpm add -D some-tool@1.2.3`, so every upgrade is a visible, deliberate change.
 
 ---
 
@@ -48,7 +49,7 @@ tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
 
-`src/domain` (§9), `src/engine` (§10), `src/score` (§11) and `src/players` (§12) are built, and `src/service` holds the two pure helpers `buildPlayerView` and `runAiLoop` (§12) but not `GameService` yet. `src/state` and `src/storage` are still empty (each holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
+`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12) and `src/storage` (§13) are built, and `src/service` holds the two pure helpers `buildPlayerView` and `runAiLoop` (§12) but not `GameService` yet. `src/state` is still empty (it holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
 
 **Import alias.** `@/` maps to the **project root**, so imports read `@/src/engine/...` or `@/app/...`. It works in TypeScript, Next.js, Vitest and `tsx`.
 
@@ -102,7 +103,7 @@ Tests are Vitest files named `*.test.ts`, placed in the folder that matches what
 | Folder | Put here | Run by |
 |---|---|---|
 | `tests/unit/` | Pure logic: domain helpers, engine and score functions, config, lint-rule fixtures. | `pnpm test` |
-| `tests/contract/` | Contracts that several implementations must satisfy (e.g. one suite run against every storage driver). | `pnpm test` |
+| `tests/contract/` | Contracts that several implementations must satisfy (e.g. one suite run against every storage driver, §13.6). The Vercel Blob run is skipped unless `BLOB_READ_WRITE_TOKEN` is set. | `pnpm test` |
 | `tests/api/` | Route handlers, called directly. | `pnpm test` |
 | `tests/sim/` | Long-running simulations (many full games). | `pnpm test:sim` only |
 
@@ -162,6 +163,7 @@ Rules:
 - **Values are not trimmed.** `RETENTION_DAYS` must be digits only (`"007"` → 7; `" 365"`, `"+5"`, `"1.5"` are invalid).
 - **`CRON_SECRET` is optional locally** (no `VERCEL_ENV`, or `development`), so local development and tests start with no variables at all. On preview and production it must be set.
 - Only these variables are read; anything else in the environment is ignored.
+- **`loadConfig` does not check the Blob credentials.** With `STORAGE_DRIVER=blob`, `createObjectStore` requires `BLOB_READ_WRITE_TOKEN` or `BLOB_STORE_ID` and throws `ConfigError` without them (§13.3).
 
 **Errors list every problem at once.** Invalid configuration throws a single `ConfigError` whose message names every invalid variable, one per line:
 
@@ -203,7 +205,7 @@ It works this way because a misconfigured deployment should be fixed in one pass
 8. `pnpm test:sim` (step "Simulation tests": the seeded all-AI simulation with the default 200 seeds, §12.5; budget < 10 minutes)
 9. `pnpm build`
 
-The run fails as soon as one step fails. CI needs no secrets and sets no environment variables: tests pass explicit environment maps to `loadConfig`. The workflow has read-only access to the repository.
+The run fails as soon as one step fails. CI needs no secrets and sets no environment variables: tests pass explicit environment maps to `loadConfig`, and the storage contract run against Vercel Blob is reported as skipped because `BLOB_READ_WRITE_TOKEN` is not set (§13.6). The workflow has read-only access to the repository.
 
 **Why `build` is in CI.** `next build` catches errors that typecheck and lint don't (for example invalid page exports or prerendering failures), and there are no preview deployments yet to catch them.
 
@@ -880,10 +882,245 @@ Test helpers: a stub view needs `{ … } as unknown as PlayerView`; wrap a stub 
 
 ---
 
-## 13. Known limitations
+## 13. Storage
+
+`src/storage` is where game data will live: an `ObjectStore` that keeps **bytes under string keys**, with three drivers (in-memory, filesystem and Vercel Blob) that behave the same, a factory that picks one from the configuration, and two helpers that read and write JSON validated with Zod. Its callers are the Game State Manager and the retention job (both still to come); nothing calls it yet. The design, the guarantees and the reasons behind them are in [`architecture.md`](./architecture.md) §6.1; this section is about using, configuring and testing the code.
+
+**Storage is generic.** It knows nothing about games: key names and document schemas belong to the state layer. Inside `src` it imports only `src/config.ts` (always written `@/src/config`); files in `src/storage` import each other with `./…`. Three greps keep the layer honest (they also match comments, so keep those words out of comments in `src/storage`):
+
+```sh
+grep -rnE "from '(@/src|\.\./)" src/storage | grep -v "from '@/src/config'"   # must find nothing: storage stays generic
+grep -rniwE "lock|locking|ifMatch|compareAndSwap" src/storage                 # must find nothing: create-only puts are the only concurrency primitive
+grep -rnE "access: 'public'|useCache: true" src/storage                        # must find nothing: Blob is private and never read from cache
+```
+
+### 13.1 Module map
+
+| Module | Exports | What it does |
+|---|---|---|
+| `@/src/storage/object-store` | types `ObjectStore`, `StoredObject`, `PutOptions`, `ListOptions`, `ListResult`; `ObjectExistsError`, `InvalidKeyError`, `CorruptObjectError`; `MAX_KEY_LENGTH` (512), `MAX_LIST_LIMIT` (1000); `assertValidKey`, `assertValidPrefix`; `getJson`, `putJson`; `resolveListLimit`, `checkListArgs`, `pageKeys` | The contract every driver implements, its errors, the key rule and the JSON helpers. The last three functions are for driver authors (§13.6). |
+| `@/src/storage/memory-store` | `MemoryObjectStore` | Objects in a `Map` owned by the instance. |
+| `@/src/storage/file-store` | `FileObjectStore` | Objects as files under a root folder (§13.5). |
+| `@/src/storage/vercel-blob-store` | `VercelBlobObjectStore` | Objects in a private Vercel Blob store through `@vercel/blob` (pinned to 2.9.0). |
+| `@/src/storage` (`index.ts`) | `createObjectStore(config)` | Builds the driver selected by the configuration (§13.3). |
+
+`index.ts` exports only the factory; import types, errors and helpers from `@/src/storage/object-store` and a driver class from its own module.
+
+### 13.2 Keys
+
+A key is 1–512 characters: one or more segments joined by `/`, each matching `^[A-Za-z0-9_-][A-Za-z0-9._-]*$`.
+
+| Valid | Invalid |
+|---|---|
+| `a`, `games/abc/meta.json`, `index/created/2026-11-23/x_y-z` | `''`, `/a`, `a/`, `a//b`, `.`, `a/..`, `a/.tmp-1`, `a b`, `a\b`, `é`, anything over 512 characters |
+
+A `list` prefix is valid when it is `''` or when `prefix + 'x'` is a valid key, so `games/`, `games/ab` and `index/created/2026-` work and `/games`, `games//x`, `../` and `games/.t` do not. Every driver applies the rule before doing any I/O and rejects with `InvalidKeyError` (its `key` property holds the rejected string). Call `assertValidKey(key)` or `assertValidPrefix(prefix)` to check a string yourself; they throw the same error synchronously.
+
+When you design key names (the state layer's key builders do this):
+
+- **Never make one key a path prefix of another** (`a` and `a/b`). The file store cannot hold a file and a folder with the same name, and its behaviour for such keys is unspecified.
+- **Use one letter case.** On a case-insensitive filesystem (the macOS default, Windows) `A/1` and `a/1` are the same file, so the second create-only put fails with `ObjectExistsError`. Memory and Blob treat them as different keys.
+- **Pad numbers** that must sort (`commits/00000042.json`): `list` sorts by code unit, so `a/10` comes before `a/2`.
+
+### 13.3 Choosing a driver
+
+`createObjectStore(config)` reads three groups of settings from `Config` (§5):
+
+| `STORAGE_DRIVER` | Store | Settings | Use it for |
+|---|---|---|---|
+| `file` (default outside Vercel) | `new FileObjectStore(FILE_STORE_DIR)` | `FILE_STORE_DIR`, default `.data/` (git-ignored), resolved against the working directory; created on the first write | Local development: data survives restarts and can be inspected on disk. |
+| `memory` | one `MemoryObjectStore` **shared by the whole process** | – | Tests and throwaway runs. Data is lost when the process exits. |
+| `blob` (default when `VERCEL=1`) | `VercelBlobObjectStore` | `BLOB_READ_WRITE_TOKEN`, or `BLOB_STORE_ID` (see below) | Preview and production deployments; running against the preview store from outside Vercel. |
+
+**Blob credentials.** If `BLOB_READ_WRITE_TOKEN` is set, the driver passes it to every SDK call; use it outside Vercel (CI, a local run against the preview store). Otherwise `BLOB_STORE_ID` must be set: Vercel sets it, together with `VERCEL_OIDC_TOKEN`, when a Blob store is connected to the project, and the SDK then authenticates with the OIDC token on its own (from the environment or the request context). If neither variable is set, `createObjectStore` throws:
+
+```
+Invalid configuration:
+  - BLOB_READ_WRITE_TOKEN or BLOB_STORE_ID is required when STORAGE_DRIVER is blob
+```
+
+The check lives in the factory, not in `loadConfig`, because only the Blob driver needs these credentials: `loadConfig` accepts `STORAGE_DRIVER=blob` without them, and the error appears when the store is built. Like every `ConfigError`, the message never contains a value. A missing or invalid OIDC token is reported by the SDK on its first call, not by the factory.
+
+Set the variables in the shell or in `.env.local` (git-ignored, §8). Point local runs at the **preview** Blob store only (with its `BLOB_READ_WRITE_TOKEN` in `.env.local`), never at production.
+
+### 13.4 Using a store
+
+In the app, build the store from the configuration once and pass it to the code that needs it:
+
+```ts
+import { getConfig } from '@/src/config';
+import { createObjectStore } from '@/src/storage';
+
+const store = createObjectStore(getConfig());
+```
+
+The example below uses a fresh `MemoryObjectStore`, as a test would; the calls are the same on every driver.
+
+```ts
+import { z } from 'zod';
+import { MemoryObjectStore } from '@/src/storage/memory-store';
+import {
+  CorruptObjectError,
+  ObjectExistsError,
+  getJson,
+  putJson,
+} from '@/src/storage/object-store';
+
+const store = new MemoryObjectStore();
+
+// Persisted documents carry a schemaVersion, checked on every read.
+const NoteSchema = z.object({ schemaVersion: z.literal(1), text: z.string() });
+
+// putJson is create-only unless told otherwise: the second write of the same key fails.
+await putJson(store, 'notes/n1/meta.json', { schemaVersion: 1, text: 'first' });
+try {
+  await putJson(store, 'notes/n1/meta.json', { schemaVersion: 1, text: 'second' });
+} catch (error) {
+  if (!(error instanceof ObjectExistsError)) throw error;
+  // error.key === 'notes/n1/meta.json'; the stored body is still 'first'.
+}
+
+// A mutable document is written with overwrite.
+await putJson(store, 'notes/n1/head.json', { schemaVersion: 1, text: 'v1' }, { mode: 'overwrite' });
+await putJson(store, 'notes/n1/head.json', { schemaVersion: 1, text: 'v2' }, { mode: 'overwrite' });
+
+// getJson returns the schema's output, or null for a missing key.
+const meta = await getJson(store, 'notes/n1/meta.json', NoteSchema); // { schemaVersion: 1, text: 'first' }
+const none = await getJson(store, 'notes/n2/meta.json', NoteSchema); // null
+
+// Raw bytes: strings are stored as UTF-8, bodies come back as Uint8Array.
+await store.put('notes/n1/raw.txt', 'héllo');
+const raw = await store.get('notes/n1/raw.txt');
+const text = raw === null ? null : new TextDecoder().decode(raw.body); // 'héllo'
+
+// A body that does not match the schema is reported, not returned.
+await store.put('notes/n1/bad.json', '{"schemaVersion":2,"text":"?"}');
+try {
+  await getJson(store, 'notes/n1/bad.json', NoteSchema);
+} catch (error) {
+  if (!(error instanceof CorruptObjectError)) throw error;
+  // error.reason === 'schema', error.issuePath === 'schemaVersion'
+}
+
+// Page through a prefix, then delete everything found (delete is idempotent).
+const keys: string[] = [];
+let cursor: string | undefined;
+do {
+  const page = await store.list('notes/', { cursor, limit: 2 });
+  keys.push(...page.keys);
+  cursor = page.cursor;
+} while (cursor !== undefined);
+// keys: ['notes/n1/bad.json', 'notes/n1/head.json', 'notes/n1/meta.json', 'notes/n1/raw.txt']
+await store.delete(keys);
+```
+
+**Errors you can get.**
+
+| Error | From | Meaning and what to do |
+|---|---|---|
+| `ObjectExistsError` (`key`) | create-only `put` / `putJson` | The key is taken. In the state layer this is the lost-race signal for a commit. On Blob it can also mean your own write landed and the SDK's retry collided (§13.7): read the object back and compare when it matters. |
+| `InvalidKeyError` (`key`) | any method, `assertValidKey`, `assertValidPrefix` | A programming error: fix the key builder. |
+| `CorruptObjectError` (`key`, `reason`, `issuePath`) | `getJson` | `reason: 'invalid-json'`: the body is not valid UTF-8 JSON. `reason: 'schema'`: it parsed but failed the schema (an unknown `schemaVersion` included); `issuePath` is the first Zod issue's path joined with `.`, or `''` for the root. |
+| `RangeError` | `list` | `limit` not an integer from 1 to 1000, or (memory and file) a `cursor` that is not a key under the prefix. |
+| `TypeError` | `putJson` | `JSON.stringify` returned `undefined` (the value is `undefined`, a function, a symbol); nothing was written. |
+| `ConfigError` | `createObjectStore` | `STORAGE_DRIVER=blob` with no Blob credentials (§13.3). |
+| anything else | any method | Filesystem and Blob SDK errors (permissions, network, quota) propagate unchanged. |
+
+Error messages contain the key and a fixed reason (`Object already exists: <key>`, `Invalid key: "<key>"`, `Corrupt object <key>: schema mismatch at <path>`), never a body or a credential, so they are safe to log. Validation errors arrive as rejected promises, never as synchronous throws, so `await` with `try`/`catch` (or `.catch`) catches everything.
+
+### 13.5 The file store on disk
+
+Each key is one file under the root; `/` in the key is a folder separator:
+
+```
+.data/                                   ← FILE_STORE_DIR
+  games/abc/meta.json                    ← key games/abc/meta.json
+  games/abc/commits/00000000.json        ← key games/abc/commits/00000000.json
+  games/abc/.tmp-3f0c…                   ← a write in progress (or left by a crash); never a key
+```
+
+- **How a write works.** The body goes to a temp file `.tmp-<uuid>` in the target's folder, which is fsynced and closed, then published in one atomic step: `link` for create-only (it fails if the target exists, which is how the conflict is detected), `rename` for overwrite. The temp file is removed in every outcome, and the folder is fsynced so the new name survives a crash. A reader therefore never sees half a file.
+- **`.tmp-` files.** Names starting with `.` are never keys, so `list` skips them and they are invisible to callers. A crash in the middle of a put can leave one behind; it is harmless and can be deleted while nothing is running.
+- **Folders.** Parent folders are created on demand. `delete` removes files only, so empty folders stay; they never show up in `list`. A path that is a folder reads as a missing key.
+- **Plain files.** Bodies are stored as-is (JSON documents are readable with any editor). To start over, stop the server and delete the root folder.
+- **Cost.** Each put does two fsyncs (file and folder), about 14 ms on a Mac. That is fine for development; tests that need hundreds of keys should write files directly instead of calling `put` many times.
+- **Local disks only.** The atomicity relies on `link` and `rename` being atomic, which holds on APFS and ext4 but not necessarily on network filesystems.
+
+### 13.6 Storage tests
+
+| File | Protects |
+|---|---|
+| `tests/contract/object-store.contract.ts` | The shared contract suite, `runObjectStoreContract(name, makeStore, { exactCursor })`. Not a `.test.ts` file, so vitest does not run it on its own. |
+| `tests/contract/{memory,file,blob}-store.contract.test.ts` | One run of the suite per driver: a fresh store per test (memory), a fresh `os.tmpdir()` folder per test, removed afterwards (file), or a per-test namespace in a real Blob store (Blob, only with a token). |
+| `tests/contract/prefixed-store.ts` | The test-only wrapper that gives each Blob test its own `contract/<runId>/<testId>/` namespace. |
+| `tests/unit/storage/keys.test.ts`, `json.test.ts` | The key and prefix rule; `getJson`/`putJson` and the exact error messages. |
+| `tests/unit/storage/memory-store.test.ts`, `file-store.test.ts` | Body copies; cursor rules; 1,001 keys paged as 1000 + 1; the file layout, hidden `.tmp-` files and no temp files left after a 10-way create race. |
+| `tests/unit/storage/vercel-blob-store.test.ts`, `factory.test.ts` | The exact SDK calls and error mapping against a mocked `@vercel/blob`; driver selection and the credentials rule. |
+
+The suite checks key validation, create-only conflicts (including 10 concurrent creates of one key: exactly one wins), overwrite, missing keys, reads during an 8 MiB write (never a partial body), list order and paging, idempotent deletes and the JSON helpers.
+
+```sh
+env -u BLOB_READ_WRITE_TOKEN pnpm vitest run tests/contract        # memory + file pass, Blob reported as skipped
+env -u BLOB_READ_WRITE_TOKEN pnpm vitest run tests/unit/storage    # storage unit tests, mocked SDK
+pnpm vitest run tests/contract/memory-store.contract.test.ts --reporter verbose   # one line per check
+```
+
+The first command prints `Test Files 2 passed | 1 skipped (3)`. The memory and file runs take about 1 s together locally; they run on every `pnpm test`, so keep them well under 30 s in CI.
+
+**Running the contract against Vercel Blob.** This talks to a **real store** and creates, overwrites and deletes objects in it. Use the preview store's read-write token, never production's:
+
+```sh
+BLOB_READ_WRITE_TOKEN=… pnpm vitest run tests/contract/blob-store.contract.test.ts
+```
+
+Every object is written under `contract/<runId>/<testId>/` (random ids), so runs never collide with each other or with game data, and an `afterAll` deletes everything under `contract/<runId>/`. An interrupted run can leave objects under `contract/`; delete them by listing that prefix. On Blob the run skips one check, the cursor at an exact page boundary, because the SDK may report another page when none is left.
+
+**`BLOB_READ_WRITE_TOKEN` in your shell turns on the Blob run inside `pnpm test` too.** If you keep it exported (for example from `.env.local` loaded into the shell), run the normal suite with `env -u BLOB_READ_WRITE_TOKEN pnpm test`.
+
+**Mocking the SDK.** Unit tests replace only the four calls and keep the real error classes:
+
+```ts
+vi.mock('@vercel/blob', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@vercel/blob')>()),
+  put: vi.fn(), get: vi.fn(), list: vi.fn(), del: vi.fn(),
+}));
+```
+
+Reset with `vi.resetAllMocks()` in `beforeEach` and assert on `vi.mocked(put).mock.calls`. A mocked `get` result needs a stream body, e.g. `{ statusCode: 200, stream: new Response(bytes).body, … }`; type `bytes` as `Uint8Array<ArrayBuffer>`, or `pnpm typecheck` rejects it as a `Response` body.
+
+**Adding a driver.** Implement `ObjectStore` with every method `async`, validating first (`assertValidKey` for each key, every key of a `delete` before deleting any). For `list`, the shared helpers give you the exact semantics of the memory and file stores:
+
+```ts
+async list(prefix: string, opts?: ListOptions): Promise<ListResult> {
+  const args = checkListArgs(prefix, opts); // prefix, then limit, then cursor; throws before any I/O
+  const all: Iterable<string> = /* every stored key, in any order */;
+  return pageKeys(all, prefix, args);       // filter, sort by code unit, page; cursor = last key iff more remain
+}
+```
+
+A driver with opaque backend cursors (like Blob) uses `assertValidPrefix` and `resolveListLimit` instead of `checkListArgs`. Then add `tests/contract/<driver>-store.contract.test.ts` calling `runObjectStoreContract('<driver>', makeStore, { exactCursor: true })`, where `makeStore` returns `{ store, cleanup }` for one test; pass `exactCursor: false` only if the backend cannot tell that a page was the last one.
+
+### 13.7 Gotchas and limitations
+
+- **The Blob driver has not run against a real store yet.** It is tested against a mocked SDK only. Four behaviours are assumed until the Blob contract run and the preview checks (architecture §11) confirm them: a create-only conflict comes back as an SDK error whose message contains `already exists` (the SDK has no error class for it); `get` of a missing key returns `null`; `list` pages come back in ascending order across pages and cover every key; and `del` with missing keys either succeeds or throws `BlobNotFoundError` after deleting the others.
+- **On Blob, `ObjectExistsError` from a create-only put may hide your own success.** The SDK retries network errors and 5xx responses (`VERCEL_BLOB_RETRIES`, default 10). If the first attempt landed and only its response was lost, the retry collides with your own object. Where it matters, read the object back and compare it with what you wrote; commits carry a unique `clientRequestId` for this (architecture §6.3).
+- **A Blob listing is a hint.** Never decide that something does not exist from `list` alone on Blob; confirm with `get`/`exists`, which are always uncached.
+- **Blob reads are never cached**, immutable keys included. This is the safe default; whether cached reads of immutable keys are worth it is to be measured in preview.
+- **A large Blob `delete` is not atomic.** Keys go to the SDK in batches of 1000 distinct keys, one batch at a time. If a batch fails with anything but `BlobNotFoundError`, earlier batches are already deleted and later ones are not sent; retry the whole call.
+- **Cursors differ by driver.** On memory and file the cursor is the last key of the page, and a cursor that is not a key under the prefix is a `RangeError`; on Blob it is an opaque SDK string. Treat cursors as opaque and pass them back only with the same prefix.
+- **The memory store is per process when built by the factory.** Every `createObjectStore` call with `STORAGE_DRIVER=memory` returns the same instance, so tests that use the factory share data within a test file. Use distinct keys, or `new MemoryObjectStore()` for an isolated store.
+- **Case-insensitive filesystems and prefix-colliding keys** behave differently on the file store (§13.2).
+- **`contentType` is write-only.** Only Blob forwards it (`putJson` sets `application/json`); no driver returns it, and memory and file ignore it.
+- **`CorruptObjectError.issuePath` always exists as a property**, even for `'invalid-json'`, where its value is `undefined` (class fields are always defined). Test it with `=== undefined`, not with `in`.
+- **Not in the interface:** ETag-conditional writes (`ifMatch`), object metadata (size, timestamps), streaming bodies and content types on reads.
+
+---
+
+## 14. Known limitations
 
 - **Configuration is not validated at server startup yet.** `getConfig()` has no caller; it is wired in by its first user, the GameService factory (Phase 8 in [`implementation.md`](./implementation.md)). Until then a misconfigured deployment would still start.
-- **Storage credentials for the `blob` driver are not checked** by `loadConfig`; that check arrives with the storage layer (Phase 5).
+- **Blob credentials are checked by `createObjectStore`, not by `loadConfig`** (§13.3), so a `blob` configuration without them is reported when the store is first built, not at startup.
+- **The Vercel Blob driver has not run against a real store yet**; it is tested against a mocked SDK, and the behaviours it assumes are listed in §13.7.
 - **The layer rule does not check dynamic `import()` or `require()`.** Use static `import` statements.
-- **No persistence, `GameService` or API yet:** the game core (`src/domain` §9, `src/engine` §10, `src/score` §11, `src/players` §12) and the two pure service helpers (§12) exist; `src/state` and `src/storage` are empty, `GameService` is not written, and `/` is a placeholder page. A game can be played and scored only from code, tests or `pnpm simulate`.
-- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8.
+- **No game persistence, `GameService` or API yet:** the game core (`src/domain` §9, `src/engine` §10, `src/score` §11, `src/players` §12), the two pure service helpers (§12) and the storage layer (`src/storage`, §13) exist, but `src/state` is empty, so no game is saved; `GameService` is not written, and `/` is a placeholder page. A game can be played and scored only from code, tests or `pnpm simulate`.
+- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7.
