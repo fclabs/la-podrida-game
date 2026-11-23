@@ -41,3 +41,45 @@
 **Decision**: Seats, indices, bids, trick counts and made/missed counts are `z.int().min(0)`; `ranking[].place` is `z.int().min(1)`; `points`, `totals` and `ranking[].total` are `z.number()` (scores may be negative). `actorSeat` is a non-negative int or `null`. `engineVersion` is `z.int().min(1)`. `FinalScores.version` is `z.int().min(0)` (FR-616 states only "integer ≥ 0"); `Commit.version` and `Head.version` are bounded by `MAX_COMMIT_VERSION`.
 **Rejected**: Plain `z.number()` everywhere (would accept `1.5` seats).
 **Consequences**: VC-604 proves every engine-produced scoreboard parses under these bounds for all four presets.
+
+## D-008: Serialization and byte comparison  (Iteration 2)
+**Context**: P-4; FR-605/FR-613 compare the bytes a call wrote with the stored bytes.
+**Decision**: Module-private helpers in `game-state-manager.ts`: `encodeJson(value)` (`TextEncoder` over `JSON.stringify`), `serializeMeta(meta)` and `serializeCommit(commit)` (each builds a fresh literal with keys in the spec's Data & Interfaces order, `schemaVersion: 1` first), and `bytesEqual(a, b)`. The bytes are produced once per call and written with `store.put(key, bytes, { mode: 'create-only', contentType: 'application/json' })` inside the private `#createOrMatch(gameId, key, bytes)`. `head.json` goes through `putJson` in the private `#writeHead(gameId, version)` (the only `mode: 'overwrite'` site). The index marker is `store.put(key, new Uint8Array(0), { mode: 'create-only' })`.
+**Rejected**: `putJson` for meta/commits (its bytes are not available for the re-read compare).
+**Consequences**: Iteration 3's `commit` reuses `serializeCommit`, `bytesEqual` and `#writeHead`; `#createOrMatch` throws `GameExistsError`, so `commit` needs its own conflict variant.
+
+## D-009: Commit and meta reads  (Iteration 2)
+**Context**: P-5; FR-607, FR-610.
+**Decision**: Private `#readCommit(gameId, version): Promise<Commit | null>` = `getJson(store, commitKey, CommitSchema)` then `new CorruptObjectError(key, 'schema', 'version')` / `(key, 'schema', 'state.gameId')` on mismatch. `loadMeta` throws `new CorruptObjectError(metaKey, 'schema', 'gameId')` when `meta.gameId ≠ gameId`. Version check runs before the gameId check.
+**Rejected**: Folding the identity checks into the schema (the key is not part of the document).
+**Consequences**: Every commit read except the raw re-reads goes through `#readCommit` (Iteration 3's `eventsSince` too).
+
+## D-010: Index marker date  (Iteration 2)
+**Context**: P-7; FR-604 step 1 needs the UTC date of `createdAt`.
+**Decision**: `indexCreatedKey(meta.createdAt.slice(0, 10), gameId)` on the validated meta.
+**Rejected**: `new Date(createdAt)` round trip (redundant: the schema guarantees the `toISOString` form).
+**Consequences**: VC-605 proves `23:59:59.999Z` stays on the same day.
+
+## D-011: Test support files  (Iteration 2)
+**Context**: P-10.
+**Decision**: `tests/unit/state/support/store-wrappers.ts`: `class RecordingStore(inner, hooks = {})` with `calls: RecordedCall[]` (`{ method, key?, prefix?, keys?, mode? }`, `mode` = effective put mode, recorded before the hook runs), `maxConcurrentGets`, `callsOf(method?)`, `reset()`, and `hooks: Partial<StoreHooks>` where each hook is `(args, inner)` with `args` = `{ key }`, `{ key, body, opts }`, `{ prefix, opts }`, `{ keys }`. `support/fixtures.ts`: `GAME_ID`, `OTHER_GAME_ID`, `HUMAN_HASH`, `CREATED_AT`, `SEED`, `makeSeats()`, `makeMeta(overrides?)`, `makeInitial(gameId?)`, `makeCommitBody(prev, n, events?)`, `toCommit(body)`, `makeChain(upTo, gameId?)`, `storeGame(store, { upTo, head?, meta?, skip?, gameId? })`.
+**Rejected**: Separate failing/retry store classes (hooks cover them). Moving the `schemas.test.ts` fixture (left as is; no need to touch that file).
+**Consequences**: Extra fixture exports beyond P-10 (`HUMAN_HASH`, `CREATED_AT`, `SEED`, `makeSeats`, `toCommit`, `makeChain`, `storeGame`) are additive.
+
+## D-012: File-store tests use a temp folder  (Iteration 2)
+**Context**: P-11.
+**Decision**: `create.test.ts` has one `FileObjectStore` round-trip (create → loadMeta/loadLatest) in `fs.mkdtemp(path.join(os.tmpdir(), 'lp-state-'))`, removed in `afterEach`. The races (VC-616) come in Iteration 3 with the same pattern.
+**Rejected**: Writing under `.data/`.
+**Consequences**: Proves the create write order works on the file driver too.
+
+## D-013: Tip discovery details  (Iteration 2)
+**Context**: FR-608 leaves a few unreachable-in-practice edges open.
+**Decision**: Private `#findTip(gameId): Promise<Tip>` with `Tip = { version: number; commit: Commit }`, and `#probeFrom(gameId, start): Promise<Tip | null>` (`null` = commit `start` missing). Probing past `MAX_COMMIT_VERSION` answers "missing" without a call (`#existsCommit`). Listed versions are de-duplicated and sorted highest first (`#listedVersions`, every page via `cursor`); a hint that was missing is retried if listed. If the final probe from 0 finds commit 0 gone (deleted after round 1) → `GameNotFoundError`. If the last existing commit found by `exists` is missing on its read (external delete) → `CommitNotFoundError(gameId, last)`.
+**Rejected**: Returning `null` from the probe in that last case (would fall back to a lower start and silently return an older tip).
+**Consequences**: Iteration 3's `eventsSince` calls `#findTip` and reuses `tip.commit`.
+
+## D-014: Seats comparison and create validation order  (Iteration 2)
+**Context**: FR-604 needs a deep-equal of `meta.seats` and `initial.state.seats`; FR-600 the id check first.
+**Decision**: `create` runs `assertValidGameId(meta.gameId)`, then `GameMetaSchema`, then `CommitSchema` on `{ schemaVersion: 1, ...initial }`, then `initial-version`, `initial-state-version`, `state-game-id`, `seats-mismatch`. Seats are compared with a private `jsonEqual` (key-order independent; a key holding `undefined` counts as absent). `create` writes and returns the parsed (validated) documents.
+**Rejected**: `node:util.isDeepStrictEqual` (a Node built-in; P-8 says not needed); `JSON.stringify` equality (key-order dependent).
+**Consequences**: `load` validates `version` via `commitKey(gameId, version)` before any I/O (id first, then `RangeError`).

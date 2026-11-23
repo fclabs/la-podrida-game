@@ -1,13 +1,14 @@
 # CONTEXT — Game State Manager (Phase 6)
 
-Last updated by: Iteration 1 (keys, errors, schemas). Next: Iteration 2 (`GameStateManager` create/load).
+Last updated by: Iteration 2 (`GameStateManager` create/load). Next: Iteration 3 (`commit`, `eventsSince`, final scores).
 
 ## Current state
 
 - Phases 0–5 are complete (domain, engine, score, players + AI loop in `src/service/ai-loop.ts`, storage). Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (no `noUncheckedIndexedAccess`; target ES2022), pnpm 10.15.1, Node 24 declared (local Node may be newer: pnpm prints an "Unsupported engine" WARN, not fatal), Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7. `package.json` dependencies unchanged in this phase (NFR-603).
 - **Shipped in Iteration 1**: `src/state/keys.ts`, `src/state/errors.ts`, `src/state/schemas.ts`; tests `tests/unit/state/keys.test.ts` (30 tests), `tests/unit/state/schemas.test.ts` (45 tests), `tests/unit/state/types.test-d.ts` (compile-time only). `src/state/.gitkeep` deleted.
-- Not yet built: `src/state/game-state-manager.ts` (Iteration 2: `create`, `loadMeta`, `load`, `loadLatest`; Iteration 3: `commit`, `eventsSince`, `writeFinalScores`, `readFinalScores`), test support files, docs (Iteration 4).
-- Full `pnpm test`: 44 passed + 1 skipped files / 847 passed + 30 skipped tests. State tests ≈ 0.5 s.
+- **Shipped in Iteration 2**: `src/state/game-state-manager.ts` (`GameStateManager` with `constructor`, `create`, `loadMeta`, `load`, `loadLatest`); test support `tests/unit/state/support/{store-wrappers,fixtures}.ts`; tests `tests/unit/state/create.test.ts` (26 tests), `tests/unit/state/load.test.ts` (30 tests).
+- Not yet built: `commit`, `eventsSince`, `writeFinalScores`, `readFinalScores`, `mapLimit`/`EVENTS_READ_CONCURRENCY` (Iteration 3); docs (Iteration 4).
+- Full `pnpm test`: 46 passed + 1 skipped files / 903 passed + 30 skipped tests. `tests/unit/state` ≈ 0.5 s (131 tests).
 
 ## File map
 
@@ -19,6 +20,11 @@ Last updated by: Iteration 1 (keys, errors, schemas). Next: Iteration 2 (`GameSt
 | `tests/unit/state/keys.test.ts` | VC-601 (id part), VC-602: exact keys, `RangeError`s, leap day, `assertValidKey`/`assertValidPrefix` on every key/prefix, no key is a path prefix of another, `parseCommitKey`, code-unit sort order. |
 | `tests/unit/state/schemas.test.ts` | Valid docs round-trip; VC-603 at schema level (via `putJson`/`getJson` on `MemoryObjectStore`, asserting `CorruptObjectError` `reason 'schema'` + exact `issuePath`); `firstIssuePath`; VC-604 per-preset full all-AI game. |
 | `tests/unit/state/types.test-d.ts` | `Assert<Equals<z.infer<typeof ScoreBoardSchema>, ScoreBoard>>` (D-005). |
+| `src/state/game-state-manager.ts` | `GameStateManager`. Module-private: `Tip`, `encodeJson`, `serializeMeta`, `serializeCommit`, `bytesEqual`, `jsonEqual`. Private methods: `#findTip`, `#probeFrom`, `#existsCommit`, `#listedVersions`, `#readHint`, `#readCommit`, `#createOrMatch`, `#writeHead`. Imports `@/src/storage/object-store`, `./errors`, `./keys`, `./schemas`. |
+| `tests/unit/state/support/store-wrappers.ts` | `RecordingStore`, `RecordedCall`, `StoreHooks`, `StoreMethod` (D-011). |
+| `tests/unit/state/support/fixtures.ts` | Ids, `makeMeta`, `makeInitial`, `makeCommitBody`, `toCommit`, `makeChain`, `storeGame` (D-011). |
+| `tests/unit/state/create.test.ts` | VC-601 (create/loadMeta/load/loadLatest, 0 calls), VC-605 (keys, order, modes, key order of stored docs), P-11 file-store round-trip, VC-606 (six reasons, 0 calls), VC-607 (five bullets), VC-608 (N = 1…4). |
+| `tests/unit/state/load.test.ts` | VC-603 (loadMeta), VC-609, VC-610 (a)–(g) + net + corrupt hinted commit, VC-611 (+ multi-page list), VC-612, VC-613 (+ orphan, single read for v0), VC-614 (load, loadLatest), VC-625 (loadLatest = 5 calls). |
 
 ## Public interfaces
 
@@ -60,20 +66,71 @@ export type CommitBody = Omit<Commit, 'schemaVersion'>;
 export type Head = z.infer<typeof HeadSchema>;
 export type FinalScores = z.infer<typeof FinalScoresSchema>;
 export function firstIssuePath(error: z.ZodError): string; // 'a.0.b' or '(root)' (extra export, D-002)
+
+// src/state/game-state-manager.ts
+export class GameStateManager {
+  constructor(store: ObjectStore);
+  create(meta: GameMeta, initial: CommitBody): Promise<Commit>;   // InvalidGameIdError, InvalidCommitError, GameExistsError
+  loadMeta(gameId: string): Promise<GameMeta>;                    // GameNotFoundError, CorruptObjectError ('gameId')
+  load(gameId: string, version: number): Promise<Commit>;         // RangeError, CommitNotFoundError, GameNotFoundError
+  loadLatest(gameId: string): Promise<Commit>;                    // GameNotFoundError
+  // Iteration 3: commit, eventsSince, writeFinalScores, readFinalScores
+}
+// Private, for Iteration 3 to reuse (D-008, D-009, D-013):
+//   interface Tip { version: number; commit: Commit }
+//   #findTip(gameId): Promise<Tip>              — FR-608 steps 1–3 (validates the id first)
+//   #probeFrom(gameId, start): Promise<Tip|null> — null iff commit `start` is missing
+//   #readCommit(gameId, v): Promise<Commit|null> — getJson + FR-610 identity checks
+//   #writeHead(gameId, v): Promise<void>         — putJson overwrite, errors swallowed
+//   #createOrMatch(gameId, key, bytes)           — create-only put; ObjectExistsError → raw re-read + bytesEqual, else GameExistsError
+//   serializeCommit(commit): Uint8Array          — keys: schemaVersion, version, at, actorSeat, clientRequestId, events, state, scoreboard
+//   serializeMeta(meta): Uint8Array              — keys: schemaVersion, gameId, presetId, engineVersion, createdAt, seats, seatTokenHashes
+//   bytesEqual(a, b): boolean
+
+// tests/unit/state/support/store-wrappers.ts
+export type StoreMethod = 'get' | 'put' | 'exists' | 'list' | 'delete';
+export interface RecordedCall { method: StoreMethod; key?: string; prefix?: string; keys?: readonly string[]; mode?: 'create-only' | 'overwrite' }
+export interface StoreHooks {               // each replaces delegation to `inner`; the call is recorded first
+  get(args: { key }, inner): Promise<StoredObject | null>;
+  put(args: { key; body; opts? }, inner): Promise<void>;
+  exists(args: { key }, inner): Promise<boolean>;
+  list(args: { prefix; opts? }, inner): Promise<ListResult>;
+  delete(args: { keys }, inner): Promise<void>;
+}
+export class RecordingStore implements ObjectStore {
+  constructor(readonly inner: ObjectStore, readonly hooks?: Partial<StoreHooks>);
+  readonly calls: RecordedCall[];   // invocation order; put `mode` = effective mode
+  maxConcurrentGets: number;
+  callsOf(method?: StoreMethod): RecordedCall[];
+  reset(): void;
+}
+
+// tests/unit/state/support/fixtures.ts
+export const GAME_ID = 'abcdefghijklmnopqrstuvwxyz', OTHER_GAME_ID = '234567234567234567234567ab';
+export const HUMAN_HASH = 'ab'.repeat(32), CREATED_AT = '2026-11-23T14:05:00.000Z', SEED = 'test-seed';
+export function makeSeats(): SeatInfo[];                          // seat 0 human 'p0'/'Ana', seats 1–2 AI
+export function makeMeta(overrides?: Partial<GameMeta>): GameMeta; // default preset, hashes [HUMAN_HASH, null, null]
+export function makeInitial(gameId?: string): CommitBody;          // createGame(default preset, makeSeats(), SEED), at CREATED_AT
+export function makeCommitBody(prev: CommitBody | Commit, n: number, events?: GameEvent[]): CommitBody; // actorSeat 0, 'req-<n>', at CREATED_AT + n min
+export function toCommit(body: CommitBody): Commit;
+export function makeChain(upTo: number, gameId?: string): CommitBody[];
+export function storeGame(store, { upTo, head?, meta?, skip?, gameId? }): Promise<Commit[]>; // putJson meta (unless meta:false), commits 0…upTo minus skip, head if given
 ```
 
 Issue paths produced by the rules (what `getJson` puts in `CorruptObjectError.issuePath`): `schemaVersion`; `''` for an extra top-level key (nested: the object's path, e.g. `scoreboard.ranking.0`); `gameId`; `createdAt` / `at`; `seats.<i>.seat`; `seatTokenHashes` (count); `seatTokenHashes.<i>` (kind/format); `actorSeat`; `clientRequestId`; `version`.
 
 ## Conventions & invariants
 
-- **Layer purity** (BR-603, P-8, D-004): `src/state` imports only `zod`, `@/src/domain/<module>`, `@/src/storage/object-store` (from Iteration 2) and `./…`. Greps that must print nothing:
+- **Layer purity** (BR-603, P-8, D-004): `src/state` imports only `zod`, `@/src/domain/<module>`, `@/src/storage/object-store` and `./…`. Greps that must print nothing:
   - `grep -rnE "from '@/src/(engine|score|players|service|config)" src/state`
   - `grep -rnE "from '\.\./" src/state`
   - `grep -rniwE "ifMatch|lock|locking" src/state` (P-9: keep these words out of comments too)
+  - `grep -rnE "mode: 'overwrite'" src/state` must match only `#writeHead` (VC-622).
+- **Manager**: every public method validates the gameId (and `load`'s version, via `commitKey`) before any I/O; methods are `async`, so validation errors arrive as rejections. Writes: create-only for everything but `head.json`; `head.json` writes are best-effort (`#writeHead`). Reads: commits via `#readCommit` only; the FR-605 re-read is a raw `store.get` + `bytesEqual`, never parsed. `loadLatest` never writes.
 - **Validation first**: every builder validates the gameId before anything else (all compose through `gameKeyPrefix`).
 - **Schemas**: `z.strictObject` + `schemaVersion: z.literal(1)`; single-field rules on the field, cross-field rules in `.superRefine` (runs only when the shape parsed). Validate a `CommitBody` with `CommitSchema.safeParse({ schemaVersion: 1, ...next })` (there is no body schema). Timestamps must be exact `Date#toISOString` output.
 - **Errors**: messages carry only gameId / version / reason token (BR-604). `InvalidCommitError.reason` per D-002; never a Zod message.
-- **Tests**: `tests/unit/state/*.test.ts`; header comment names the spec FRs/VCs; one `describe` per VC. Shared helpers (Iteration 2) go in `tests/unit/state/support/` (no `.test.ts` suffix). Tests may import any layer. File-store tests: `fs.mkdtemp(path.join(os.tmpdir(), 'lp-state-'))`, removed in `afterEach`; never write under `.data/`.
+- **Tests**: `tests/unit/state/*.test.ts`; header comment names the spec FRs/VCs; one `describe` per VC. Shared helpers live in `tests/unit/state/support/` (no `.test.ts` suffix). Store commits 0…n directly with `storeGame(memory, { upTo: n, head })`; break one with `skip: [k]` + a direct `memory.put`/`putJson`. Wrap with `new RecordingStore(memory, hooks)` to count calls or inject failures; assert raw state on `store.inner`. Both test files define a local `rejectionOf(promise)` helper. Tests may import any layer. File-store tests: `fs.mkdtemp(path.join(os.tmpdir(), 'lp-state-'))`, removed in `afterEach`; never write under `.data/`.
 - **Formatting**: `pnpm exec prettier --write src/state tests/unit/state` before `pnpm lint`. `docs/` and `specs/` are prettier-ignored.
 - **Commits**: one per iteration, staged by explicit path (never `git add -A`), message ends with a blank line + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never push, PR or merge. Never modify `src/storage`, `src/domain`, `src/engine`, `src/score`, `src/players`, `src/service`, `src/config.ts`, `vitest*.config.ts`, `eslint.config.mjs`, `package.json`, the lockfile.
 - **Storage facts** (Phase 5): `putJson(store, key, value, { mode })` (create-only default, `application/json`); `getJson(store, key, schema)` → `null` if missing, `CorruptObjectError('invalid-json')` for bad UTF-8/JSON, `CorruptObjectError('schema', issuePath)` for a schema failure. `CorruptObjectError.issuePath` is always a defined property (value `undefined` for invalid-json). `ObjectExistsError` on create-only conflicts. On Blob, an `ObjectExistsError` may mean the caller's own SDK-retried write landed (the reason for the FR-605/FR-613 byte compare). Keys: one letter case, zero-padded numbers, no key a path prefix of another (file store).
@@ -87,6 +144,7 @@ All with `env -u BLOB_READ_WRITE_TOKEN -u BLOB_STORE_ID -u VERCEL_OIDC_TOKEN` pr
 | `pnpm vitest run tests/unit/state` | State unit tests (≈ 0.5 s). |
 | `pnpm vitest run tests/unit/state/keys.test.ts` | Keys only (30 tests). |
 | `pnpm vitest run tests/unit/state/schemas.test.ts` | Schemas + VC-604 (45 tests). |
+| `pnpm vitest run tests/unit/state/create.test.ts tests/unit/state/load.test.ts` | Manager create/load (56 tests). |
 | `pnpm typecheck` | `next typegen && tsc --noEmit`; also checks `tests/unit/state/types.test-d.ts`. |
 | `pnpm lint` | ESLint 0 warnings + `prettier --check .`. |
 | `pnpm test` | Full unit/contract suite (Blob contract skipped without a token). |
@@ -94,7 +152,7 @@ All with `env -u BLOB_READ_WRITE_TOKEN -u BLOB_STORE_ID -u VERCEL_OIDC_TOKEN` pr
 
 ## Known gaps
 
-- `GameStateManager` does not exist yet (Iterations 2–3); VC-601's manager part, VC-603's `loadMeta` part and VC-605 onward are untested.
-- Test support (`RecordingStore`, fixtures) not yet written (Iteration 2, P-10).
+- `commit`, `eventsSince`, `writeFinalScores`, `readFinalScores` arrive in Iteration 3 (with VC-601 for those methods, VC-614's `eventsSince` part, VC-615–VC-620, VC-624, the rest of VC-625).
+- `schemas.test.ts` keeps its own meta/commit fixture (not moved to `support/fixtures.ts`).
 - Docs not updated (Iteration 4).
 - NFR-604 CI timing to be read after the push.
