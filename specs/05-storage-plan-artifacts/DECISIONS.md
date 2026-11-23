@@ -61,3 +61,32 @@
 **Context**: 1,001 `put`s with two fsyncs each took ~14 s on macOS APFS, slowing `pnpm test`.
 **Decision**: the P-11 unit test creates one key with `put` (which creates the folder) and writes the other 1,000 files with `fs.writeFile`; it then pages with the default limit (1000 + 1) as VC-508 requires.
 **Consequences**: the test exercises the listing/paging path on real files in ~0.1 s; `put` itself is covered by the contract run and the other VC-513 tests.
+
+## D-014: Blob delete batching (P-6 applied)  (Iteration 3)
+**Context**: FR-513 caps `del` at 1000 distinct keys per call; ledger R-022.
+**Decision**: validate every key, dedupe with `new Set` (first-seen order), then call `del` sequentially on chunks of ≤ 1000. A `BlobNotFoundError` is swallowed per batch and the next batch still runs; any other error propagates and later batches are not sent.
+**Rejected**: parallel batches (more load, harder to reason about partial failure).
+**Consequences**: a multi-batch delete is not atomic; callers retry (idempotent).
+
+## D-015: `contentType` forwarded only by Blob (P-7 applied)  (Iteration 3)
+**Decision**: `put` spreads `contentType` into the SDK options only when given; memory and file ignore it; no driver returns it.
+
+## D-016: Blob list always sends an explicit limit; opaque cursor (P-8 applied)  (Iteration 3)
+**Decision**: `list` validates with `assertValidPrefix` then `resolveListLimit` (default 1000) and always passes `limit`; `cursor` is passed only when given and is never checked (no `checkListArgs`). Result `cursor` = SDK cursor iff `hasMore` and the cursor is defined; keys are sorted by code unit.
+**Consequences**: a bad cursor surfaces as whatever the SDK throws.
+
+## D-017: SDK mocking pattern (P-14 applied)  (Iteration 3)
+**Decision**: both SDK unit tests use P-14's `vi.mock('@vercel/blob', async (importOriginal) => ({ ...original, put/get/list/del: vi.fn() }))`, `vi.resetAllMocks()` plus default resolutions in `beforeEach`, and assert on `vi.mocked(fn).mock.calls`. The driver imports the SDK as a namespace (`import * as blob`), which the module mock covers.
+
+## D-018: Token passing and the factory's ConfigError  (Iteration 3)
+**Context**: FR-513 "pass `token` only when given"; FR-514's message must name both variables and no values.
+**Decision**: the driver keeps `#auth = token !== undefined ? { token } : {}` and spreads it into every SDK call (so without a token the options have no `token` key). `createObjectStore` throws `new ConfigError('Invalid configuration:\n  - BLOB_READ_WRITE_TOKEN or BLOB_STORE_ID is required when STORAGE_DRIVER is blob')`, mirroring `loadConfig`'s format. The memory singleton is a module-level `let`.
+**Consequences**: the memory singleton lives for the process (tests sharing it must use distinct keys).
+
+## D-019: Blob `get`/`exists` edge handling  (Iteration 3)
+**Decision**: `get` reads the stream with `new Response(stream).arrayBuffer()`; a non-200 result (only possible for a conditional read, which the driver never sends) throws a plain `Error` naming status and key. `exists` cancels the stream and ignores a cancel error (the object exists either way).
+**Rejected**: treating a 304 as an empty body (would silently fabricate data).
+
+## D-020: Blob contract wrapper and cleanup  (Iteration 3)
+**Decision**: `PrefixedObjectStore(inner, namespace)` in `tests/contract/prefixed-store.ts` (validates the namespace as a prefix in the constructor). The Blob file's `afterAll` first lists every page under `contract/<runId>/`, then deletes page by page, so deletions never disturb an open cursor. Each test's `cleanup` is a no-op.
+**Consequences**: verified ad hoc over a shared `MemoryObjectStore` (not committed; outside Touches).

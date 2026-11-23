@@ -1,15 +1,16 @@
 # CONTEXT — Storage (Phase 5)
 
-Last updated by: Iteration 2 (file store). Next: Iteration 3 (Vercel Blob driver + factory).
+Last updated by: Iteration 3 (Vercel Blob driver + factory). Next: Iteration 4 (storage documentation).
 
 ## Current state
 
 - Phases 0–4 are complete (`specs/00-…-frozen.md` to `specs/04-players-frozen.md`). Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (no `noUncheckedIndexedAccess`; target ES2022, so class fields are *defined* properties), pnpm 10.15.1, Node 24 declared (local Node may differ: pnpm prints an "Unsupported engine" WARN, not fatal), Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7, `@noble/hashes` 2.4.0, project-local layer-boundary lint rule, GitHub Actions CI (install, typecheck, lint, test, Simulation tests, build).
-- `dependencies` = `@noble/hashes, next, react, react-dom, zod` — `@vercel/blob@2.9.0` is added in Iteration 3, not before.
+- `dependencies` = `@noble/hashes, @vercel/blob, next, react, react-dom, zod` (`@noble/hashes` 2.4.0, `@vercel/blob` 2.9.0 exact, NFR-502); `devDependencies` unchanged. The SDK is in `node_modules/@vercel/blob` (types in `dist/index.d.ts`).
 - **Iteration 1 shipped** `src/storage/object-store.ts` (interface, errors, key/prefix validation, list helpers, `getJson`/`putJson`) and `src/storage/memory-store.ts` (`MemoryObjectStore`); the shared contract suite `tests/contract/object-store.contract.ts` and its memory run; unit tests in `tests/unit/storage/`. `src/storage/.gitkeep` and `tests/contract/.gitkeep` are deleted.
 - **Iteration 2 shipped** `src/storage/file-store.ts` (`FileObjectStore`, FR-512), its contract run `tests/contract/file-store.contract.test.ts` and `tests/unit/storage/file-store.test.ts` (VC-513, P-11).
-- Not yet built: `vercel-blob-store.ts`, `index.ts` (`createObjectStore`), `tests/contract/prefixed-store.ts`, Blob contract file (Iteration 3), docs (Iteration 4). `src/state` still holds only `.gitkeep` (Phase 6).
-- Tests: `tests/unit/storage/` 4 files / 63 tests; contract: memory 30 tests (~15 ms), file 30 tests (~950 ms; VC-507 8 MiB ~90 ms); full `pnpm test` 40 files / 729 tests green (~1.6 s wall).
+- **Iteration 3 shipped** `src/storage/vercel-blob-store.ts` (`VercelBlobObjectStore`, FR-513), `src/storage/index.ts` (`createObjectStore`, FR-514), the FR-515 wrapper `tests/contract/prefixed-store.ts`, the Blob contract run `tests/contract/blob-store.contract.test.ts` (skipped without `BLOB_READ_WRITE_TOKEN`), and unit tests `tests/unit/storage/vercel-blob-store.test.ts` (VC-514, mocked SDK) and `factory.test.ts` (VC-515). `@vercel/blob@2.9.0` added.
+- All storage code is built. Not yet done: docs (Iteration 4: `docs/architecture.md` §6.1, `docs/development.md` "Storage" section). `src/state` still holds only `.gitkeep` (Phase 6).
+- Tests: `tests/unit/storage/` 6 files / 106 tests; contract: memory 30 tests (~16 ms), file 30 tests (~970 ms), blob 30 skipped; full `pnpm test` 42 passed + 1 skipped files / 772 passed + 30 skipped tests. `pnpm build` green.
 - NFR-503 local measure (Apple Silicon macOS, APFS): memory + file contract files ≈ 16 ms + 950 ms ≈ 1 s (budget 30 s; early-warning threshold 15 s).
 
 ## File map
@@ -18,10 +19,16 @@ Last updated by: Iteration 2 (file store). Next: Iteration 3 (Vercel Blob driver
 |---|---|
 | `src/storage/object-store.ts` | Types `StoredObject`, `PutOptions`, `ListOptions`, `ListResult`, `ObjectStore`; `MAX_KEY_LENGTH` (512), `MAX_LIST_LIMIT` (1000); `ObjectExistsError`, `InvalidKeyError`, `CorruptObjectError`; `assertValidKey`, `assertValidPrefix`; list helpers `resolveListLimit`, `checkListArgs`, `pageKeys` (D-007); `putJson`, `getJson`. Private `KEY_SEGMENT` regex, `isValidKey`, `compareCodeUnits`. |
 | `src/storage/memory-store.ts` | `MemoryObjectStore` (FR-511): private `#objects: Map<string, Uint8Array>`. |
+| `src/storage/vercel-blob-store.ts` | `VercelBlobObjectStore` (FR-513): private `#auth` (`{ token }` or `{}`); imports `* as blob from '@vercel/blob'` and `./object-store`; module const `DELETE_BATCH_SIZE` (1000), private `compareCodeUnits`. |
+| `src/storage/index.ts` | `createObjectStore(config)` (FR-514) — the only export; module-level `memoryStore` singleton. Imports `@/src/config`, `./file-store`, `./memory-store`, `./object-store` (type), `./vercel-blob-store`. |
 | `src/storage/file-store.ts` | `FileObjectStore` (FR-512): private `#root` (`path.resolve(rootDir)`), `#pathOf(key)`, `#walk`; module helpers `errorCode`, `isMissing` (`ENOENT`/`ENOTDIR`), `unlinkIfPresent`, `syncFolder` (P-5, best effort). Imports `node:crypto`, `node:fs/promises`, `node:path`, `./object-store`. |
 | `tests/contract/object-store.contract.ts` | `runObjectStoreContract` + types `ContractStore`, `ContractOptions` (P-13). Not collected by vitest (no `.test.ts`). Covers driver parts of VC-501/502 and VC-503 to VC-511. |
 | `tests/contract/memory-store.contract.test.ts` | Calls the contract with a fresh `MemoryObjectStore` per test, `exactCursor: true`. |
 | `tests/contract/file-store.contract.test.ts` | Calls the contract with a fresh `FileObjectStore` on `fs.mkdtemp(os.tmpdir()/lp-store-)` per test, removed in `cleanup`; `exactCursor: true`. |
+| `tests/contract/prefixed-store.ts` | `PrefixedObjectStore(inner, namespace)` — FR-515 test-only wrapper (validates unprefixed, prepends namespace, strips it from `list` keys and rethrown `ObjectExistsError`). |
+| `tests/contract/blob-store.contract.test.ts` | `describe.skipIf(!BLOB_READ_WRITE_TOKEN)`; one `VercelBlobObjectStore({ token })`, each test wrapped in `contract/<runId>/<testId>/` (`randomUUID`), `exactCursor: false`; `afterAll` lists every page under `contract/<runId>/`, then deletes page by page (120 s timeout). |
+| `tests/unit/storage/vercel-blob-store.test.ts` | VC-514 with P-14 mocks: put options/Buffer/`already exists`/propagation, get/exists (uncached, stream bytes, cancel), list (sort, cursor iff `hasMore`, explicit limit, opaque cursor), delete (2,001 → 3 batches, dedupe, `BlobNotFoundError` swallowed), validation before SDK calls, token on every call / no token. |
+| `tests/unit/storage/factory.test.ts` | VC-515 via `loadConfig(...)`: memory singleton, file, blob token/store-id/OIDC-only/nothing (`ConfigError`), SDK mocked. |
 | `tests/unit/storage/file-store.test.ts` | VC-513 (nothing created before first put, on-disk path, relative root, missing root, no `.tmp-` after race/sequence, hand-made `.tmp-zzz` hidden, folder `a` → null, hidden folders, key below a file → missing, delete only key), cross-folder code-unit order, P-11 1,001-key paging (files written directly). |
 | `tests/unit/storage/keys.test.ts` | VC-501/VC-502 tables, exact `InvalidKeyError` messages. |
 | `tests/unit/storage/json.test.ts` | P-1 `CorruptObjectError` messages (incl. root `(root)`), nested `issuePath`, schema output (transforms), `putJson` arguments and `TypeError` cases (undefined, function, symbol). |
@@ -84,6 +91,27 @@ export class FileObjectStore implements ObjectStore { constructor(rootDir: strin
 //   get: readFile; ENOENT/ENOTDIR/EISDIR → null. exists: stat().isFile(); ENOENT/ENOTDIR → false.
 //   list: checkListArgs → walk root (missing root → []), skip names starting '.', files only, prune folders
 //   that cannot match the prefix → pageKeys. delete: validate all, then unlink each (ENOENT/ENOTDIR ignored).
+
+// src/storage/vercel-blob-store.ts
+export class VercelBlobObjectStore implements ObjectStore { constructor(options?: { token?: string }) }
+//   token given → `token` spread into EVERY SDK call's options; absent → no `token` property (SDK OIDC).
+//   put: assertValidKey; blob.put(key, string | Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength),
+//        { access: 'private', addRandomSuffix: false, allowOverwrite: mode === 'overwrite', [contentType], [token] });
+//        Error whose message includes 'already exists' → ObjectExistsError(key); anything else rethrown as is.
+//   get: blob.get(key, { access: 'private', useCache: false, [token] }); null → null; statusCode !== 200 → Error
+//        (unreachable: no conditional reads); body = new Uint8Array(await new Response(stream).arrayBuffer()).
+//   exists: same get; null → false; else stream.cancel() (cancel errors ignored) → true. Never head().
+//   list: assertValidPrefix → resolveListLimit (NOT checkListArgs: cursor is opaque) →
+//        blob.list({ prefix, [cursor], limit /* always explicit, default 1000 */, mode: 'expanded', [token] });
+//        keys = pathnames sorted by code unit; cursor = SDK cursor iff hasMore (and defined).
+//   delete: validate all → dedupe first-seen order → sequential del(chunk ≤ 1000, { [token] });
+//        BlobNotFoundError swallowed per batch; other errors propagate (later batches not sent).
+
+// src/storage/index.ts
+export function createObjectStore(config: Config): ObjectStore;
+//   'memory' → one MemoryObjectStore per process (module singleton); 'file' → new FileObjectStore(config.fileStoreDir);
+//   'blob' → blobReadWriteToken ? new VercelBlobObjectStore({ token }) : blobStoreId ? new VercelBlobObjectStore()
+//   : throw new ConfigError('Invalid configuration:\n  - BLOB_READ_WRITE_TOKEN or BLOB_STORE_ID is required when STORAGE_DRIVER is blob').
 ```
 
 How a driver implements `list` with the shared helpers (memory does exactly this; the file store should too):
@@ -108,7 +136,7 @@ export function runObjectStoreContract(
 ): void; // describe(`ObjectStore contract: ${name}`); beforeEach → makeStore(); afterEach → cleanup()
 ```
 
-A driver file is just (this is exactly `file-store.contract.test.ts`):
+The Blob run wraps each test's store: `new PrefixedObjectStore(blobStore, `contract/${runId}/${randomUUID()}/`)` (see `blob-store.contract.test.ts`). A plain driver file is just (this is exactly `file-store.contract.test.ts`):
 
 ```ts
 import { runObjectStoreContract } from './object-store.contract';
@@ -122,16 +150,16 @@ Contract keys used: `../x`, `ok`, `s`, `bytes`, `empty`, `k`, `race`, `o`, `m`, 
 
 ## Conventions & invariants
 
-- **Storage purity** (BR-501, P-9): files in `src/storage` import each other with `./…`, config only as `@/src/config`, plus `zod` (types), Node built-ins and (Iteration 3) `@vercel/blob`. Greps that must print nothing:
+- **Storage purity** (BR-501, P-9): files in `src/storage` import each other with `./…`, config only as `@/src/config`, plus `zod` (types), Node built-ins and `@vercel/blob` (only `vercel-blob-store.ts`). Greps that must print nothing:
   - `grep -rnE "from '(@/src|\.\./)" src/storage | grep -v "from '@/src/config'"`
   - `grep -rniwE "lock|locking|ifMatch|compareAndSwap" src/storage` (P-10: keep these words out of comments too)
-  - `grep -rnE "access: 'public'|useCache: true" src/storage` (Iteration 3)
+  - `grep -rnE "access: 'public'|useCache: true" src/storage` (BR-503)
 - **Async validation** (P-2): every `ObjectStore` method is `async`; validation (keys/prefix → limit → cursor) runs before any I/O; `delete` validates every key before deleting any.
 - **Error convention**: `this.name = '<ClassName>'`; messages hold the key and a fixed reason, never a body or credential (BR-504).
 - **Code-unit order**: sort with `<`/`>` comparison (`pageKeys` does it); never `localeCompare`.
 - **Randomness** (P-4): use `crypto.randomUUID()` from `node:crypto` for temp names and test prefixes.
-- No barrel except `src/storage/index.ts` (Iteration 3, exports only `createObjectStore`). Callers import from `@/src/storage/object-store`, `@/src/storage/memory-store`, …
-- **Tests**: unit tests in `tests/unit/storage/*.test.ts`; contract runs in `tests/contract/<driver>-store.contract.test.ts`; header comment names spec FRs/VCs; one `describe` per VC. File-store tests use `fs.mkdtemp(path.join(os.tmpdir(), 'lp-store-'))` and remove the folder; never write under `.data/`. Run everything with `env -u BLOB_READ_WRITE_TOKEN`; no network.
+- No barrel except `src/storage/index.ts` (exports only `createObjectStore`; import it as `@/src/storage`). Callers import from `@/src/storage/object-store`, `@/src/storage/memory-store`, …
+- **Tests**: unit tests in `tests/unit/storage/*.test.ts`; contract runs in `tests/contract/<driver>-store.contract.test.ts`; header comment names spec FRs/VCs; one `describe` per VC. File-store tests use `fs.mkdtemp(path.join(os.tmpdir(), 'lp-store-'))` and remove the folder; never write under `.data/`. Run everything with `env -u BLOB_READ_WRITE_TOKEN -u BLOB_STORE_ID -u VERCEL_OIDC_TOKEN`; no network. SDK unit tests mock `@vercel/blob` with P-14 (`vi.mock(..., async (importOriginal) => ({ ...(await importOriginal<typeof import('@vercel/blob')>()), put: vi.fn(), get: vi.fn(), list: vi.fn(), del: vi.fn() }))`) and `vi.resetAllMocks()` in `beforeEach`. A `Uint8Array` passed to `new Response(...)` must be typed `Uint8Array<ArrayBuffer>` (TS 6 lib).
 - **Formatting**: `pnpm exec prettier --write src/storage tests/contract tests/unit/storage` before linting; `docs/` and `specs/` are prettier-ignored.
 - **Commits**: one per iteration, staged by explicit path (never `git add -A`), message ends with a blank line + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never push, PR or merge. Never modify `src/config.ts`, `src/domain`, `src/engine`, `src/score`, `src/players`, `src/service`, `vitest*.config.ts`, `eslint.config.mjs`.
 
@@ -140,16 +168,21 @@ Contract keys used: `../x`, `ok`, `s`, `bytes`, `empty`, `k`, `race`, `o`, `m`, 
 | Command | What it does |
 |---|---|
 | `env -u BLOB_READ_WRITE_TOKEN pnpm vitest run tests/unit/storage` | Storage unit tests (~0.2 s). |
-| `env -u BLOB_READ_WRITE_TOKEN pnpm vitest run tests/contract` | Every contract run (memory now; file from Iteration 2; Blob skipped without a token from Iteration 3). |
+| `env -u BLOB_READ_WRITE_TOKEN pnpm vitest run tests/contract` | Every contract run: memory + file pass, Blob reported skipped (`Test Files 2 passed \| 1 skipped (3)`, `Tests 60 passed \| 30 skipped (90)`). |
+| `BLOB_READ_WRITE_TOKEN=… pnpm vitest run tests/contract/blob-store.contract.test.ts` | Blob contract run against a real store (Phase 5b only; never in this phase). |
 | `pnpm vitest run tests/contract/memory-store.contract.test.ts --reporter verbose` | Shows each VC test (VC-507, VC-508 boundary case). |
 | `pnpm typecheck` / `pnpm lint` / `pnpm test` | Required before every commit (lint = ESLint 0 warnings + `prettier --check .`). |
 | `pnpm test:sim` | Not affected by this phase; run once in Final Verification (~46 s). |
-| `pnpm build` | `next build` (Iteration 3 and final gates). |
-| `node -e "const p=require('./package.json');console.log(Object.keys(p.dependencies).sort().join(','),p.dependencies['@noble/hashes'],p.dependencies['@vercel/blob'])"` | NFR-502 check (expects `@vercel/blob` 2.9.0 after Iteration 3). |
+| `pnpm build` | `next build` (green after Iteration 3; final gate). |
+| `pnpm install --frozen-lockfile` | Lockfile matches `package.json` (CI install step). |
+| `node -e "const p=require('./package.json');console.log(Object.keys(p.dependencies).sort().join(','),p.dependencies['@noble/hashes'],p.dependencies['@vercel/blob'])"` | NFR-502 check: prints `@noble/hashes,@vercel/blob,next,react,react-dom,zod 2.4.0 2.9.0`. |
 
 ## Known gaps
 
-- `VercelBlobObjectStore`, `createObjectStore`, the Blob contract wrapper and the docs are not built yet (Iterations 3–4).
+- Docs not written yet (Iteration 4).
+- **Blob behaviour is unverified against a real store** (Phase 5b): the `already exists` message on a create-only conflict, `get` → `null` for a missing pathname, cross-page `list` order/completeness, `del` with missing pathnames, and the SDK-retry case (FR-503/FR-513: `VERCEL_BLOB_RETRIES`, default 10 — a create-only `ObjectExistsError` may mean the caller's own retried write won). Blob `list` stays a hint (architecture §6.3).
+- Blob `delete` with several batches is not atomic: a non-`BlobNotFoundError` failure stops later batches; earlier batches are already deleted. Callers retry (deletes are idempotent).
+- The prefixing wrapper was verified only ad hoc (a temporary, uncommitted contract run over `PrefixedObjectStore(MemoryObjectStore)` passed 29 + 1 skipped); there is no committed test of it without a token.
 - **Case-insensitive filesystems** (macOS APFS default, Windows): on the file store, keys differing only in letter case (`A/1` vs `a/1`) map to the same file, so the second create-only put fails with `ObjectExistsError`. The spec does not cover it; the contract keys are all lowercase. Phase 6 key builders should use one case (worth a line in the Iteration 4 docs).
 - File store `put` costs two fsyncs (file + folder): ~14 ms per put on macOS APFS. Fine for dev; tests needing many keys should write files directly (as the P-11 test does) or keep counts small.
 - A key whose path is an existing folder, or whose parent is an existing file, has unspecified behaviour on the file store (FR-512); not tested. `get`/`exists` treat both as missing.
