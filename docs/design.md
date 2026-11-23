@@ -418,7 +418,7 @@ Checked by the simulator only, which keeps its own ledger of the initial deal an
 
 ## 6. Score Engine
 
-Pure functions.
+Pure functions. The Score Engine reads only the state it is given; it never depends on the Game Engine, and the Game Engine never scores.
 
 ### 6.1 Interface
 
@@ -426,7 +426,11 @@ Pure functions.
 interface ScoreEngine {
   scoreHand(rules: RuleSet, hand: HandResult): HandScore;
   evaluate(state: GameState): ScoreBoard;
+  // Building blocks of evaluate, exported so they can be used and tested on their own:
+  rankSeats(totals: number[], missedCount: number[], tieBreak: RuleSet['tieBreak']): ScoreBoard['ranking'];
+  liveStatus(bid: number | null, tricksWon: number, tricksLeft: number): LiveStatus;
 }
+type LiveStatus = 'on-track' | 'made-so-far' | 'busted';
 
 interface HandResult { handIndex; cardsPerPlayer; dealer; trumpSuit; bids: number[]; tricks: number[] }
 interface HandScore  { handIndex; perSeat: { seat; bid; tricks; made: boolean; points: number }[] }
@@ -435,12 +439,27 @@ interface ScoreBoard {
   hands: HandScore[];                          // one row per finished hand (the "planilla")
   totals: number[];                            // running total per seat
   madeCount: number[]; missedCount: number[];  // used for tie-breaks
-  live?: { seat; bid; tricksWon; status: 'on-track' | 'made-so-far' | 'busted' }[]; // current hand
+  live?: { seat; bid; tricksWon; status: LiveStatus }[];  // current hand; absent at game over
   ranking: { seat; total; place }[];
 }
 ```
 
-`evaluate` is derived entirely from `state.completedHands` (plus the current hand for `live`), so the score can always be recomputed and can never drift from the state. A player is `busted` when `tricksWon > bid`, or when the tricks left can't bring them up to their bid.
+`evaluate` is derived entirely from `state.completedHands` (plus the current hand for `live`), so the score can always be recomputed and can never drift from the state. The same state always gives the same board, and the state is never modified.
+
+- **Score sheet.** `hands` has one row per completed hand, in order (`scoreHand` of each). `totals[s]` is the sum of seat `s`'s points over those rows (`0` before the first hand ends); `madeCount[s]` / `missedCount[s]` count the rows where seat `s` made / missed its bid, so they always add up to `hands.length`. Every array has one entry per seat.
+- **Live status.** While a hand is in progress (`bidding` or `playing`), `live` has one entry per seat with its bid, tricks won and status, where `tricksLeft = cardsPerPlayer − sum(tricksWon)`. The conditions are checked in this order:
+
+  | Condition | Status |
+  |---|---|
+  | bid not placed yet (`null`) | `on-track` |
+  | `tricksWon > bid` | `busted` (too many) |
+  | `tricksWon + tricksLeft < bid` | `busted` (can no longer reach the bid) |
+  | `tricksWon === bid` | `made-so-far` |
+  | otherwise | `on-track` |
+
+  At game over (`hand` is `null`) the board has **no `live` property at all**.
+- **Ranking.** Seats are ordered by total, highest first. Under `tieBreak: 'fewest-misses'` equal totals are separated by fewer missed bids; anything still tied (and every equal total under `'shared'`) shares the place. Places use competition numbering: `place` = 1 + the number of seats strictly ahead, so tied seats share a place and the next place skips, e.g. `1, 1, 3`. Entries are listed by place, then by seat number within a place; the seat number only orders the listing and never decides a place. The ranking is computed the same way mid-game and at game over (where it is the final result, §5.5).
+- **Malformed input.** Hand data that cannot come from a real game (bids and tricks of the wrong length, a bid outside `0 … cardsPerPlayer`, a negative or fractional trick count, tricks that do not add up to `cardsPerPlayer`, more tricks won than cards in the current hand) makes `scoreHand` and `evaluate` throw a `RangeError` that names the hand and the failed check. States produced by the Game Engine never trigger it.
 
 ### 6.2 Scoring formulas
 
@@ -456,6 +475,8 @@ type ScoringSpec =
 | argentina-fidepo | 10 + t | t |
 | gamerules | 10 + b | 0 |
 | spain / mexico | 10 + 5t | −5·\|t − b\| |
+
+A bid `b` is made exactly when the tricks won `t` equal it. In general form, with the numbers read from the `ScoringSpec` (never hard-coded): `bonus-plus-tricks` scores `bonus + perTrick·t` when made and `missedPerTrick·t` when missed; `bonus-plus-bid` scores `bonus + b` when made and `0` when missed; `spanish` scores `bonus + perTrick·t` when made and `−missPenaltyPerTrick·|t − b|` when missed.
 
 ### 6.3 Score history
 
