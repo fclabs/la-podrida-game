@@ -62,8 +62,8 @@ It benefits the developers of Phases 7–10 (service, API, retention), who get p
 
 ### Documents (schemas)
 
-- **FR-602 (Must)** — Every persisted document is validated with a strict Zod schema (unknown keys rejected) that includes `schemaVersion: z.literal(1)`. The documents are `GameMeta`, `Commit`, `Head`, `FinalScores` (Data & Interfaces). A stored document with any other `schemaVersion`, or one that fails its schema, makes the reading method reject with the storage `CorruptObjectError` (`reason: 'schema'`, with `issuePath`). The manager never returns unvalidated data. The schemas also enforce these cross-field rules, so they apply on every read and every write (a write that breaks one rejects with `InvalidCommitError`, per FR-604/FR-611):
-  - `GameMeta`: `gameId` matches FR-600. `seats[i].seat === i`. `seatTokenHashes.length === seats.length`. `seatTokenHashes[i]` matches `^[0-9a-f]{64}$` when `seats[i].kind === 'human'` and is `null` when it is `'ai'`. `createdAt` is a `Date#toISOString` string (`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`, and a real instant).
+- **FR-602 (Must)** — Every persisted document is validated with a strict Zod schema (unknown keys rejected) that includes `schemaVersion: z.literal(1)`. The documents are `GameMeta`, `Commit`, `Head`, `FinalScores` (Data & Interfaces). A stored document with any other `schemaVersion`, or one that fails its schema, makes the reading method reject with the storage `CorruptObjectError` (except the FR-605/FR-613 re-reads, which compare raw bytes and never parse) (`reason: 'schema'`, with `issuePath`). The manager never returns unvalidated data. The schemas also enforce these cross-field rules, so they apply on every read and every write (a write that breaks one rejects with `InvalidCommitError`, per FR-604/FR-611):
+  - `GameMeta`: `gameId` matches FR-600. `seats[i].seat === i`. `seatTokenHashes.length === seats.length`. `seatTokenHashes[i]` matches `^[0-9a-f]{64}$` when `seats[i].kind === 'human'` and is `null` when it is `'ai'`. `createdAt` is a `Date#toISOString` string (`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`, and `new Date(createdAt).toISOString() === createdAt`).
   - `Commit`: `version` is an integer in 0–`MAX_COMMIT_VERSION`. `actorSeat` and `clientRequestId` are both `null` when `version === 0`, and both non-null otherwise. `clientRequestId` has 1–128 characters. `at` has the same format as `createdAt`.
   - `Head`: `version` is an integer in 0–`MAX_COMMIT_VERSION`.
 - **FR-603 (Must)** — `ScoreBoardSchema` is strict and matches the domain `ScoreBoard` type field for field (`live` optional). A compile-time check fails the typecheck if `z.infer<typeof ScoreBoardSchema>` and `ScoreBoard` are not mutually assignable.
@@ -99,6 +99,7 @@ It benefits the developers of Phases 7–10 (service, API, retention), who get p
   1. In parallel: `exists(metaKey)`, `exists(commitKey(0))` and `getJson(headKey)`. If meta or commit 0 is missing → `GameNotFoundError`. A `head.json` that is missing, or rejects with `CorruptObjectError`, counts as "no hint". Any other storage error from these three calls propagates; when several reject, the first rejection wins (`Promise.all`).
   2. **Forward probe from a start `s`.** In parallel, read commit `s` (with the FR-610 checks) and call `exists(commitKey(s+1))`.
      - If commit `s` is missing, the start is invalid (go to step 3, or, if already there, try its next candidate).
+     - Any rejection of either call (including `CorruptObjectError` from the commit-`s` read) propagates, even when `s+1` exists (`Promise.all` semantics).
      - If `s+1` is missing, the tip is `s`, and the commit already read is returned with no further call.
      - Otherwise probe `s+2, s+3, …` one at a time with `exists` until one is missing; then read the last existing one and return it.
   3. With a hint `h`, start at `s = h`. With no hint, or when commit `h` is missing (hint ahead of reality): list `commitsPrefix` (every page). Take as candidates the listed keys that parse as commit keys (`parseCommitKey`), highest first, and try step 2 from each until one is not missing. If none works (or the listing is empty), start from `s = 0`.
@@ -109,7 +110,7 @@ It benefits the developers of Phases 7–10 (service, API, retention), who get p
   - `CommitNotFoundError { gameId, version }` when that commit is missing but commit 0 exists;
   - `GameNotFoundError` when commit 0 is missing.
 
-  It does not read `meta.json`.
+  It calls `exists(commitKey(0))` in parallel with the read of commit `version` (for `version` 0, one read suffices), so a commit without a commit 0 (an orphan, FR-611) is never returned. It does not read `meta.json`.
 - **FR-610 (Must)** — Every commit read (`load`, `loadLatest`, `eventsSince`; not the FR-613 or FR-605 re-reads, which compare raw bytes only) also checks that `commit.version` equals the version in its key and that `commit.state.gameId` equals the requested `gameId`. A mismatch rejects with `CorruptObjectError` (`reason: 'schema'`, `issuePath` `'version'` or `'state.gameId'`).
 
 ### Commit
@@ -245,7 +246,7 @@ Each sets `this.name`. `state` never throws the service's `VersionConflict` (it 
 - **VC-601** (FR-600): `assertValidGameId` accepts `'a'.repeat(26)`, `'abcdefghijklmnopqrstuvwxyz'` and `'234567'.repeat(4) + 'ab'`. It rejects `''`, 25 and 27 chars, uppercase, `0`, `1`, `8`, `/`, and `..`, each with `InvalidGameIdError` whose `gameId` equals the input. Every manager method given `'BAD'` (for `create`: `meta.gameId = 'BAD'`, with an otherwise invalid commit body too) rejects with `InvalidGameIdError`, and a counting store records 0 calls.
 - **VC-602** (FR-601): for id `g = 'abcdefghijklmnopqrstuvwxyz'` (valid): `commitKey(g, 0)` → `games/g…/commits/00000000.json`; `commitKey(g, 41)` → `…/00000041.json`; `commitKey(g, 99999999)` is accepted; `-1`, `1.5` and `100000000` → `RangeError`. `indexCreatedKey('2026-11-23', g)` → `index/created/2026-11-23/{g}`; `'2026-02-30'` and `'2026-1-5'` → `RangeError`. Every builder's output passes `assertValidKey`. `parseCommitKey(g, commitKey(g, 7)) === 7`, and `parseCommitKey(g, headKey(g)) === null`. Sorting `commitKey(g, v)` for v = 9, 10, 100 by code unit gives version order.
 - **VC-603** (FR-602): `getJson` with each schema rejects a document with `schemaVersion: 2` (`issuePath 'schemaVersion'`), one with an extra key, and one missing a required field. `loadMeta` of a stored meta with `schemaVersion: 2` → `CorruptObjectError` `reason 'schema'`. Each FR-602 rule is broken once in a stored document and gives `CorruptObjectError`:
-  - meta: `seats[1].seat = 2`; a hash on an AI seat; `null` on a human seat; an uppercase hash; one hash too few; `createdAt '2026-11-23T14:05:00Z'`;
+  - meta: `seats[1].seat = 2`; a hash on an AI seat; `null` on a human seat; an uppercase hash; one hash too few; `createdAt '2026-11-23T14:05:00Z'`; `createdAt '2026-02-30T00:00:00.000Z'`;
   - commit: v1 with `actorSeat: null`; v0 with a `clientRequestId`; a `clientRequestId` of 129 chars; `''`;
   - head: `version 100000000`.
 - **VC-604** (FR-603): `ScoreBoardSchema.parse(evaluate(state))` succeeds for every state reached in one seeded all-AI game per preset (built in the test via engine + score + players; tests may import any layer). A file `tests/unit/state/types.test-d.ts`, or an equivalent compile-time assertion checked by `pnpm typecheck`, asserts mutual assignability.
@@ -277,7 +278,7 @@ Each sets `this.name`. `state` never throws the service's `VersionConflict` (it 
   - (f) holding `{schemaVersion: 2, version: 5}`;
   - (g) holding `{schemaVersion: 1, version: 100000000}`.
 
-  A store wrapper whose `get` of `head.json` rejects with `Error('net')` makes `loadLatest` reject with that same object.
+  A store wrapper whose `get` of `head.json` rejects with `Error('net')` makes `loadLatest` reject with that same object. With `head.json` at 2 and commit 2 holding `not json` (commits 0…5 otherwise valid), `loadLatest` rejects with `CorruptObjectError`.
 - **VC-611** (FR-608): with commits 0…3 stored, `head.json` missing, and a store wrapper whose `list` returns `{ keys: [] }` → `loadLatest` returns commit 3 (probing from 0). With a wrapper whose `list` returns only `commits/00000001.json` and a non-commit key `…/commits/x` → `loadLatest` returns commit 3.
 - **VC-612** (FR-606, FR-608): meta missing with commits 0…2 present → `GameNotFoundError`. Commit 0 missing with meta and commits 1…2 present → `GameNotFoundError`. Both present and nothing else → commit 0.
 - **VC-613** (FR-609): `load(g, 3)` with commits 0…3 returns commit 3. `load(g, 4)` → `CommitNotFoundError { version: 4 }`. `load(g, -1)` → `RangeError`. `load` on an unknown game → `GameNotFoundError`.
@@ -292,7 +293,7 @@ Each sets `this.name`. `state` never throws the service's `VersionConflict` (it 
   - `clientRequestId: null` at v1;
   - an extra key.
 
-  `commit` of v3 when the tip is 1 succeeds; the manager does not check tip + 1. `commit(g2, v1)` for a gameId `g2` that was never created resolves, and `loadLatest(g2)` still rejects with `GameNotFoundError`.
+  `commit` of v3 when the tip is 1 succeeds; the manager does not check tip + 1. `commit(g2, v1)` for a gameId `g2` that was never created resolves, and `loadLatest(g2)` and `load(g2, 1)` still reject with `GameNotFoundError`.
 - **VC-616** (FR-612): on `MemoryObjectStore` and on `FileObjectStore` (temp folder), two `commit` calls for v1 with different `clientRequestId`s, started together via `Promise.allSettled`, give exactly 1 fulfilled and 1 `CommitConflictError { gameId: g, version: 1 }`. `load(g, 1)` equals the fulfilled one's commit. Repeat 20 times per driver.
 - **VC-617** (FR-613): a store wrapper simulates the SDK retry: the first create-only `put` to the commit key stores the body and then rejects with `ObjectExistsError`. `commit` resolves to the commit, and `head.json` is set. With a pre-stored v1 whose body differs only in `clientRequestId` → `CommitConflictError`. With a wrapper that throws `ObjectExistsError` while the re-read returns `null` → `CommitConflictError`.
 - **VC-618** (FR-614): a commit-write rejection `Error('net')` → `commit` rejects with that same object. A `head.json` put that rejects `Error('head')` → `commit` still resolves, and the next `loadLatest` returns the new commit (via probing).
@@ -346,7 +347,8 @@ None.
     - non-corrupt `head.json` errors propagate (FR-608);
   - `Head.version` bounded;
   - extra VCs for FR-610 and FR-616;
-  - readiness pass: the FR-613 re-read is a raw byte compare only (FR-610); exact VC-620 document.
+  - readiness pass: the FR-613 and FR-605 re-reads are raw byte compares only (FR-602, FR-610); exact VC-620 document;
+  - operator: fold in deferred R-028 (a corrupt probe read propagates), R-029 (`load` checks commit 0), R-030 (round-trip timestamp check) and R-037.
 - 0.1 (2026-11-23): initial draft from implementation.md Phase 6, architecture §6.2–§6.5, design §7/§9, and discovery answers:
   - the Blob retry case is handled inside `commit` by a byte comparison;
   - the caller supplies `gameId` and timestamps;

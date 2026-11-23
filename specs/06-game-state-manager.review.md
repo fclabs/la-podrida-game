@@ -31,14 +31,14 @@ Original line count: 326 · After pass 1: 357 · After pass 2: 357 (no MUST) · 
 | R-025 | 1 | COULD | FR-617 | `final.json` gameId not checked against key | deferred | COULD |
 | R-026 | 1 | COULD | VCs | No single end-to-end VC | deferred | COULD |
 | R-027 | 1 | COULD | FR-613 | Inline rationale for the same-process byte compare | deferred | COULD |
-| R-028 | 2 | SHOULD | FR-608 step 2 | Corrupt commit `s` read while `s+1` exists: propagate or ignore? | deferred | Delta pass; not a blocker |
-| R-029 | 2 | SHOULD | FR-609, FR-611, VC-615 | `load(g2, v)` on an orphan commit must not return it; FR-609 order unstated | deferred | Delta pass; not a blocker |
-| R-030 | 2 | SHOULD | FR-602 | "a real instant" undefined (Date.parse vs round-trip) | deferred | Delta pass; not a blocker |
+| R-028 | 2 | SHOULD | FR-608 step 2 | Corrupt commit `s` read while `s+1` exists: propagate or ignore? | decided | Operator (post-review): a corrupt probe read propagates; FR-608 + VC-610 |
+| R-029 | 2 | SHOULD | FR-609, FR-611, VC-615 | `load(g2, v)` on an orphan commit must not return it; FR-609 order unstated | decided | Operator: `load` checks commit 0 in parallel; FR-609 + VC-615 |
+| R-030 | 2 | SHOULD | FR-602 | "a real instant" undefined (Date.parse vs round-trip) | decided | Operator: `new Date(s).toISOString() === s`; FR-602 + VC-603 |
 | R-031 | 2 | SHOULD | VC-603 | "Each FR-602 rule is broken once" but list misses gameId, `at`, version range, two null cases | deferred | Delta pass; not a blocker |
 | R-032 | 2 | COULD | FR-608 | No terminal case if fallback `s = 0` is missing | deferred | COULD |
 | R-033 | 2 | COULD | Assumptions | Byte-determinism assumption should cover meta; gap above probe start | deferred | COULD |
 | R-034 | 2 | COULD | FR-602 Head, FR-608 | Probe of `s+1` at `MAX_COMMIT_VERSION` throws RangeError | deferred | COULD |
 | R-035 | 3 | MUST | FR-610 vs FR-613 | Conflict re-read: CorruptObjectError (FR-610) or CommitConflictError (FR-613)? | fixed | FR-610 excludes the FR-613/FR-605 re-reads; they compare raw bytes only |
 | R-036 | 3 | MUST | VC-620 | "the six fields from board" but FinalScores stores four + version | fixed | VC-620 states the exact document |
-| R-037 | 4 | SHOULD | FR-602 | "reading method rejects with CorruptObjectError" could cover the byte-compare re-reads | deferred | Delta pass; not a blocker |
+| R-037 | 4 | SHOULD | FR-602 | "reading method rejects with CorruptObjectError" could cover the byte-compare re-reads | decided | Operator: FR-602 excludes the byte-compare re-reads |
 | R-038 | 4 | COULD | Changelog, FR-610 wording, VC-620 fixture | Name FR-605 in changelog; "commit read" vs meta re-read; fixture with `live`/`hands` | deferred | COULD |
