@@ -1,6 +1,6 @@
 # Spec 07 — GameService
 
-> Version: 0.1 · Last updated: 2026-11-23 · Status: Draft · Owner: Federico Castañeda
+> Version: 0.2 · Last updated: 2026-11-23 · Status: Draft · Owner: Federico Castañeda
 > Source: [`docs/implementation.md`](../docs/implementation.md) §3 Phase 7. Context: [`docs/design.md`](../docs/design.md) §5.5, §7, §9; [`docs/architecture.md`](../docs/architecture.md) §5, §6.2–§6.4, §8, §10, §11.
 > Builds on: [`specs/06-game-state-manager-frozen.md`](./06-game-state-manager-frozen.md) (`GameStateManager`, `GameMeta`, `Commit`, `CommitBody`, the state errors, `MAX_COMMIT_VERSION`, `assertValidGameId`), [`specs/04-players-frozen.md`](./04-players-frozen.md) (`createPlayers`, `buildPlayerView`, `runAiLoop`, `AiLoopLimitError`), [`specs/03-score-engine-frozen.md`](./03-score-engine-frozen.md) (`evaluate`), [`specs/02-engine-frozen.md`](./02-engine-frozen.md) (`createGame`, `applyMove`, `legalMoves`, `currentActor`, `IllegalMoveError`, `ENGINE_VERSION`), [`specs/01-domain-model-frozen.md`](./01-domain-model-frozen.md) (`getPreset`, `UnknownPresetError`, `DEFAULT_PRESET_ID`, `PlayerUpdate`, `SeatInfo`), [`specs/00-project-scaffold-frozen.md`](./00-project-scaffold-frozen.md) (layer rule: `service` may import every layer, `src/config` and Node built-ins except `fs`).
 > Requirement IDs use the 7xx range.
@@ -51,7 +51,7 @@ The game core plays and scores games, and the Game State Manager (Phase 6) persi
   - `rulesPreset` is present and not a known preset id (`getPreset` throws `UnknownPresetError`) (`reason: 'rulesPreset'`);
   - `aiCount + 1` is outside the preset's `players.min…max` (`reason: 'aiCount'`).
 
-  An absent `rulesPreset` selects `deps.defaultPresetId`.
+  The checks run in the order listed, and the first failure wins. An absent `rulesPreset` selects `deps.defaultPresetId`. Every error from the engine, `runAiLoop` or `state.create` (including `GameExistsError`, `AiLoopLimitError` and storage errors) propagates unchanged, and the service writes nothing beyond what `state.create` wrote.
 - **FR-702 (Must)** — `createGame` generates, from `deps.randomBytes`:
   - `gameId`: 16 bytes encoded as lowercase RFC 4648 base32 without padding (26 characters, matching `^[a-z2-7]{26}$`);
   - `seed`: 32 bytes as 64 lowercase hex characters;
@@ -64,15 +64,18 @@ The game core plays and scores games, and the Game State Manager (Phase 6) persi
 
 ### Authentication and loading
 
-- **FR-706 (Must)** — `getUpdate` and `submitMove` first validate their arguments before any I/O: `seatToken` must be a non-empty string (else `Unauthorized`); the other argument checks are in FR-711 and FR-713. A `gameId` that fails `assertValidGameId` rejects with `GameNotFound { gameId }` before any I/O.
+- **FR-706 (Must)** — `getUpdate` and `submitMove` validate their arguments before any I/O, in this order, and the first failure wins:
+  1. a `gameId` that fails `assertValidGameId` → `GameNotFound { gameId }`;
+  2. a `seatToken` that is not a non-empty string → `Unauthorized`;
+  3. the method's own checks (FR-711 for `getUpdate`; FR-713 for `submitMove`).
 - **FR-707 (Must)** — They then call `state.loadMeta(gameId)` and `state.loadLatest(gameId)` in parallel. `GameNotFoundError` (state) from either rejects with `GameNotFound { gameId }`. Any other error propagates unchanged.
-- **FR-708 (Must)** — The seat is the index `i` whose `meta.seatTokenHashes[i]` is non-null and equals the SHA-256 hex of `seatToken`, compared with `crypto.timingSafeEqual` on the 32-byte digests. Every non-null hash is compared, whatever the outcome. No match rejects with `Unauthorized`.
+- **FR-708 (Must)** — The seat is the index `i` whose `meta.seatTokenHashes[i]` is non-null and equals the SHA-256 hex of `seatToken`, compared with `timingSafeEqual` on the 32-byte digests. Every non-null hash is compared, whatever the outcome. `game-service.ts` imports `node:crypto` by name only (`import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'`), never as a default or namespace import, so a partial module mock replaces them. No match rejects with `Unauthorized`.
 - **FR-709 (Must)** — After authentication, `meta.engineVersion !== ENGINE_VERSION` rejects with `GameUnsupported { gameId, engineVersion }`. No move is applied and nothing is written.
 
 ### Get update
 
 - **FR-710 (Must)** — `getUpdate(gameId, seatToken, sinceVersion?)` resolves to the PlayerUpdate (FR-716) of the tip for the authenticated seat.
-- **FR-711 (Must)** — `events` is `[]` when `sinceVersion` is absent. Otherwise `sinceVersion` must be an integer in 0–`MAX_COMMIT_VERSION` (else `InvalidRequest { reason: 'sinceVersion' }`, before any I/O), and `events` is `state.eventsSince(gameId, sinceVersion)`, which is `[]` when `sinceVersion ≥` the tip version.
+- **FR-711 (Must)** — `events` is `[]` when `sinceVersion` is absent. Otherwise `sinceVersion` must be an integer in 0–`MAX_COMMIT_VERSION` (else `InvalidRequest { reason: 'sinceVersion' }`, before any I/O), and `events` is the missed events (FR-716) from `sinceVersion` to the tip.
 
 ### Submit move
 
@@ -81,21 +84,23 @@ The game core plays and scores games, and the Game State Manager (Phase 6) persi
   - `version` is not an integer in 0–`MAX_COMMIT_VERSION − 1` (`reason: 'version'`);
   - `moveId` is not a string of 1–32 characters (`reason: 'moveId'`);
   - `clientRequestId` is not a string of 1–128 characters (`reason: 'clientRequestId'`).
+
+  The checks run in the order listed, after FR-706 steps 1–2.
 - **FR-714 (Must) — Retry check.** When `req.version` ≠ the tip version `t`:
   - If `req.version < t`, the service loads commit `req.version + 1`. When its `clientRequestId === req.clientRequestId` and `actorSeat ===` the authenticated seat, `submitMove` resolves to that commit's PlayerUpdate for this seat (FR-716) with `events` = that commit's events. Nothing is written.
-  - Otherwise (no match, or `req.version > t`) it rejects with `VersionConflict { update }`, where `update` is the tip's PlayerUpdate for this seat with `events` = the events of commits `req.version + 1 … t` (`[]` when `req.version > t`).
+  - Otherwise (no match, or `req.version > t`) it rejects with `VersionConflict { update }`, where `update` is the tip's PlayerUpdate for this seat with `events` = the missed events (FR-716) from `req.version` to the tip.
 - **FR-715 (Must) — Apply.** When `req.version === t`, the service calls `applyMove(tip.state, seat, req.moveId)`. An `IllegalMoveError` with `reason: 'not-your-turn'` rejects with `NotYourTurn { seat }`. One with `reason: 'game-over'` or `'unknown-move'` rejects with `IllegalMove { moveId, reason }`. Nothing is written in either case.
-- **FR-716 (Must) — PlayerUpdate.** A PlayerUpdate for seat `s` built from a commit `c` is `{ version: c.version, events, view: buildPlayerView(c.state, s), legalMoves: legalMoves(c.state, s) }`, with `events` as each FR states. `buildPlayerView` is the only builder of the view.
+- **FR-716 (Must) — PlayerUpdate.** A PlayerUpdate for seat `s` built from a commit `c` is `{ version: c.version, events, view: buildPlayerView(c.state, s), legalMoves: legalMoves(c.state, s) }`, with `events` as each FR states. `buildPlayerView` is the only builder of the view. The **missed events** from a version `a` to an already-loaded tip commit `c` are the events of commits `a + 1 … c.version` concatenated in version order: `[]` when `a ≥ c.version`; otherwise commits `a + 1 … c.version − 1` are read with `state.load` (at most 8 in flight) and `c`'s own events are reused. The service never calls `state.eventsSince`, so the events always end exactly at `update.version`. A `load` error (e.g. `CommitNotFoundError` after an external delete) propagates unchanged.
 - **FR-717 (Must) — AI loop.** After the human move, the service calls `runAiLoop(state, createPlayers(state.seats))`. The players are rebuilt from the stored `state.seats`; the rules and hand plan come from the stored state, never from the preset registry. `AiLoopLimitError`, and any `IllegalMoveError` or `RangeError` thrown from inside the loop, propagate unchanged and nothing is written.
 - **FR-718 (Must) — Commit.** The service commits `{ version: req.version + 1, at: now().toISOString(), actorSeat: seat, clientRequestId: req.clientRequestId, events: [...human move events, ...loop events], state: { ...loopState, version: req.version + 1 }, scoreboard: evaluate(<that state>) }` with `state.commit(gameId, body)`.
-- **FR-719 (Must) — Commit race.** When `state.commit` rejects with `CommitConflictError`, the service loads commit `req.version + 1` and applies the FR-714 match test to it. A match resolves to that commit's PlayerUpdate for this seat, with that commit's events. Otherwise the service calls `state.loadLatest(gameId)` and rejects with `VersionConflict`, whose update is the tip's PlayerUpdate with the events of commits `req.version + 1 …` tip. Its version is ≥ `req.version + 1` even while `head.json` still says `req.version`.
+- **FR-719 (Must) — Commit race.** When `state.commit` rejects with `CommitConflictError`, the service loads commit `req.version + 1` and applies the FR-714 match test to it. A match resolves to that commit's PlayerUpdate for this seat, with that commit's events. Otherwise, including when that load rejects with `CommitNotFoundError` (only possible after an external delete), the service calls `state.loadLatest(gameId)` and rejects with `VersionConflict`, whose update is the tip's PlayerUpdate with the missed events (FR-716) from `req.version` to the tip. When commit `req.version + 1` exists, the update's version is ≥ `req.version + 1`, even while `head.json` still says `req.version`.
 - **FR-720 (Must)** — Any other error from `state.commit` propagates unchanged.
 - **FR-721 (Must) — Final scores.** When the committed state's `phase` is `'game-over'`, the service awaits `state.writeFinalScores(gameId, version, scoreboard)` (best-effort; it never rejects) before resolving. A retried request that matches (FR-714/FR-719) does not write `final.json`.
 - **FR-722 (Must)** — On success `submitMove` resolves to the committed PlayerUpdate for this seat (FR-716) with `events` = the commit's events. `view.finalRanking` is present iff `phase === 'game-over'` (by `buildPlayerView`).
 
 ### Replay
 
-- **FR-723 (Must)** — `replayGame(meta, commits)` rebuilds a stored game. `commits` must be non-empty and hold versions `0, 1, …, n` in order (else `RangeError` naming `commits`). `meta.engineVersion !== ENGINE_VERSION` rejects with `GameUnsupported` before any engine call.
+- **FR-723 (Must)** — `replayGame(meta, commits)` rebuilds a stored game. `commits` must be non-empty and hold versions `0, 1, …, n` in order (else `RangeError` naming `commits`). `meta.engineVersion !== ENGINE_VERSION` throws `GameUnsupported` before any engine call. `replayGame` is synchronous.
 - **FR-724 (Must)** — Replay starts with engine `createGame({ gameId: meta.gameId, rules: commits[0].state.rules, seats: meta.seats, seed: commits[0].state.seed })`. Then, for each commit in order, it applies, via `applyMove` only (no players, no AI loop), every `bid-made` event as `bid:<tricks>` and every `card-played` event as `play:<cardId>` by its `seat`. Before the first commit's events, it skips the events of engine `createGame` itself. It returns one `GameState` per commit: the replayed state after that commit's events, with `version` set to the commit's version. A move that the engine rejects propagates as `IllegalMoveError`.
 
 ### Docs
@@ -107,7 +112,7 @@ The game core plays and scores games, and the Game State Manager (Phase 6) persi
 
 ## Business Rules
 
-- **BR-701 — Secrets stay on the server.** The seed, the seat-token hashes, other seats' hands and `aiDecisionCount` never appear in any value the service returns or throws (including `VersionConflict.update` and every error message). The seat token appears only in `createGame`'s result. *Rationale:* architecture §8, design §5.5. *Exceptions:* the dealer's publicly shown trump card (design §4.5).
+- **BR-701 — Secrets stay on the server.** The seed, the seat-token hashes, other seats' hands and `aiDecisionCount` never appear in any value the service returns, nor in any of the seven service errors (fields or message, including `VersionConflict.update`). The seat token appears only in `createGame`'s result. *Rationale:* architecture §8, design §5.5. *Exceptions:* the dealer's publicly shown trump card (design §4.5). Errors that are not service errors (`AiLoopLimitError`, whose `state` holds the full game; engine, state and storage errors) may carry such data. They are server-only: Phase 8 must log them and answer `500 internal`, never serialize them to a client (architecture §10).
 - **BR-702 — One request, at most one commit.** Each `createGame` writes exactly one game (meta + commit 0). Each `submitMove` writes at most one commit and never retries a commit. A matching retry writes nothing. *Rationale:* architecture §5 and §6.3. *Exceptions:* none.
 - **BR-703 — Stored rules are frozen.** After creation the service never reads the preset registry for a game. Rules, hand plan and seats come from the stored state. *Rationale:* design §4.5, architecture §6.4. *Exceptions:* none.
 - **BR-704 — Every move goes through the engine.** The human's move and every AI move are applied with `applyMove` on moves listed by `legalMoves`. The service never edits `GameState` except to set `version`. *Rationale:* design §5, players BR-403. *Exceptions:* none.
@@ -116,9 +121,10 @@ The game core plays and scores games, and the Game State Manager (Phase 6) persi
 ## Non-Functional Requirements
 
 - **NFR-701** — `pnpm typecheck`, `pnpm lint` (0 warnings), `pnpm test`, `pnpm test:sim` and `pnpm build` pass, locally and in CI.
-- **NFR-702** — With `head.json` exact, measured with a counting `ObjectStore` wrapper:
-  - successful `submitMove` = 8 store calls (1 meta read, 5 for `loadLatest`, 2 `put`s for the commit), plus 1 `put` when the game ends;
-  - `getUpdate` without `sinceVersion` = 6 calls;
+- **NFR-702** — With `head.json` exact, measured with a counting `ObjectStore` wrapper that also records which calls are in flight together:
+  - successful `submitMove` = 8 store calls (1 meta read, 5 for `loadLatest`, 2 `put`s for the commit), plus 1 `put` when the game ends. The meta read and `loadLatest`'s first round (3 calls) are in flight together, so the first round has 4 calls;
+  - `getUpdate` without `sinceVersion` = 6 calls, with the same 4-call first round; with `sinceVersion` `v` < tip `t` = 6 + 2·(t − v − 1) calls (each `state.load` is 2 calls);
+  - a `VersionConflict` from a stale `req.version` `v` < tip `t` (no match) = 8 + 2·(t − v − 1) calls (6, plus 2 for the retry-check load of commit `v + 1`, plus the missed-events loads);
   - `createGame` = 4 `put` calls and 0 reads.
 - **NFR-703** — `package.json` `dependencies` and `devDependencies` are unchanged (`node:crypto` is a built-in).
 - **NFR-704** — The `tests/unit/service` files complete in < 20 s in total, as reported by vitest in the CI "Test" step.
@@ -180,7 +186,7 @@ export function replayGame(meta: GameMeta, commits: readonly Commit[]): GameStat
 
 ## Verification Criteria
 
-All tests use `MemoryObjectStore`, a fixed `now` and, where ids must be known, a scripted `randomBytes`.
+All tests use `MemoryObjectStore`, a fixed `now` and, where ids must be known, a scripted `randomBytes`. Where a VC replaces a module function (`getPreset`, `runAiLoop`, `node:crypto` `timingSafeEqual`), it uses a partial module mock: `vi.mock('<module>', async (importOriginal) => ({ ...(await importOriginal()), <fn>: vi.fn(<impl>) }))`, never `vi.spyOn` on an ESM namespace.
 
 ### Create
 
@@ -194,14 +200,15 @@ All tests use `MemoryObjectStore`, a fixed `now` and, where ids must be known, a
 
 ### Authentication and loading
 
-- **VC-708** (FR-706): `getUpdate` with token `''` → `Unauthorized`, 0 store calls; gameId `'ABC'` → `GameNotFound`, 0 store calls.
+- **VC-708** (FR-706, FR-701, FR-713): `getUpdate` with token `''` → `Unauthorized`, 0 store calls; gameId `'ABC'` → `GameNotFound`, 0 store calls. Order when several inputs are invalid: gameId `'ABC'` + token `''` + `sinceVersion` −1 → `GameNotFound`; valid id + token `''` + bad `req` → `Unauthorized`; `req` with bad `version` and bad `clientRequestId` → `reason: 'version'`; `createGame` with bad `humanName` and bad `aiCount` → `reason: 'humanName'`.
+- **VC-731** (FR-701): with `runAiLoop` mocked to throw `AiLoopLimitError`, `createGame` rejects with that error and the store holds no `meta.json`; with `state.create` made to reject with `GameExistsError` (a scripted `randomBytes` that repeats only an existing game's 16 id bytes, with different seed and token bytes, so the stored `meta.json` differs), `createGame` rejects with `GameExistsError`.
 - **VC-709** (FR-707): an unknown valid gameId → `GameNotFound`; a game whose commit 0 was deleted (meta present) → `GameNotFound`; a store whose `get` throws a non-storage error → that error propagates.
-- **VC-710** (FR-708): a wrong token, and the token of another game → `Unauthorized`. A spy on `timingSafeEqual` is called once per non-null hash in meta for both a match and a mismatch.
+- **VC-710** (FR-708): a wrong token, and the token of another game → `Unauthorized`. On a meta built in the test with 3 seats, 2 of them human, where the token matches the first human hash, a mocked `timingSafeEqual` is called exactly 2 times for the match and 2 times for a mismatch.
 - **VC-711** (FR-709): a game whose `meta.json` is rewritten with `engineVersion: ENGINE_VERSION + 1` → `getUpdate` and `submitMove` reject with `GameUnsupported` (with that version); no commit is added.
 
 ### Get update
 
-- **VC-712** (FR-710, FR-711): after two moves (tip 2), `getUpdate` → version 2 and `events` `[]`; with `since` 0 → the events of commits 1–2 in order; `since` 2 and 99 → `[]`; `since` −1, 1.5 → `InvalidRequest { reason: 'sinceVersion' }`, 0 store calls.
+- **VC-712** (FR-710, FR-711, FR-716): after two moves (tip 2), `getUpdate` → version 2 and `events` `[]`; with `since` 0 → the events of commits 1–2 in order; `since` 2 and 99 → `[]`; `since` −1, 1.5 → `InvalidRequest { reason: 'sinceVersion' }`, 0 store calls. With a store wrapper that lets a third commit land after the service's `loadLatest` resolves, `getUpdate(since 0)` returns `version` 2 and exactly the events of commits 1–2.
 
 ### Submit move
 
@@ -212,8 +219,8 @@ All tests use `MemoryObjectStore`, a fixed `now` and, where ids must be known, a
 - **VC-717** (FR-714): stale version with a different `clientRequestId` → `VersionConflict` whose `update.version` is the tip and `update.events` the events of commits `req.version+1…tip`; `req.version` = tip + 5 → `VersionConflict` with `events` `[]`. No commit is added.
 - **VC-718** (FR-714): retry after a lost response: the same request sent again after it committed v+1 → resolves deep-equal to the first response; also after a further commit v+2 has landed. No commit is added.
 - **VC-719** (FR-714): a request whose `clientRequestId` matches commit v+1 but from a different seat (meta with two human seats, built in the test) → `VersionConflict`.
-- **VC-720** (FR-719, FR-720): two different moves from the same version raced with `Promise.all` → exactly one resolves, the other rejects with `VersionConflict`; one commit added. Two copies of the same request raced → both resolve deep-equal; one commit added. A collision while `head.json` still says `v` (head write made to fail) → the `VersionConflict.update.version ≥ v + 1`. A store whose commit `put` throws a generic error → that error propagates.
-- **VC-721** (FR-717, BR-703): after creating a game, the test replaces the preset's `rules` in the registry (via `vi.spyOn(getPreset)` or a mocked module returning different scoring); the next `submitMove` produces a state whose `rules` deep-equal the stored ones and the stored `handPlan` is unchanged.
+- **VC-720** (FR-719, FR-720): two different moves from the same version raced with `Promise.all` → exactly one resolves, the other rejects with `VersionConflict`; one commit added. Two copies of the same request raced → both resolve deep-equal; one commit added. A collision while `head.json` still says `v` (head write made to fail) → the `VersionConflict.update.version ≥ v + 1`. With `state.commit` made to reject with `CommitConflictError` while commit `v + 1` does not exist → `VersionConflict` with `update.version` `v`. A store whose commit `put` throws a generic error → that error propagates.
+- **VC-721** (FR-717, BR-703): after creating a game, the test switches the mocked `getPreset` to return rules with different scoring; the next `submitMove` produces a state whose `rules` deep-equal the stored ones and the stored `handPlan` is unchanged.
 - **VC-722** (FR-717): with `runAiLoop` mocked to throw `AiLoopLimitError`, `submitMove` rejects with it and no commit is added.
 
 ### Replay
@@ -223,11 +230,15 @@ All tests use `MemoryObjectStore`, a fixed `now` and, where ids must be known, a
 
 ### Docs, secrets, purity, NFRs
 
-- **VC-725** (BR-701): over VC-714's game and the VC-717/VC-720 conflicts, `JSON.stringify` of every returned value and every error (`message` plus own fields) contains neither the stored seed, nor `seatTokenHashes[0]`, nor `aiDecisionCount`, nor any card of another seat's hand except the shown trump card. The seat token appears only in `createGame`'s result.
+- **VC-725** (BR-701): over VC-714's game, the VC-716 rejections and the VC-717/VC-720 conflicts, two checks hold:
+  - (a) for every returned `PlayerUpdate` and every `VersionConflict.update`, `view` deep-equals `buildPlayerView(<stored state of commit update.version>, <the request's seat>)`, and `JSON.stringify` of the update **without its `events`** contains no card of another seat's hand in that stored state, except the shown trump card;
+  - (b) `JSON.stringify` of every returned value and every service error (`message` plus own fields) contains neither the stored seed, nor `seatTokenHashes[0]`, nor the substring `aiDecisionCount`; and every event in it carries cards only in `card-played.card` and `hand-dealt.trumpCard`.
+
+  The seat token appears only in `createGame`'s result.
 - **VC-726** (BR-702): a counting store shows each `createGame` makes exactly one create of `meta.json` and of commit 0, and each `submitMove` at most one commit `put` (0 on every rejected or matched-retry path in VC-716–VC-720).
 - **VC-727** (BR-704, BR-705): `git diff main -- src/service/player-view.ts src/service/ai-loop.ts src/domain src/engine src/score src/players src/state src/storage` is empty. `grep -nE "storage|state/|config|node:|Date|Math.random|crypto" src/service/replay.ts` finds no import. `grep -nE "new Date\(|Math.random|randomBytes\(" src/service/game-service.ts` matches only the `deps` defaults.
 - **VC-728** (FR-725): `grep -n "GameUnsupported" docs/design.md docs/architecture.md docs/development.md` finds each file; `grep -n "^## .*Service" docs/development.md` finds the section right after "Game state".
-- **VC-729** (NFR-702): a counting wrapper shows the call counts stated in NFR-702.
+- **VC-729** (NFR-702): a counting wrapper shows the call counts stated in NFR-702. A gated wrapper, which holds every call until released, shows 4 calls pending at once before the first is released, for both `submitMove` and `getUpdate`.
 - **VC-730** (NFR-701, NFR-703, NFR-704): local and CI gates are green; `package.json` dependency lists are unchanged from `main`; the CI "Test" step reports the `tests/unit/service` files' durations summing to < 20 s.
 
 ## Open Questions
@@ -243,6 +254,12 @@ None.
 
 ## Changelog
 
+- 0.2 (2026-11-23): review pass 1:
+  - operator: BR-701 covers returned values and service errors only; non-service errors are server-only (Phase 8 logs them and answers 500);
+  - operator: missed events are read with `state.load` up to the already-loaded tip, never `eventsSince` (FR-716);
+  - operator: `CommitNotFoundError` on the post-conflict re-read counts as no match (FR-719);
+  - input-check order (FR-701, FR-706, FR-713); `createGame` error propagation (FR-701);
+  - NFR-702 call counts for the `since` and 409 paths and the 4-call first round; partial-module mocking for VCs; `replayGame` throws (FR-723).
 - 0.1 (2026-11-23): initial draft from implementation.md Phase 7, design §9, architecture §5/§6.3/§8/§10/§11, and discovery answers:
   - `engineVersion` mismatch → `GameUnsupported`, no move applied;
   - the service validates inputs and throws `InvalidRequest { reason }`;
