@@ -119,3 +119,9 @@
 **Decision**: `errors.test.ts` creates a game whose commit-0 `state.seed` is `SECRET-SEED-123` and whose meta hash is `'ab'.repeat(32)`, then provokes each class through the manager (bad id, deleted commit 0, re-create with another `createdAt`, `load` past the tip, conflicting commit, invalid bodies/meta/board that hold the secrets). It checks `message`, `String(err)` and `InvalidCommitError.reason`.
 **Rejected**: Constructing errors directly only (would not prove the manager never passes secrets in).
 **Consequences**: None for the code: messages already carry only gameId/version/reason tokens.
+
+## D-021: Shape of the shipped docs  (Iteration 4)
+**Context**: FR-618 and the plan's Iteration 4 scope; two behaviours (D-017, D-018) go beyond the spec text; README's status paragraph was already outdated before this phase.
+**Decision**: `docs/development.md` §14 "Game state" has 12 subsections; a §14.4 "Using the manager" walkthrough (create → load meta + tip in parallel → commit → conflict → eventsSince/load → final scores) was added to the plan's list, plus a test-support example in §14.11; both were run verbatim in a temporary test and deleted. D-017 is documented as a gotcha (§14.12) and in §14.7, D-018 in §14.9. The service-facing recommendation is `Promise.all([loadMeta, loadLatest])` with `loadLatest` authoritative for existence. README left unchanged (no line became false because of this phase).
+**Rejected**: Organising §14 by iteration; documenting private helpers (`mapLimit`, `#findTip`); rewriting README's status paragraph (outside "only if made false by this phase").
+**Consequences**: "Known limitations" is now §15; no `§14` cross-reference pointed at it before, so only the heading moved. The README status paragraph should be refreshed by a later phase.

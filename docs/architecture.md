@@ -111,7 +111,7 @@ src/
   engine/      engine.ts, bidding.ts, play.ts, trick.ts, sequence.ts, view.ts, rng.ts
   score/       score-engine.ts, formulas.ts
   players/     player.ts, human-player.ts, ai-player.ts, strategies/random.ts, registry.ts
-  state/       game-state-manager.ts, keys.ts, schemas.ts
+  state/       game-state-manager.ts, keys.ts, schemas.ts, errors.ts
   storage/     object-store.ts, memory-store.ts, file-store.ts, vercel-blob-store.ts, index.ts (factory)
   service/     game-service.ts, errors.ts
   config.ts    env parsing (validated with Zod at startup)
@@ -160,7 +160,7 @@ sequenceDiagram
 - The AI loop is pure CPU (well under 1 ms per move). A safety cap (1,000 moves per request) catches engine bugs.
 - `createGame` runs the same loop right after the first deal, because the first bidders may be AIs.
 - The browser replays the returned `events` as animations, then renders the new view.
-- I/O per move request in the normal case: 1 `meta.json` read (immutable, cacheable, in parallel with the next read) + 1 consistent `head.json` read + 1 consistent probe for the next commit + 1 commit read + 1 commit write + 1 `head.json` write. The latency target must be measured in preview for cold, warm and stale-hint paths (open question 1).
+- I/O per move request in the normal case (`head.json` exact), in three rounds: (1) 1 `meta.json` read (immutable, cacheable) in parallel with the existence checks of `meta.json` and commit 0 and 1 consistent `head.json` read; (2) 1 commit read in parallel with 1 consistent probe for the next commit; (3) 1 commit write, then 1 `head.json` write. The latency target must be measured in preview for cold, warm and stale-hint paths (open question 1).
 
 ---
 
@@ -227,7 +227,7 @@ createObjectStore(config: Config): ObjectStore;   // picks the driver from STORA
 
 **Blob caveats.** The memory and file drivers are proven by the contract suite on every test run; the Blob driver is so far tested only against a mocked SDK. Until the preview Blob checks (§11) have run against a real store, callers must allow for the following.
 
-- **A create-only conflict may hide the caller's own success.** The SDK retries failed requests (network errors and 5xx responses) up to `VERCEL_BLOB_RETRIES` times (default 10). If a create-only `put` reached the store but its response was lost, the retry finds the key and the driver reports `ObjectExistsError` although the stored body is the caller's. The stored body is still exactly one writer's, but the winner may also see a conflict. A caller that must tell the two apart reads the object back and compares it with what it wrote; for commits this is the `clientRequestId` comparison of §6.3 item 5.
+- **A create-only conflict may hide the caller's own success.** The SDK retries failed requests (network errors and 5xx responses) up to `VERCEL_BLOB_RETRIES` times (default 10). If a create-only `put` reached the store but its response was lost, the retry finds the key and the driver reports `ObjectExistsError` although the stored body is the caller's. The stored body is still exactly one writer's, but the winner may also see a conflict. A caller that must tell the two apart reads the object back and compares it with what it wrote. The state layer does this byte comparison for every create-only document it writes (§6.2); across requests, the `clientRequestId` comparison of §6.3 item 5 covers a retry by the client.
 - **A Blob listing is a hint.** Ascending order across pages and completeness are assumed, not verified, and list consistency is not documented by Vercel. Callers never trust a listing alone; they confirm with consistent reads and probes (§6.3).
 - **Assumed SDK behaviour.** A create-only conflict is recognised by the text `already exists` in the SDK's error (the SDK has no dedicated error class); `get` of a missing key returns `null`; `del` of a batch with missing keys either succeeds or throws `BlobNotFoundError` after deleting the rest. A multi-batch `delete` is not atomic: if one batch fails, earlier batches are already deleted and later ones are not sent, so callers simply retry (deletes are idempotent).
 
@@ -236,17 +236,29 @@ One **contract test suite** (`tests/contract/`) runs against every driver: key v
 ### 6.2 Storage layout
 
 ```
-games/{gameId}/meta.json                    create-only   preset id, seats, createdAt, seat-token hashes, engineVersion, schemaVersion
-games/{gameId}/commits/{version:08d}.json   create-only   { schemaVersion, version, at, actorSeat, clientRequestId,
-                                                            events[], state, scoreboard }
-games/{gameId}/head.json                    overwrite     { version } — a hint only, never trusted alone
-games/{gameId}/scores/final.json            create-only   best-effort cache at game over (ranking, totals); the terminal commit is authoritative
+games/{gameId}/meta.json                    create-only   GameMeta: who plays, which rules, seat-token hashes
+games/{gameId}/commits/{version:08d}.json   create-only   Commit: one per accepted request; the truth
+games/{gameId}/head.json                    overwrite     Head: { version } — a hint only, never trusted alone
+games/{gameId}/scores/final.json            create-only   FinalScores: best-effort cache at game over; the terminal commit is authoritative
 index/created/{yyyy-mm-dd}/{gameId}         create-only   empty marker written at creation; used by retention (§6.5)
 ```
 
-- `gameId` is a random 128-bit id (base32): unguessable, so it also gives some privacy.
+The state layer (`src/state`) owns these keys and documents; the storage layer only stores bytes (§6.1). Every document is a strict Zod schema (unknown keys rejected) with `schemaVersion: 1`, checked on every read and every write:
+
+| Document | Fields | Rules beyond the field types |
+|---|---|---|
+| `meta.json` (`GameMeta`) | `schemaVersion`, `gameId`, `presetId`, `engineVersion` (integer ≥ 1, the engine version at creation), `createdAt`, `seats` (`SeatInfo[]`), `seatTokenHashes` | `seats[i].seat === i`; one `seatTokenHashes` entry per seat: 64 lowercase hex characters (SHA-256) for a human seat, `null` for an AI seat. |
+| commit (`Commit`) | `schemaVersion`, `version` (0–99,999,999), `at`, `actorSeat`, `clientRequestId` (1–128 characters), `events` (`GameEvent[]`), `state` (`GameState`), `scoreboard` (`ScoreBoard`) | `actorSeat` and `clientRequestId` are both `null` for commit 0 (created by the server, not by a move) and both set for every later commit. Stored with its keys in exactly this order. |
+| `head.json` (`Head`) | `schemaVersion`, `version` (0–99,999,999) | – |
+| `final.json` (`FinalScores`) | `schemaVersion`, `gameId`, `version` (the terminal commit's), `ranking`, `totals`, `madeCount`, `missedCount` (the last four copied from the terminal `scoreboard`) | – |
+
+- `gameId` is a random 128-bit id written as 26 lowercase base32 characters (`^[a-z2-7]{26}$`): unguessable, so it also gives some privacy, and safe in every storage key. The service generates it; the state layer only checks it.
+- `createdAt` and `at` are exact `Date#toISOString()` strings (`2026-11-23T14:05:00.000Z`), so the index date is simply the first ten characters of `createdAt`.
 - The secret game `seed` lives in `state` inside each commit. It is never returned to a client (design §5.5). `engineVersion` in `meta.json` pins the rules implementation used for replays.
-- **Creation write order:** (1) index marker, (2) `meta.json`, (3) commit 0 (the game exists once commit 0 exists), (4) `head.json` best-effort. A crash at any step leaves at most an orphan that retention deletes. A lost create response simply means the user starts a new game.
+- Reading a commit also checks that its `version` matches its key and that `state.gameId` matches the game, so a misplaced document is reported as corrupt instead of being returned.
+- **Creation write order:** (1) index marker, (2) `meta.json`, (3) commit 0, (4) `head.json` best-effort. Each step starts only after the previous one succeeded. A game exists once **both** `meta.json` and commit 0 exist, so a crash at any step leaves at most an orphan that loads as "not found" and that retention deletes. A lost create response simply means the user starts a new game.
+- **Retried writes are absorbed.** On Blob, a create-only write whose response was lost can be retried by the SDK and then collide with itself (§6.1). So when `meta.json`, commit 0 or a later commit already exists, the state layer reads the stored bytes back and compares them with the bytes it just tried to write: identical bytes count as success, different bytes are a real conflict (another game with that id, or another request that won the commit). An existing index marker always counts as success, since it is empty.
+- **The tip is found by forward probing.** `head.json` gives a starting hint; the state layer reads that commit and probes the following versions with `exists` until one is missing (§6.3 item 3). It never trusts or repairs the hint.
 - Commit keys are zero-padded so `list` returns them in order.
 - Each commit holds the **full state** (a few KB), so loading a game is one read. Events in the commit keep the history for replay and animation.
 
@@ -254,9 +266,9 @@ index/created/{yyyy-mm-dd}/{gameId}         create-only   empty marker written a
 
 Vercel Blob has no transactions. It does support ETag-conditional writes (`put` with `ifMatch`). Overwritten blobs may be served from cache for up to 60 s unless they are read with `useCache: false`, which is available on private stores. The design uses these facts as follows:
 
-1. **Optimistic concurrency via create-only keys.** Writing commit `v+1` is a create-only `put`. If two requests race from `v`, exactly one succeeds. The other gets `ObjectExistsError` → `VersionConflict`. This is the system's only "lock", and it works the same on the file and memory stores. The Vercel docs say a create-only `put` on an existing pathname fails. They do not explicitly promise that exactly one of two *concurrent* creates wins, so this is verified by a preview test (§11) before launch.
+1. **Optimistic concurrency via create-only keys.** Writing commit `v+1` is a create-only `put`. If two requests race from `v`, exactly one succeeds. The other gets `ObjectExistsError`, which the state layer reports as `CommitConflictError` (after ruling out its own retried write, §6.2) and the service turns into `VersionConflict`. This is the system's only "lock", and it works the same on the file and memory stores. The Vercel docs say a create-only `put` on an existing pathname fails. They do not explicitly promise that exactly one of two *concurrent* creates wins, so this is verified by a preview test (§11) before launch.
 2. **Immutable data is safe to cache.** Commits and `meta.json` never change after they are written.
-3. **Finding the tip.** Read `head.json` with a consistent read for a hint `h`, then probe commit `h+1`, `h+2`, … with consistent reads until one is missing. Because `head.json` is rewritten after every commit, the hint is normally exact or one behind. If `head.json` is missing, use `list(prefix)` as a hint only and confirm by probing forward from the highest listed key. `head.json` is updated best-effort after each commit, optionally with `ifMatch` so it never moves backwards (the `ObjectStore` interface does not offer `ifMatch` yet, §6.1; without it a hint can briefly move backwards, which only costs extra probes). A stale tip can only cause a create-only collision (409), never a lost update.
+3. **Finding the tip.** Read `head.json` with a consistent read for a hint `h`, then probe commit `h+1`, `h+2`, … with consistent reads until one is missing. Because `head.json` is rewritten after every commit, the hint is normally exact or one behind. If `head.json` is missing or unreadable, or the hinted commit does not exist (hint ahead of reality), use `list(prefix)` as a hint only and confirm by probing forward from the highest listed key that exists; if nothing usable is listed, probe from commit 0. `head.json` is updated best-effort after each commit with a plain overwrite. An `ifMatch` write would keep it from ever moving backwards, but the `ObjectStore` interface does not offer `ifMatch` (§6.1); without it a hint can briefly move backwards, which only costs extra probes. A stale tip can only cause a create-only collision (409), never a lost update.
 4. **Client-declared version.** Each move request carries the `version` the client saw. A mismatch returns 409 with the current update, so moves are never applied to a view the player didn't see. After a create-only collision on `v+1`, the server knows `v+1` exists, so it loads forward from `v+1` with consistent reads before building the 409 body. That way the 409 never carries a stale update.
 5. **Idempotent retries.** Each move carries a `clientRequestId`. The server compares it, together with the authenticated seat, against commit `req.version + 1`, not the tip. It does this both when the version is stale and after a create-only collision. On a match it returns that commit's result for this seat instead of 409 (design §9 step 3). This covers a retry after a lost response, a retry after later commits landed, and two concurrent copies of the same request.
 

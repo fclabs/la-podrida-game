@@ -1,14 +1,14 @@
 # CONTEXT — Game State Manager (Phase 6)
 
-Last updated by: Iteration 3 (`commit`, `eventsSince`, final scores). Next: Iteration 4 (docs only).
+Last updated by: Iteration 4 (docs). Phase 6 is complete: code, tests and shipped docs. Next: the orchestrator's verify-spec, push, CI check of NFR-604, then Phase 7 (`GameService`).
 
 ## Current state
 
-- Phases 0–5 are complete (domain, engine, score, players + AI loop in `src/service/ai-loop.ts`, storage). Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (no `noUncheckedIndexedAccess`; target ES2022), pnpm 10.15.1, Node 24 declared (local Node may be newer: pnpm prints an "Unsupported engine" WARN, not fatal), Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7. `package.json` dependencies unchanged in this phase (NFR-603).
-- **Shipped in Iteration 1**: `src/state/keys.ts`, `src/state/errors.ts`, `src/state/schemas.ts`; tests `tests/unit/state/keys.test.ts` (30 tests), `tests/unit/state/schemas.test.ts` (45 tests), `tests/unit/state/types.test-d.ts` (compile-time only). `src/state/.gitkeep` deleted.
-- **Shipped in Iteration 2**: `src/state/game-state-manager.ts` (`GameStateManager` with `constructor`, `create`, `loadMeta`, `load`, `loadLatest`); test support `tests/unit/state/support/{store-wrappers,fixtures}.ts`; tests `tests/unit/state/create.test.ts` (26 tests), `tests/unit/state/load.test.ts` (30 tests).
-- **Shipped in Iteration 3**: `GameStateManager.commit`, `eventsSince`, `writeFinalScores`, `readFinalScores`, module-private `mapLimit` + `EVENTS_READ_CONCURRENCY = 8`; `create` now serializes the caller's input (D-017). Tests `tests/unit/state/commit.test.ts` (24), `events-final.test.ts` (21), `errors.test.ts` (10), `io-budget.test.ts` (3). The code and the public interface of `src/state` are final; only docs remain (Iteration 4).
-- Full `pnpm test`: 50 passed + 1 skipped files / 961 passed + 30 skipped tests. `tests/unit/state`: 8 files, 189 tests, per-file durations summing to ≈ 2.3 s locally (commit.test.ts ≈ 1.8 s, the file-store races).
+- Phases 0–6 are complete (domain, engine, score, players + AI loop in `src/service/ai-loop.ts`, storage, game state). Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (no `noUncheckedIndexedAccess`; target ES2022), pnpm 10.15.1, Node 24 declared (local Node may be newer: pnpm prints an "Unsupported engine" WARN, not fatal), Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7. `package.json`/lockfile unchanged from `main` (NFR-603).
+- **Shipped system**: `src/state/{keys,errors,schemas,game-state-manager}.ts` implement spec 06 exactly (public interface = spec Data & Interfaces, plus the extra exports `GAME_ID_PATTERN` and `firstIssuePath`). `src/state/.gitkeep` is gone. Nothing in `src/` calls the manager yet (Phase 7 will).
+- **Tests**: `tests/unit/state/` — 8 test files, 189 tests (keys 30, schemas 45, create 26, load 30, commit 24, events-final 21, errors 10, io-budget 3) + `types.test-d.ts` (compile-time) + `support/{fixtures,store-wrappers}.ts`. Per-file durations sum ≈ 2.2–2.3 s locally (commit.test.ts ≈ 1.8 s: file-store races).
+- **Full gates (Iteration 4)**: `pnpm install --frozen-lockfile && typecheck && lint && test && test:sim && build` exit 0; `pnpm test` 50 passed + 1 skipped files / 961 passed + 30 skipped tests; `pnpm test:sim` 5 files / 3605 tests (≈ 45 s).
+- **Shipped docs**: `docs/architecture.md` §6.2 (document field table, id/timestamp formats, creation order, retried writes absorbed by byte compare, tip by forward probing) plus stale-line fixes in §4.2, §5, §6.1, §6.3; `docs/design.md` §7 (shipped `GameStateManager` interface, `CommitConflictError` → `VersionConflict` mapping) and §9 step 7; `docs/development.md` new §14 "Game state" (14.1–14.12), "Known limitations" renumbered to §15, stale lines fixed in §1, §2, §9.6, §10.8, §11.7, §12.8, §13, §13.7, §15; `docs/implementation.md` Phase 1 task 6.
 
 ## File map
 
@@ -29,6 +29,9 @@ Last updated by: Iteration 3 (`commit`, `eventsSince`, final scores). Next: Iter
 | `tests/unit/state/errors.test.ts` | VC-624: each of the six error classes provoked through the manager on a game with seed `SECRET-SEED-123` and hash `'ab'.repeat(32)`; `message`, `String(err)` and `reason` hold neither. |
 | `tests/unit/state/io-budget.test.ts` | VC-625 in full: `loadLatest` 5 calls, `eventsSince(g, 2)` 7 calls, `commit` v6 = exactly 2 puts. |
 | `tests/unit/state/load.test.ts` | VC-603 (loadMeta), VC-609, VC-610 (a)–(g) + net + corrupt hinted commit, VC-611 (+ multi-page list), VC-612, VC-613 (+ orphan, single read for v0), VC-614 (load, loadLatest), VC-625 (loadLatest = 5 calls). |
+| `docs/architecture.md` §6.2 | Storage layout + document field table (shipped). |
+| `docs/design.md` §7 | Shipped `GameStateManager` interface. |
+| `docs/development.md` §14 | Game state guide: module map, keys, schemas, usage example (§14.4), create, load, commit, eventsSince, final scores, error table, tests, gotchas. |
 
 ## Public interfaces
 
@@ -165,12 +168,22 @@ All with `env -u BLOB_READ_WRITE_TOKEN -u BLOB_STORE_ID -u VERCEL_OIDC_TOKEN` pr
 | `pnpm typecheck` | `next typegen && tsc --noEmit`; also checks `tests/unit/state/types.test-d.ts`. |
 | `pnpm lint` | ESLint 0 warnings + `prettier --check .`. |
 | `pnpm test` | Full unit/contract suite (Blob contract skipped without a token). |
-| `pnpm test:sim` / `pnpm build` | Final Verification only (sim ≈ 46 s). |
+| `pnpm test:sim` / `pnpm build` | Simulation suite (≈ 45 s) and production build; both in CI. |
 
 ## Known gaps
 
-- Docs not updated: `docs/architecture.md` §6.2, `docs/design.md` §7, `docs/development.md` "Game state" section, `docs/implementation.md` Phase 1 task 6 (Iteration 4).
-- NFR-604: the CI "Test" step's `tests/unit/state` durations must be read after the push (local sum ≈ 2.3 s).
-- `pnpm test:sim` and `pnpm build` not run yet in this phase (Final Verification, Iteration 4).
+- NFR-604: read the CI "Test" step after the push; the `tests/unit/state` file durations must sum to < 15 s (local ≈ 2.2 s).
 - `schemas.test.ts` keeps its own meta/commit fixture (not moved to `support/fixtures.ts`).
-- Accepted limits (spec): a gap below the probe start goes unnoticed by `loadLatest`; an orphan `commit` is written but never loaded; `final.json` may be missing (best-effort cache).
+- Accepted limits (spec, documented in development §14.12): a gap below the probe start goes unnoticed by `loadLatest`; an orphan `commit` is written but never loaded and has no index marker (retention will not find it); `final.json` may be missing (best-effort cache); Blob exclusivity rests on the storage driver until the preview checks run.
+- README's "The repository currently holds the project foundation … The game itself is built … in later phases" was already outdated before this phase and was left unchanged (D-021).
+
+## Hand-off to Phase 7
+
+- **Construct**: `new GameStateManager(createObjectStore(getConfig()))`; the manager never reads config.
+- **Ids and formats to supply**: `gameId` = 16 bytes from a CSPRNG in lowercase RFC 4648 base32 without padding (26 chars of `a–z2–7`; `^[a-z2-7]{26}$`). `createdAt` and every commit `at` = `new Date().toISOString()` exactly (ms + `Z`). `seatTokenHashes[i]` = SHA-256 hex (64 lowercase) for human seats, `null` for AI seats, one per seat. `meta.seats` must deep-equal `initial.state.seats` and `seats[i].seat === i`. `engineVersion` = `ENGINE_VERSION`.
+- **Commit bodies**: commit 0 has `version 0`, `state.version 0`, `actorSeat null`, `clientRequestId null`. Every later commit: `version = state.version = req.version + 1` (the service sets `state.version`; the engine does not), `actorSeat` = the authenticated seat, `clientRequestId` 1–128 chars, `scoreboard = evaluate(state)`.
+- **Call order per request**: `Promise.all([loadMeta(g), loadLatest(g)])` (round 1 of loadLatest runs alongside the meta read); authenticate against `meta.seatTokenHashes`; treat `GameNotFoundError` from either as 404 — `loadLatest` is authoritative (after a create that failed at commit 0, `loadMeta` succeeds but the game does not exist). Retry check: `load(g, req.version + 1)` (`CommitNotFoundError` = not committed yet). Then `commit(g, next)`; response events via `eventsSince(g, req.version)` or from the transitions just applied.
+- **Error mapping**: `CommitConflictError` → run the retry check against `load(g, version)`; same `clientRequestId` + `actorSeat` → return that result, else probe forward (`loadLatest`) and throw `VersionConflict` with the fresh update. `GameNotFoundError` / `InvalidGameIdError` (id from the URL) → `GameNotFound` (404). `CommitNotFoundError` from `eventsSince` → treat as gone. `GameExistsError`, `InvalidCommitError`, `CorruptObjectError`, `RangeError` → 500 (bugs or corrupt data; messages are secret-free and safe to log). Other storage errors propagate → 500.
+- **`final.json` meaning**: a best-effort, create-only cache of the terminal commit's `{ ranking, totals, madeCount, missedCount }` plus `gameId` and the terminal `version`. Write it once at game over with `writeFinalScores(g, terminal.version, terminal.scoreboard)` (never throws on storage errors; first write wins). Readers: `readFinalScores(g)`; on `null`, fall back to the terminal commit's `scoreboard`, which is always authoritative. It rejects a `final.json` naming another game.
+- **Not checked by the manager**: `meta.engineVersion` vs `ENGINE_VERSION` (Phase 7 decides), tip + 1 on `commit`, game existence on `commit` (always load before committing).
+- **Verify-spec commands**: the plan's Final acceptance test block (gate + `pnpm vitest run tests/unit/state --reporter verbose` + the three `src/state` greps + `git diff main -- package.json pnpm-lock.yaml` + `test ! -e src/state/.gitkeep`), plus VC-621's three doc greps (see `iterations/04-docs.md`).

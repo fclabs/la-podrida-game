@@ -486,20 +486,26 @@ Every saved version of the game includes the `ScoreBoard` at that point, so the 
 
 ## 7. Game State Manager
 
-Stores and loads versions of a game. Each accepted request produces one new immutable **commit**: `{ version, events, state, scoreboard, clientRequestId }`.
+Stores and loads versions of a game. Each accepted request produces one new immutable **commit**: `{ version, at, actorSeat, clientRequestId, events, state, scoreboard }`. The manager lives in `src/state`, works over any `ObjectStore`, and only stores and validates documents: it never interprets moves or scores.
 
 ```ts
-interface GameStateManager {
-  create(meta: GameMeta, initial: CommitBody): Promise<Commit>;        // writes meta + commit 0
-  loadLatest(gameId: string): Promise<Commit>;                         // throws GameNotFound
-  load(gameId: string, version: number): Promise<Commit>;
-  commit(gameId: string, next: CommitBody): Promise<Commit>;           // throws VersionConflict
-  eventsSince(gameId: string, version: number): Promise<GameEvent[]>;
-  writeFinalScores(gameId: string, board: ScoreBoard): Promise<void>;   // best-effort cache (§6.3)
+class GameStateManager {
+  constructor(store: ObjectStore);
+  create(meta: GameMeta, initial: CommitBody): Promise<Commit>;              // writes marker, meta, commit 0, head; GameExistsError
+  loadMeta(gameId: string): Promise<GameMeta>;                               // GameNotFoundError
+  loadLatest(gameId: string): Promise<Commit>;                               // the tip; GameNotFoundError
+  load(gameId: string, version: number): Promise<Commit>;                    // CommitNotFoundError, GameNotFoundError
+  commit(gameId: string, next: CommitBody): Promise<Commit>;                 // CommitConflictError
+  eventsSince(gameId: string, version: number): Promise<GameEvent[]>;        // events of commits version+1 … tip
+  writeFinalScores(gameId: string, version: number, board: ScoreBoard): Promise<void>;  // best-effort cache (§6.3)
+  readFinalScores(gameId: string): Promise<FinalScores | null>;              // null when not written
 }
+// CommitBody = Commit without schemaVersion. Every method rejects with InvalidGameIdError for a
+// malformed id, and create/commit/writeFinalScores with InvalidCommitError for an invalid document,
+// before any I/O.
 ```
 
-If two requests try to create the same version, exactly one wins; the other gets `VersionConflict`. Storage layout and how this is guaranteed on Vercel Blob: `architecture.md` §6.
+If two requests try to create the same version, exactly one wins; the other gets `CommitConflictError { gameId, version }`. The state layer cannot import the service, so it never throws `VersionConflict` itself: `GameService` catches `CommitConflictError` and turns it into `VersionConflict` (§9 step 7). The caller supplies the `gameId`, the timestamps and the seat-token hashes; the manager generates nothing. Document fields, the storage layout and how exclusivity is guaranteed on Vercel Blob: `architecture.md` §6.2–§6.3. Usage, errors and tests: `development.md` §14.
 
 **Replay.** A game can be rebuilt from its seed and its event log without re-running any AI:
 
@@ -632,7 +638,7 @@ class GameService {
 4. Apply the human's move.
 5. **AI loop:** while the current actor is an AI, build its `PlayerView`, ask it for a decision and apply it (with a safety cap).
 6. Compute the scoreboard.
-7. Save commit `req.version + 1` (create-only). On `VersionConflict`, do the retry check from step 3 against the commit that won: if it is this request, return its result, otherwise return 409.
+7. Save commit `req.version + 1` (create-only). On `CommitConflictError`, do the retry check from step 3 against the commit that won: if it is this request, return its result, otherwise return 409.
 8. If the game is over, write `final.json` best-effort (§6.3).
 9. Return the requesting seat's `PlayerUpdate`, with events since `req.version`.
 

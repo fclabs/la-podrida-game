@@ -17,7 +17,7 @@ This guide explains how the repository is organised, which rules the tooling enf
 | Vitest | 5 | With Vite 8 as its peer. |
 | ESLint | 10 (flat config) | Plus `typescript-eslint`, the Next.js plugin and a local layer-boundary rule. |
 | Prettier | 3 | Checked by `pnpm lint`. |
-| Zod | 4 | Runtime dependency, used for configuration and the domain schemas (§9). |
+| Zod | 4 | Runtime dependency, used for configuration, the domain schemas (§9) and the persisted game documents (§14). |
 | `@noble/hashes` | 2.4.0 (exact) | Runtime dependency, used by the engine's seeded random streams (§10.6). |
 | `@vercel/blob` | 2.9.0 (exact) | Runtime dependency, used only by the Vercel Blob storage driver (§13). |
 
@@ -49,7 +49,7 @@ tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
 
-`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12) and `src/storage` (§13) are built, and `src/service` holds the two pure helpers `buildPlayerView` and `runAiLoop` (§12) but not `GameService` yet. `src/state` is still empty (it holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
+`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12), `src/storage` (§13) and `src/state` (§14) are built, and `src/service` holds the two pure helpers `buildPlayerView` and `runAiLoop` (§12) but not `GameService` yet. The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
 
 **Import alias.** `@/` maps to the **project root**, so imports read `@/src/engine/...` or `@/app/...`. It works in TypeScript, Next.js, Vitest and `tsx`.
 
@@ -305,7 +305,7 @@ Domain tests live in `tests/unit/domain/<topic>.test.ts`.
 
 - **Engine behaviour** lives in `src/engine` (§10): expanding a hand sequence into the game's `handPlan`, dealing, legal moves, transitions, table views, invariants and the seeded RNG.
 - **Scoring** lives in `src/score` (§11), which computes `HandScore` and `ScoreBoard` from the state. **Players and strategies** live in `src/players`, and `PlayerView` is built by `buildPlayerView` in `src/service` (§12); `PlayerUpdate` exists only as a shape.
-- **Persistence types** `GameMeta`, `Commit` and `CommitBody` and their schemas (Phase 6, in the state layer).
+- **Persistence types** `GameMeta`, `Commit`, `CommitBody`, `Head` and `FinalScores` and their schemas live in the state layer (`src/state/schemas.ts`, §14.3), which reuses the domain schemas for seats, events and state.
 - No schema checks that a hand sequence makes sense for a player count (for example `range 5→max` when `max` is below 5); `expandHandSequence` checks it, and `createGame` reports it as a setup problem.
 
 ---
@@ -473,7 +473,7 @@ Shared helpers live in `tests/unit/engine/helpers.ts` (not a `*.test.ts`, so not
 - **`rngFromSource` reads each draw as `next() >>> 0`**, the identity for valid uint32 values, so a stub that returns `-1` is read as `2^32 − 1` instead of producing out-of-range results. Stubs should still return uint32 values.
 - **`rng.int(0, 2 ** 32 − 1)` returns raw generator outputs** (nothing is rejected at that range); use it to compare streams in tests. `int` accepts any integer bounds, including unsafe integers beyond 2^53 where results are imprecise; the engine only uses small ranges.
 - **`checkInvariants` does not bound `cardsPerPlayer` by the deck.** A state with an oversized `cardsPerPlayer` that still passes `(c)` and `(h)` reports nothing (and `(f)` is skipped for it). It also does not check the `trumpCard` itself in `(a)`/`(b)`; when the trump is in the dealer's hand it is checked as one of the dealer's cards.
-- **Not in the engine:** scoring and `live` hand status (Score Engine, §11); `PlayerView`, players, strategies, the AI loop and the simulator (§12); seed generation and setting `version` (GameService and the Game State Manager; see [`implementation.md`](./implementation.md) for when they arrive). Bid changes, revokes, target-score endings, tie-break hands and special hands are out of scope by design ([`design.md`](./design.md) §1.2, §4.2).
+- **Not in the engine:** scoring and `live` hand status (Score Engine, §11); `PlayerView`, players, strategies, the AI loop and the simulator (§12); seed generation and setting `version` (GameService, which the Game State Manager checks, §14.7; see [`implementation.md`](./implementation.md) for when it arrives). Bid changes, revokes, target-score endings, tie-break hands and special hands are out of scope by design ([`design.md`](./design.md) §1.2, §4.2).
 
 ---
 
@@ -612,7 +612,7 @@ Score-only builders live in `tests/unit/score/helpers.ts` (not collected): `make
 - **`makeState` states are shape-valid, not real games.** Their hands hold no cards (the schema accepts empty hands and scoring never reads cards), so they fail `checkInvariants`; never feed them to engine functions that read cards.
 - **What `evaluate` does not check.** It does not cross-check the state beyond the checks in §11.5: not that `completedHands[k].handIndex === k`, not `handIndex` against `handPlan`, not `phase` against `hand`. `handPoints` trusts the `ScoringSpec` numbers and `rankSeats` checks only the lengths of its arrays, not that the values are integers. Engine states satisfy all of these by the engine's invariants (§10.4); callers hold schema-valid rule sets.
 - **`LiveStatus` is defined twice.** `ScoreBoard.live[].status` in `src/domain/types.ts` is an inline union equal to `LiveStatus`, because the domain may not import the score layer. Change both together.
-- **Not in the score engine:** composing `PlayerView` and `finalRanking` (`buildPlayerView`, §12), persisting the scoreboard with each commit and writing `final.json` (Game State Manager), and target-score endings, tie-break hands, "Pocha" bonuses and suit multipliers ([`design.md`](./design.md) §4.2 and its open questions).
+- **Not in the score engine:** composing `PlayerView` and `finalRanking` (`buildPlayerView`, §12), persisting the scoreboard with each commit and writing `final.json` (Game State Manager, §14), and target-score endings, tie-break hands, "Pocha" bonuses and suit multipliers ([`design.md`](./design.md) §4.2 and its open questions).
 
 ---
 
@@ -878,13 +878,13 @@ Test helpers: a stub view needs `{ … } as unknown as PlayerView`; wrap a stub 
 - **The simulator has no `--help` and no `--strategy`**, so every seat plays `random`. Its failing-game path (`game <seed> failed`) has no automated test.
 - **Memory.** A simulated game keeps every intermediate state for replay (about a thousand for `argentina-fidepo` with 3 players). Fine at today's sizes; stream the comparison if games grow much longer.
 - **In `tests/sim/ledger.ts`, failure helpers are function declarations returning `never`**, so TypeScript narrows after them; an arrow function assigned to a `const` does not narrow. Inside callbacks, copy a narrowed `let` into a `const` first.
-- **Not here yet:** seed generation, seat tokens, persistence, `PlayerUpdate` assembly and versions are `GameService`'s and the storage layers' job (later phases); only the `random` strategy exists.
+- **Not here yet:** seed generation, seat tokens, `PlayerUpdate` assembly and versions are `GameService`'s job (a later phase), and persistence is the Game State Manager's (§14); only the `random` strategy exists.
 
 ---
 
 ## 13. Storage
 
-`src/storage` is where game data will live: an `ObjectStore` that keeps **bytes under string keys**, with three drivers (in-memory, filesystem and Vercel Blob) that behave the same, a factory that picks one from the configuration, and two helpers that read and write JSON validated with Zod. Its callers are the Game State Manager and the retention job (both still to come); nothing calls it yet. The design, the guarantees and the reasons behind them are in [`architecture.md`](./architecture.md) §6.1; this section is about using, configuring and testing the code.
+`src/storage` is where game data lives: an `ObjectStore` that keeps **bytes under string keys**, with three drivers (in-memory, filesystem and Vercel Blob) that behave the same, a factory that picks one from the configuration, and two helpers that read and write JSON validated with Zod. Its callers are the Game State Manager (§14) and, later, the retention job. The design, the guarantees and the reasons behind them are in [`architecture.md`](./architecture.md) §6.1; this section is about using, configuring and testing the code.
 
 **Storage is generic.** It knows nothing about games: key names and document schemas belong to the state layer. Inside `src` it imports only `src/config.ts` (always written `@/src/config`); files in `src/storage` import each other with `./…`. Three greps keep the layer honest (they also match comments, so keep those words out of comments in `src/storage`):
 
@@ -1103,7 +1103,7 @@ A driver with opaque backend cursors (like Blob) uses `assertValidPrefix` and `r
 ### 13.7 Gotchas and limitations
 
 - **The Blob driver has not run against a real store yet.** It is tested against a mocked SDK only. Four behaviours are assumed until the Blob contract run and the preview checks (architecture §11) confirm them: a create-only conflict comes back as an SDK error whose message contains `already exists` (the SDK has no error class for it); `get` of a missing key returns `null`; `list` pages come back in ascending order across pages and cover every key; and `del` with missing keys either succeeds or throws `BlobNotFoundError` after deleting the others.
-- **On Blob, `ObjectExistsError` from a create-only put may hide your own success.** The SDK retries network errors and 5xx responses (`VERCEL_BLOB_RETRIES`, default 10). If the first attempt landed and only its response was lost, the retry collides with your own object. Where it matters, read the object back and compare it with what you wrote; commits carry a unique `clientRequestId` for this (architecture §6.3).
+- **On Blob, `ObjectExistsError` from a create-only put may hide your own success.** The SDK retries network errors and 5xx responses (`VERCEL_BLOB_RETRIES`, default 10). If the first attempt landed and only its response was lost, the retry collides with your own object. Where it matters, read the object back and compare it with what you wrote; the Game State Manager does this for every document it creates (§14.5, §14.7).
 - **A Blob listing is a hint.** Never decide that something does not exist from `list` alone on Blob; confirm with `get`/`exists`, which are always uncached.
 - **Blob reads are never cached**, immutable keys included. This is the safe default; whether cached reads of immutable keys are worth it is to be measured in preview.
 - **A large Blob `delete` is not atomic.** Keys go to the SDK in batches of 1000 distinct keys, one batch at a time. If a batch fails with anything but `BlobNotFoundError`, earlier batches are already deleted and later ones are not sent; retry the whole call.
@@ -1116,11 +1116,315 @@ A driver with opaque backend cursors (like Blob) uses `assertValidPrefix` and `r
 
 ---
 
-## 14. Known limitations
+## 14. Game state
+
+`src/state` is the Game State Manager: it knows how a game is laid out in storage and turns the generic `ObjectStore` (§13) into "create a game, find its latest version, load any version, append the next one, read the events a client missed". It works over any driver, so the same code runs on memory in tests, on disk locally and on Vercel Blob in production. The design and the reasons behind it are in [`architecture.md`](./architecture.md) §6.2–§6.3 and the interface in [`design.md`](./design.md) §7; this section is about using and testing the code.
+
+Two rules shape everything here:
+
+- **The commits are the truth.** A game's current version is decided only by which commit keys exist, and its final result only by the terminal commit. `head.json` (the latest version) and `final.json` (the final scores) are caches: they may be stale, missing or ahead, and nothing breaks.
+- **Create-only writes are the only ordering guard.** The manager never overwrites a commit, `meta.json`, the index marker or `final.json`; only `head.json` is overwritten. There is no locking and no conditional write. Two requests racing for one version are settled by the storage layer's create-only `put`, where exactly one wins.
+
+The manager **stores and validates documents; it never interprets them**. It imports only `zod`, `@/src/domain/*`, `@/src/storage/object-store` and its own files: no engine, score, players or service, and no `src/config` (it receives a ready store, so it needs no configuration, even though the layer rule, §3, would allow it). It generates nothing either: the caller (`GameService`) supplies the `gameId`, the timestamps, the seat-token hashes and the state to save. Three greps keep it that way (they also match comments):
+
+```sh
+grep -rnE "from '@/src/(engine|score|players|service|config)" src/state   # must find nothing
+grep -rniwE "ifMatch|lock|locking" src/state                               # must find nothing
+grep -rnE "mode: 'overwrite'" src/state                                    # only the head.json write
+```
+
+### 14.1 Module map
+
+Import from each module directly (`import { GameStateManager } from '@/src/state/game-state-manager'`); there is no barrel `index.ts`. Inside `src/state`, modules import each other with `./…`.
+
+| Module | Exports | What it does |
+|---|---|---|
+| `@/src/state/keys` | `MAX_COMMIT_VERSION` (99,999,999), `GAME_ID_PATTERN`, `assertValidGameId`; `gameKeyPrefix`, `metaKey`, `commitsPrefix`, `commitKey`, `headKey`, `finalScoresKey`, `indexCreatedKey`, `indexCreatedPrefix`; `parseCommitKey` | The storage layout (§14.2). |
+| `@/src/state/schemas` | `GameMetaSchema`, `CommitSchema`, `HeadSchema`, `FinalScoresSchema`, `ScoreBoardSchema`; types `GameMeta`, `Commit`, `CommitBody`, `Head`, `FinalScores`; `firstIssuePath` | The persisted documents (§14.3). |
+| `@/src/state/errors` | `InvalidGameIdError`, `GameNotFoundError`, `GameExistsError`, `CommitNotFoundError`, `CommitConflictError`, `InvalidCommitError` | The manager's errors (§14.10). |
+| `@/src/state/game-state-manager` | `GameStateManager` | Creating, loading and committing games over an `ObjectStore` (§14.4–§14.9). |
+
+The retention job will use the key builders (`indexCreatedPrefix`, `gameKeyPrefix`) and the store directly; it does not need the manager.
+
+### 14.2 Keys
+
+| Builder | Key |
+|---|---|
+| `gameKeyPrefix(id)` | `games/{id}/` |
+| `metaKey(id)` | `games/{id}/meta.json` |
+| `commitsPrefix(id)` | `games/{id}/commits/` |
+| `commitKey(id, v)` | `games/{id}/commits/{v as 8 digits}.json`, e.g. `…/commits/00000041.json` |
+| `headKey(id)` | `games/{id}/head.json` |
+| `finalScoresKey(id)` | `games/{id}/scores/final.json` |
+| `indexCreatedKey(date, id)` | `index/created/{yyyy-mm-dd}/{id}` |
+| `indexCreatedPrefix` | the constant `index/created/` |
+
+- **Game ids.** A `gameId` must match `GAME_ID_PATTERN`, `^[a-z2-7]{26}$`: 128 random bits written in lowercase base32 without padding. `assertValidGameId(id)` throws `InvalidGameIdError` otherwise. Every builder checks the id first, and every manager method rejects a bad id before any I/O, so a request can never make the manager touch a key outside its game (`..`, `/` and upper case are all rejected).
+- **Versions** are integers from 0 to `MAX_COMMIT_VERSION`; anything else makes `commitKey` throw `RangeError` (message contains `version`). Eight zero-padded digits make `list` return commits in version order.
+- **Index dates** must be a real UTC calendar date written `yyyy-mm-dd` (`2026-02-30` and `2026-1-5` throw `RangeError`).
+- **`parseCommitKey(gameId, key)`** returns the version when `key` is exactly `commitKey(gameId, v)`, and `null` for anything else (a head key, a stray file, another game's commit).
+- The keys follow the storage key rule (§13.2): one letter case, padded numbers, and no key that is a path prefix of another.
+
+### 14.3 Documents and schemas
+
+The fields of each document are listed in [`architecture.md`](./architecture.md) §6.2. Every schema is a `z.strictObject` with `schemaVersion: z.literal(1)`, so a document with an unknown key, a missing field or another `schemaVersion` is rejected. The types are `z.infer` of the schemas, and `CommitBody` is `Commit` without `schemaVersion` (what a caller passes in; the manager adds `schemaVersion: 1`).
+
+The cross-field rules are part of the schemas (`.superRefine`), so they hold on every read **and** every write:
+
+- **`GameMeta`:** `gameId` matches the id pattern; `seats[i].seat === i`; there is one `seatTokenHashes` entry per seat, 64 lowercase hex characters for a human seat and `null` for an AI seat; `createdAt` is exactly what `Date#toISOString()` returns (`2026-11-23T14:05:00.000Z`: milliseconds and `Z` required, a real date).
+- **`Commit`:** `version` is in range; `actorSeat` and `clientRequestId` are both `null` for commit 0 and both set for every later commit; `clientRequestId` has 1–128 characters; `at` has the same format as `createdAt`. The `events`, `state` and `scoreboard` fields reuse the domain schemas.
+- **`Head`:** `version` is in range.
+- **`ScoreBoardSchema`** matches the domain `ScoreBoard` type field for field (`live` optional). There is no scoreboard schema in the domain, and the state layer cannot import the score layer, so it lives here. `tests/unit/state/types.test-d.ts` makes `pnpm typecheck` fail if the two drift apart: change both together.
+
+On a read, a document that fails its schema is reported by `getJson` as the storage `CorruptObjectError` with `reason: 'schema'` and `issuePath` (for example `schemaVersion`, `seatTokenHashes.1`, `actorSeat`; `''` for an extra top-level key). On a write, the same failure is an `InvalidCommitError` before anything is stored (§14.10). The manager never returns unvalidated data.
+
+### 14.4 Using the manager
+
+This is how `GameService` drives a game, shown on a fresh `MemoryObjectStore` as a test would; the calls are the same on every driver. In the app the store comes from `createObjectStore(getConfig())` (§13.4).
+
+```ts
+import { createHash, randomBytes } from 'node:crypto';
+import { DEFAULT_PRESET_ID, getPreset } from '@/src/domain/presets';
+import type { SeatInfo } from '@/src/domain/types';
+import {
+  applyMove,
+  createGame,
+  currentActor,
+  ENGINE_VERSION,
+  legalMoves,
+} from '@/src/engine/engine';
+import { evaluate } from '@/src/score/score-engine';
+import { CommitConflictError } from '@/src/state/errors';
+import { GameStateManager } from '@/src/state/game-state-manager';
+import type { CommitBody, GameMeta } from '@/src/state/schemas';
+import { MemoryObjectStore } from '@/src/storage/memory-store';
+
+const manager = new GameStateManager(new MemoryObjectStore());
+
+// The caller makes the id, the seed, the seat token and the timestamps; the manager only checks them.
+const gameId = 'abcdefghijklmnopqrstuvwxyz'; // in the service: 16 random bytes in lowercase base32
+const seats: SeatInfo[] = [
+  { seat: 0, playerId: 'p0', name: 'Ana', kind: 'human' },
+  { seat: 1, playerId: 'ai-1', name: 'AI 1', kind: 'ai' },
+  { seat: 2, playerId: 'ai-2', name: 'AI 2', kind: 'ai' },
+];
+const seatToken = randomBytes(32).toString('base64url'); // returned to the player, never stored
+const start = createGame({ gameId, rules: getPreset(DEFAULT_PRESET_ID), seats, seed: 'secret' });
+
+const meta: GameMeta = {
+  schemaVersion: 1,
+  gameId,
+  presetId: DEFAULT_PRESET_ID,
+  engineVersion: ENGINE_VERSION,
+  createdAt: new Date().toISOString(),
+  seats,
+  seatTokenHashes: [createHash('sha256').update(seatToken).digest('hex'), null, null],
+};
+
+// Commit 0: no actor and no request id. Writes the index marker, meta.json, commit 0, head.json.
+const initial = await manager.create(meta, {
+  version: 0,
+  at: meta.createdAt,
+  actorSeat: null,
+  clientRequestId: null,
+  events: start.events,
+  state: start.state,
+  scoreboard: evaluate(start.state),
+});
+
+// A request: load meta and the tip together, apply a move, save the next version.
+const [storedMeta, tip] = await Promise.all([
+  manager.loadMeta(gameId),
+  manager.loadLatest(gameId),
+]);
+const actor = currentActor(tip.state) ?? 0;
+const [move] = legalMoves(tip.state, actor);
+const transition = applyMove(tip.state, actor, move.id);
+const version = tip.version + 1;
+const state = { ...transition.state, version }; // the caller sets state.version
+const next: CommitBody = {
+  version,
+  at: new Date().toISOString(),
+  actorSeat: actor,
+  clientRequestId: 'req-1',
+  events: transition.events,
+  state,
+  scoreboard: evaluate(state),
+};
+await manager.commit(gameId, next); // resolves to the stored Commit
+
+// Another request that started from the same version loses the race.
+try {
+  await manager.commit(gameId, { ...next, clientRequestId: 'req-2' });
+} catch (error) {
+  if (!(error instanceof CommitConflictError)) throw error;
+  // error.version === 1: the service runs its retry check, then answers VersionConflict (409).
+}
+
+const latest = await manager.loadLatest(gameId); // commit 1
+const missed = await manager.eventsSince(gameId, initial.version); // the events of commit 1
+const one = await manager.load(gameId, 1); // any version by number
+
+// At game over (hand === null), cache the final scores; the terminal commit stays authoritative.
+if (latest.state.hand === null) {
+  await manager.writeFinalScores(gameId, latest.version, latest.scoreboard);
+}
+const final = await manager.readFinalScores(gameId); // null here: this game is not over
+```
+
+`storedMeta.seatTokenHashes` is what the service compares a presented token's hash against; `missed` and `one` are what it builds a client update from.
+
+### 14.5 Creating a game
+
+`create(meta, initial)` validates everything first, and rejects with `InvalidCommitError` before any I/O when the meta or commit-0 schema fails, `initial.version` or `initial.state.version` is not 0, `initial.state.gameId` is not `meta.gameId`, or `meta.seats` differs from `initial.state.seats`. It then writes, each step only after the previous one succeeded:
+
+1. the index marker `index/created/{date of createdAt}/{gameId}`, empty, create-only;
+2. `meta.json`, create-only;
+3. commit 0, create-only;
+4. `head.json` `{ schemaVersion: 1, version: 0 }`, overwrite, best-effort (any error is swallowed).
+
+It resolves to commit 0.
+
+- **When a key already exists.** An existing marker counts as success (it is empty, so any copy is identical). For `meta.json` and commit 0, the manager reads the stored bytes back: if they are byte-identical to what it just tried to write, the step counts as success. That is the Blob SDK retrying a write whose response was lost and colliding with itself (§13.7), and it is also why calling `create` twice with identical arguments resolves both times. Different bytes, or an object that vanished before the re-read, reject with `GameExistsError` and nothing further is written. With 128-bit random ids, `GameExistsError` means a bug, not bad luck.
+- **Partial creates.** A game exists only when **both** `meta.json` and commit 0 exist. After a failure (or crash) at step 1 or 2, `loadMeta` and `loadLatest` both reject with `GameNotFoundError`. After a failure at step 3, `loadLatest` rejects with `GameNotFoundError` but `loadMeta` still returns the stored meta, because it reads only `meta.json`. After step 3 the game loads normally, with or without `head.json`. Any storage error other than "already exists" propagates unchanged; the leftovers are deleted by retention with the rest of the game.
+
+### 14.6 Loading
+
+| Method | Returns | Store calls |
+|---|---|---|
+| `loadMeta(gameId)` | The validated `GameMeta`; `GameNotFoundError` if `meta.json` is missing; `CorruptObjectError` (`issuePath 'gameId'`) if it names another game. | 1 `get` |
+| `load(gameId, version)` | The validated commit; `CommitNotFoundError` when it is missing but commit 0 exists; `GameNotFoundError` when commit 0 is missing; `RangeError` for a version out of range. Does not read `meta.json`. | `get` of the commit in parallel with `exists` of commit 0 (one `get` for version 0) |
+| `loadLatest(gameId)` | The tip commit; `GameNotFoundError` when `meta.json` or commit 0 is missing. Never writes. | 5 in the normal case (below) |
+
+Every commit read also checks that the commit's `version` matches its key and that `state.gameId` is the requested game (`CorruptObjectError` with `issuePath` `version` or `state.gameId` otherwise). Checking commit 0 in `load` means a stray commit with no commit 0 (an orphan, §14.7) is never returned.
+
+**How `loadLatest` finds the tip.**
+
+1. In parallel: `exists(meta.json)`, `exists(commit 0)` and a read of `head.json`. Meta or commit 0 missing → `GameNotFoundError`. A `head.json` that is missing or corrupt counts as "no hint"; any other error from these three calls propagates.
+2. **Probe forward from a start `s`:** read commit `s` while checking `exists(commit s+1)` in parallel. If commit `s` is missing, this start is no good. If `s+1` is missing, the tip is `s` and the commit already read is returned. Otherwise check `s+2, s+3, …` one at a time until one is missing, then read the last one that exists.
+3. Start at the hint `h`. With no hint, or when commit `h` is missing (the hint is ahead of reality), list `games/{id}/commits/` (every page) and try each listed commit version, highest first, until one exists; if none does, start from 0.
+
+With an exact hint that is **5 calls in two parallel rounds and no `list`**; a hint one behind adds one `exists` and one `get`. `head.json` is a hint only: `loadLatest` never trusts it without reading the commit, and never repairs it (the next `commit` rewrites it). A corrupt commit at the start of the probe propagates as `CorruptObjectError` rather than being skipped.
+
+### 14.7 Committing
+
+`commit(gameId, next)` validates `next` before any I/O and rejects with `InvalidCommitError` when the commit schema fails (including its cross-field rules), `next.version` is 0, `next.state.version` differs from `next.version`, or `next.state.gameId` is not `gameId`. It then writes the commit create-only and, on success, overwrites `head.json` best-effort: **exactly 2 store calls** without a conflict. It resolves to the stored `Commit`.
+
+- **Conflicts.** When the commit key already exists, the manager reads it back. Byte-identical to what it tried to write → success (its own retried write landed; `head.json` is still written). Different bytes, or a commit that vanished before the re-read → `CommitConflictError { gameId, version }`. Of two different bodies racing for one version, exactly one resolves and the other gets `CommitConflictError`; the stored commit is the winner's. This is tested with real races on the memory and file stores; on Blob it rests on the driver's create-only `put` (§14.12).
+- **Errors.** Any other storage error from the write or the re-read propagates unchanged. `head.json` errors never propagate: a stale hint only costs extra probes on the next load.
+- **No tip or existence check.** `commit` does not check that `next.version` is the tip + 1, nor that the game exists: the create-only write is the only ordering guard, and checking would cost extra calls on every move. The service always loads the tip before it commits, so it always writes tip + 1. A `commit` for a game that was never created is written as an **orphan** key that no load ever returns (the game has no `meta.json` and no commit 0); only a caller bug produces one.
+- **What "identical bytes" means.** The manager serializes the document once, as `JSON.stringify` of the caller's validated `{ schemaVersion: 1, ...next }` with the top-level keys in the documented order, and compares exactly those bytes. Nested objects keep the caller's key order. The comparison never spans two calls, so it cannot be fooled by a serializer change. Two copies of one request that happen to produce identical bytes both resolve, which is the right answer for them; any difference at all is a conflict, and the service's `clientRequestId` retry check sorts out the duplicates.
+
+### 14.8 Events since a version
+
+`eventsSince(gameId, version)` returns the events of commits `version + 1 … tip`, concatenated in version order, which is what a client that last saw `version` missed. It finds the tip as `loadLatest` does, returns `[]` when `version` is at or past the tip, and otherwise reads the commits in between **at most 8 at a time** (the tip commit, already read by the probe, is reused). With an exact hint that is `5 + (tip − version − 1)` store calls.
+
+It rejects with `RangeError` (message contains `version`) when `version` is not an integer ≥ 0, `GameNotFoundError` for an unknown game, and `CommitNotFoundError` when a commit inside the range is missing (deleted meanwhile, for example by retention).
+
+### 14.9 Final scores
+
+`final.json` is a small summary written when a game ends, so the final result can be shown without reading the terminal commit. It is a **best-effort cache**: if it is missing, read the terminal commit's `scoreboard`, which is always authoritative.
+
+- **`writeFinalScores(gameId, version, board)`** validates `board` with `ScoreBoardSchema` and `version` as an integer ≥ 0 (`InvalidCommitError` otherwise, before any I/O), then writes `{ schemaVersion: 1, gameId, version, ranking, totals, madeCount, missedCount }` create-only. It resolves whatever the write does: "already exists" and every other storage error are swallowed. Being create-only, the **first** write wins; a later call with another board changes nothing. Pass the terminal commit's version and scoreboard.
+- **`readFinalScores(gameId)`** resolves to the validated `FinalScores`, or `null` when the file is missing. A corrupt file rejects with `CorruptObjectError`, and so does a `final.json` whose `gameId` names another game (`issuePath 'gameId'`), the same rule `loadMeta` applies, so one game's result is never returned for another.
+
+### 14.10 Errors
+
+| Error | From | When | What the caller does |
+|---|---|---|---|
+| `InvalidGameIdError` (`gameId`) | every method and key builder | The id does not match `^[a-z2-7]{26}$`. | No such game can exist: answer "not found" for an id taken from a request; otherwise fix the caller. |
+| `GameNotFoundError` (`gameId`) | `loadMeta`, `load`, `loadLatest`, `eventsSince` | `meta.json` or commit 0 is missing (never created, partly created or being deleted). | Not found (404). |
+| `GameExistsError` (`gameId`) | `create` | `meta.json` or commit 0 already holds different bytes. | A bug (ids are 128-bit random): report it as an internal error. |
+| `CommitNotFoundError` (`gameId`, `version`) | `load`, `eventsSince` | `load`: that version is not committed yet. `eventsSince`: a commit inside the range vanished. | `load`: the version is ahead of the game. `eventsSince`: treat the game as gone. |
+| `CommitConflictError` (`gameId`, `version`) | `commit` | Another body already holds that version. | Run the retry check against that commit, then answer `VersionConflict` (409) ([`design.md`](./design.md) §9). |
+| `InvalidCommitError` (`reason`) | `create`, `commit`, `writeFinalScores` | The document fails its schema or a consistency check; nothing was written. | A bug in the caller. `reason` names the check (below). |
+| `CorruptObjectError` (`key`, `reason`, `issuePath`) — from storage | every read | A stored document is not JSON, fails its schema (an unknown `schemaVersion` included), or names another version or game. | Internal error; log the key. |
+| `RangeError` | `load`, `eventsSince`, `commitKey`, `indexCreatedKey` | A version or date out of range. | A bug or a bad request parameter. |
+| anything else | any method | Storage errors (network, permissions, quota) propagate unchanged. | Internal error; the request can be retried. |
+
+`InvalidCommitError.reason` is a fixed token, optionally followed by a path: `meta-schema:<path>`, `commit-schema:<path>` and `board-schema:<path>` (the first Zod issue's path joined with `.`, or `(root)`), `initial-version`, `initial-state-version`, `state-game-id`, `seats-mismatch`, `commit-version`, `state-version` and `final-version`. It never includes Zod's message, which can echo values.
+
+Every message holds at most the game id, a version and a reason token (`Game not found: <id>`, `Commit <v> already exists in game <id>`, `Invalid document: <reason>`), never a seed, a hand, a seat-token hash or a document body, so they are safe to log. Each class sets `name` to its class name. All methods are `async`: validation errors arrive as rejected promises, never as synchronous throws.
+
+### 14.11 State tests
+
+Unit tests live in `tests/unit/state/` and run with `pnpm test`; they never touch a real store.
+
+| File | Protects |
+|---|---|
+| `keys.test.ts` | Accepted and rejected game ids, every key exactly, version and date `RangeError`s, every key valid for storage and none a path prefix of another, `parseCommitKey`, sort order. |
+| `schemas.test.ts` | Each schema rejects `schemaVersion: 2`, an extra key and a missing field; each cross-field rule broken once, with its exact `issuePath`; `ScoreBoardSchema` parses `evaluate()` for every state of one all-AI game per preset. |
+| `types.test-d.ts` | Compile-time only (`pnpm typecheck`): `ScoreBoardSchema` and `ScoreBoard` stay identical. |
+| `create.test.ts` | Bad ids make 0 store calls; the four writes, their order and modes; each validation failure; existing keys, retried writes and `GameExistsError`; a failure at each write step (partial creates). |
+| `load.test.ts` | `loadMeta`, `load`; `loadLatest` with `head.json` exact, behind, ahead, missing, not JSON, wrong `schemaVersion`, out of range, and failing; listings that are empty, partial or paged; commit identity checks; the 5-call budget. |
+| `commit.test.ts` | Stored bytes and key order, each invalid body, no tip + 1 check, orphans, races (20 rounds each on memory and on the file store), the retry case, error propagation and a failing `head.json`. |
+| `events-final.test.ts` | `eventsSince` ranges, errors, a vanished commit, at most 8 reads in flight over 40 commits; `final.json` write, first write wins, errors swallowed, read, corrupt and foreign files. |
+| `errors.test.ts` | Every error class provoked on a game whose seed and seat-token hash are known: neither appears in `message`, `String(error)` or `reason`. |
+| `io-budget.test.ts` | Store-call budgets: `loadLatest` 5, `eventsSince(g, 2)` with tip 5 → 7, `commit` 2 puts. |
+
+The whole folder takes about 2 s locally, most of it in the file-store races (each file-store put fsyncs). Run it with:
+
+```sh
+env -u BLOB_READ_WRITE_TOKEN pnpm vitest run tests/unit/state
+```
+
+**Test support** lives in `tests/unit/state/support/` (no `.test.ts` suffix, so not collected):
+
+- `fixtures.ts`: `GAME_ID` and `OTHER_GAME_ID` (two valid ids), `makeMeta(overrides?)` (one human and two AI seats, default preset), `makeInitial(gameId?)` (a commit-0 body from `createGame`), `makeCommitBody(prev, n, events?)` (a valid body for version `n`), `toCommit(body)`, `makeChain(upTo)`, and `storeGame(store, { upTo, head?, meta?, skip?, gameId? })`, which writes a game straight to a store with `putJson` (no manager), optionally without `meta.json`, without some commits or with a given `head.json`.
+- `store-wrappers.ts`: `RecordingStore(inner, hooks?)` wraps any store, records every call in `calls` (`{ method, key?, prefix?, keys?, mode? }`, in order, before the hook runs), tracks `maxConcurrentGets`, and lets a hook per method replace the call. Failing stores, retried writes and rewritten listings are all built from hooks. Assert on the raw data through `store.inner`.
+
+A store that fails the third `put` (commit 0 in `create`), and a game stored directly with a stale hint:
+
+```ts
+import { expect } from 'vitest';
+import { MemoryObjectStore } from '@/src/storage/memory-store';
+import { GameStateManager } from '@/src/state/game-state-manager';
+import { GameNotFoundError } from '@/src/state/errors';
+import { GAME_ID, makeInitial, makeMeta, storeGame } from './support/fixtures';
+import { RecordingStore } from './support/store-wrappers';
+
+let puts = 0;
+const failing = new RecordingStore(new MemoryObjectStore(), {
+  put: async ({ key, body, opts }, inner) => {
+    if (++puts === 3) throw new Error('boom');
+    return inner.put(key, body, opts);
+  },
+});
+const manager = new GameStateManager(failing);
+await expect(manager.create(makeMeta(), makeInitial())).rejects.toThrow('boom');
+await expect(manager.loadLatest(GAME_ID)).rejects.toBeInstanceOf(GameNotFoundError);
+expect(await manager.loadMeta(GAME_ID)).toEqual(makeMeta()); // meta.json was written
+
+const memory = new MemoryObjectStore();
+await storeGame(memory, { upTo: 5, head: 2 }); // commits 0…5, head.json two behind
+const counted = new RecordingStore(memory);
+expect((await new GameStateManager(counted).loadLatest(GAME_ID)).version).toBe(5);
+expect(counted.callsOf('put')).toHaveLength(0); // loading never writes
+```
+
+Tests on the file store create their folder with `fs.mkdtemp(path.join(os.tmpdir(), 'lp-state-'))` and remove it afterwards; they never write under `.data/`.
+
+### 14.12 Gotchas and limitations
+
+- **Returned documents are the parsed copies, stored bytes are the caller's.** `create` and `commit` write the caller's validated input (top-level keys in the documented order, nested keys in the caller's order) and return what Zod parsed. The content is equal, but Zod puts nested keys in schema order (a scoreboard comes back with `live` before `ranking`, while `evaluate()` builds `ranking` first). So never byte-compare a re-serialized returned document with stored bytes; compare parsed values. The manager's own byte comparison only ever compares the bytes of one call.
+- **`head.json` lags after a failed write.** It is never repaired by a load; the next successful `commit` rewrites it. Until then loads cost an extra probe per missing step.
+- **Edge cases of tip discovery.** Probing stops at `MAX_COMMIT_VERSION` without a call. A commit that existed during the probe but vanished before it was read rejects with `CommitNotFoundError` instead of silently returning an older tip, and commit 0 vanishing between the checks gives `GameNotFoundError`. All of these need an external delete in the middle of a load (only retention deletes, and only year-old games).
+- **Gaps go unnoticed below the probe start.** Commits are never written with gaps (each is create-only and the service writes tip + 1), but a gap left by a partial delete below the starting point is not detected by `loadLatest`; `eventsSince` rejects with `CommitNotFoundError` if the gap is inside its range.
+- **Orphan commits are not indexed.** A `commit` for a game that was never created writes a key with no index marker, so retention will not find it. Only a caller bug produces one.
+- **`loadMeta` alone does not prove a game exists.** After a create that failed at commit 0, `meta.json` exists but the game does not. Always call `loadLatest` (or `load`) too, as in §14.4, and treat its `GameNotFoundError` as authoritative.
+- **`engineVersion` is not checked on load.** The manager returns whatever version is stored; deciding what a mismatch with `ENGINE_VERSION` means is the service's job.
+- **`InvalidCommitError` covers every rejected document**, including `meta` in `create` and the board in `writeFinalScores`; read `reason` to tell them apart.
+- **No migrations.** A document with any `schemaVersion` other than 1 is reported as corrupt ([`architecture.md`](./architecture.md) §6.4).
+- **Exclusivity on Blob is still assumed.** Exactly-one-winner races are proven on the memory and file stores; on Blob they rely on the storage contract and the preview checks ([`architecture.md`](./architecture.md) §11), like the rest of the Blob driver (§13.7).
+- **Not in the state layer:** generating ids, seeds and seat tokens, hashing and checking tokens, the `clientRequestId` retry check, mapping errors to `VersionConflict` and HTTP, the AI loop (all `GameService`), and deleting old games (the retention job).
+
+---
+
+## 15. Known limitations
 
 - **Configuration is not validated at server startup yet.** `getConfig()` has no caller; it is wired in by its first user, the GameService factory (Phase 8 in [`implementation.md`](./implementation.md)). Until then a misconfigured deployment would still start.
 - **Blob credentials are checked by `createObjectStore`, not by `loadConfig`** (§13.3), so a `blob` configuration without them is reported when the store is first built, not at startup.
 - **The Vercel Blob driver has not run against a real store yet**; it is tested against a mocked SDK, and the behaviours it assumes are listed in §13.7.
 - **The layer rule does not check dynamic `import()` or `require()`.** Use static `import` statements.
-- **No game persistence, `GameService` or API yet:** the game core (`src/domain` §9, `src/engine` §10, `src/score` §11, `src/players` §12), the two pure service helpers (§12) and the storage layer (`src/storage`, §13) exist, but `src/state` is empty, so no game is saved; `GameService` is not written, and `/` is a placeholder page. A game can be played and scored only from code, tests or `pnpm simulate`.
-- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7.
+- **No `GameService` or API yet:** the game core (`src/domain` §9, `src/engine` §10, `src/score` §11, `src/players` §12), the two pure service helpers (§12), the storage layer (`src/storage`, §13) and the Game State Manager (`src/state`, §14) exist, but nothing calls the manager yet: `GameService` is not written, and `/` is a placeholder page. A game can be played and scored only from code, tests or `pnpm simulate`, and saved only from code or tests.
+- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12.

@@ -84,7 +84,7 @@ Each phase lists its **tasks**, the **files** it creates (paths from architectur
 3. `domain/rules.ts`: `RuleSet`, `HandSequenceSpec`, `ScoringSpec` types (design §4.2, §4.3, §6.2). **Extend `Segment`** so a bound can be `{ min: [number, 'max'] }`; this expresses the `gamerules` start of `min(10, max)` (10 for 3–5 players, 8 for 6, 7 for 7; `game_rules.md` §3.3). Update design §4.3 to match.
 4. `domain/presets.ts`: the four presets with **every field set explicitly** (design §4.2 table).
 5. `domain/schemas.ts`: Zod schemas for `RuleSet`, `GameState` and `GameEvent`. They are production code: the state layer (Phase 6) reuses them to validate persisted commits, and tests use them to validate presets.
-6. `domain/types.ts`: `GameState`, `HandState`, `SeatInfo`, `Move`, `LegalMove`, `GameEvent`, `Transition`, `HandResult`, `HandScore`, `ScoreBoard`, `TableView`, `PlayerView`, `PlayerUpdate`, `DecisionContext`, `Decision`, `Rng` (interface), `GameMeta`, `Commit`, `CommitBody`.
+6. `domain/types.ts`: `GameState`, `HandState`, `SeatInfo`, `Move`, `LegalMove`, `GameEvent`, `Transition`, `HandResult`, `HandScore`, `ScoreBoard`, `TableView`, `PlayerView`, `PlayerUpdate`, `DecisionContext`, `Decision`, `Rng` (interface). The persistence types `GameMeta`, `Commit` and `CommitBody` are not domain types: they live with their schemas in `state/schemas.ts` (Phase 6).
 
 **Done when** unit tests cover card parsing round-trips, rank order per deck, deck sizes per player count (incl. the pinned Spanish removals), and every preset parses with the `RuleSet` schema.
 
