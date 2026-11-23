@@ -5,6 +5,7 @@ import { RuleSetSchema, SeatInfoSchema } from '@/src/domain/schemas';
 import type {
   GameEvent,
   GameState,
+  HandResult,
   HandState,
   LegalMove,
   Rng,
@@ -15,6 +16,7 @@ import { legalBids } from './bidding';
 import { legalPlays } from './play';
 import { deriveRng } from './rng';
 import { expandHandSequence } from './sequence';
+import { trickWinner } from './trick';
 
 /**
  * The engine's behaviour version (spec FR-241). Increment it by 1 with any change that alters the
@@ -246,6 +248,98 @@ export function legalMoves(state: GameState, seat: number): LegalMove[] {
     id: `play:${cardId(c)}`,
     move: { type: 'play', seat, card: { ...c } },
   }));
+}
+
+/**
+ * Applies `seat`'s move `moveId` to `state` (spec FR-226 to FR-235) and returns the new state and
+ * the events it produced. Checks, in order: `RangeError` for a seat outside `0 … N − 1` (every
+ * phase); `IllegalMoveError` `'game-over'`, `'not-your-turn'`, then `'unknown-move'` (the id is not
+ * in `legalMoves(state, seat)`). Works on one `structuredClone` of `state`, mutated in place, so
+ * the input is never mutated and the result shares no object with it. Runs every automatic
+ * transition: bidding closed, trick won, hand completed, then the next deal or game over. Events
+ * are emitted in that order and carry copies, never objects of the returned state.
+ */
+export function applyMove(state: GameState, seat: number, moveId: string): Transition {
+  assertSeatInRange(state, seat);
+  if (state.phase === 'game-over' || state.hand === null) {
+    throw new IllegalMoveError('game-over', seat, moveId);
+  }
+  if (currentActor(state) !== seat) throw new IllegalMoveError('not-your-turn', seat, moveId);
+  const legal = legalMoves(state, seat).find((m) => m.id === moveId);
+  if (legal === undefined) throw new IllegalMoveError('unknown-move', seat, moveId);
+
+  const next = structuredClone(state);
+  const hand = next.hand as HandState;
+  const seatCount = next.seats.length;
+  const events: GameEvent[] = [];
+  if (next.seats[seat].kind === 'ai') next.aiDecisionCount += 1;
+
+  const move = legal.move;
+  if (move.type === 'bid') {
+    hand.bids[seat] = move.tricks;
+    events.push({ type: 'bid-made', seat, tricks: move.tricks });
+    if (seat === hand.dealer) {
+      next.phase = 'playing';
+      hand.toAct = nextSeat(hand.dealer, seatCount);
+    } else {
+      hand.toAct = nextSeat(seat, seatCount);
+    }
+    return { state: next, events };
+  }
+
+  const id = cardId(move.card);
+  const held = hand.hands[seat];
+  const [played] = held.splice(
+    held.findIndex((c) => cardId(c) === id),
+    1,
+  );
+  hand.currentTrick.plays.push({ seat, card: played });
+  events.push({ type: 'card-played', seat, card: { ...played } });
+  if (hand.currentTrick.plays.length < seatCount) {
+    hand.toAct = nextSeat(seat, seatCount);
+    return { state: next, events };
+  }
+
+  // Trick complete (FR-231).
+  const plays = hand.currentTrick.plays;
+  const winner = trickWinner(plays, hand.trumpSuit, next.rules.deck);
+  hand.tricksWon[winner] += 1;
+  hand.lastTrick = { winner, plays };
+  hand.currentTrick = { leader: winner, plays: [] };
+  hand.toAct = winner;
+  const trickNumber = hand.tricksWon.reduce((sum, n) => sum + n, 0);
+  events.push({ type: 'trick-won', seat: winner, trickNumber });
+  if (trickNumber < hand.cardsPerPlayer) return { state: next, events };
+
+  // Hand complete (FR-232).
+  const result: HandResult = {
+    handIndex: next.handIndex,
+    cardsPerPlayer: hand.cardsPerPlayer,
+    dealer: hand.dealer,
+    trumpSuit: hand.trumpSuit,
+    bids: hand.bids.map((b) => b as number),
+    tricks: [...hand.tricksWon],
+  };
+  next.completedHands.push(result);
+  events.push({
+    type: 'hand-completed',
+    handIndex: next.handIndex,
+    result: structuredClone(result),
+  });
+
+  if (next.handIndex < next.handPlan.length - 1) {
+    // Next deal (FR-233).
+    next.handIndex += 1;
+    next.phase = 'bidding';
+    next.hand = dealHand(next, next.handIndex, hand.dealer);
+    events.push(handDealtEvent(next.handIndex, next.hand));
+  } else {
+    // Game over (FR-234): handIndex stays at the last hand.
+    next.phase = 'game-over';
+    next.hand = null;
+    events.push({ type: 'game-over' });
+  }
+  return { state: next, events };
 }
 
 /**

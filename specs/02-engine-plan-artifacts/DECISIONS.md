@@ -30,3 +30,10 @@ Decisions locked in while implementing `specs/02-engine-plan.md`. Append only; e
 **Decision**: one problem per seat whose `seat !== i`, one per seat failing `SeatInfoSchema`, one per duplicated `playerId` value; order: rules → player range → expansion → seats → duplicates → `gameId` → `seed`. A non-array `seats` is one problem (`seats must be an array`).
 **Rejected**: one aggregate problem per check type (hides which seats are wrong).
 **Consequences**: VC-211 rows with a single cause give exactly one problem (asserted for 2-seat argentina, 7-seat spain, robot kind, duplicate id, empty gameId/seed, bad sequence); seats `[0,2,1]` give two.
+
+## D-005: `playGame` test-helper contract  (Iteration 5)
+
+**Context**: The plan asks for `playGame(transition, policy)` returning "every state and every event"; Iterations 6–7 import it in parallel and may not edit `helpers.ts`, so its shape must be fixed now.
+**Decision**: `playGame(start, policy = firstMove, maxMoves = 10_000): PlayedGame` with `Policy = (moves, state) => LegalMove`, `PlayedGame = { states, events, moves, final }` where `states[0] === start.state`, `events` begins with `start.events`, and `moves[i] = { seat, moveId, events }` turned `states[i]` into `states[i + 1]`. Policies `firstMove` and `lastMove` are exported constants. It throws on exceeding `maxMoves` or an actor with no legal move.
+**Rejected**: returning only `{ states, events }` (tests could not tell which events a given move produced); a generator API (harder to sweep twice).
+**Consequences**: view and invariant sweeps iterate `game.states`; per-move event checks use `game.moves`. The perf test does not use `playGame` (it keeps no history, to time the move loop only).

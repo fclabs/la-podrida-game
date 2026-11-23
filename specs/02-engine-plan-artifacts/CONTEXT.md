@@ -1,6 +1,6 @@
 # CONTEXT — Game Engine (Phase 2)
 
-Last updated by: Iteration 4 (Game creation, dealing and legal moves)
+Last updated by: Iteration 5 (Applying moves and automatic transitions)
 
 ## Current state
 
@@ -9,10 +9,11 @@ Last updated by: Iteration 4 (Game creation, dealing and legal moves)
 - `src/engine/rng.ts` is done (spec FR-200 to FR-205): `rngFromSource`, `createXoshiro128ss`, `deriveRng`. `src/engine/.gitkeep` was deleted.
 - `src/engine/sequence.ts` is done (spec FR-207 to FR-210): `maxCardsPerPlayer`, `expandHandSequence`.
 - `src/engine/bidding.ts` (FR-222 `legalBids`), `src/engine/play.ts` (FR-224 `legalPlays`), `src/engine/trick.ts` (FR-225 `trickWinner`) are done.
-- `src/engine/engine.ts` is partly done (spec FR-206, FR-211 to FR-223, FR-241): `ENGINE_VERSION`, `IllegalMoveError`, `InvalidGameSetupError`, `CreateGameInput`, `createGame`, `currentActor`, `legalMoves`, `aiRng`, plus the internal (non-exported) `dealHand`. **`applyMove` does not exist yet** (Iteration 5; no placeholder exported, per plan decision).
-- `tests/unit/engine/helpers.ts` has builders `card`, `cards`, `trick`, `rulesWith`, `makeHand`, `makeSeats`, `newGame`, `withHand`.
-- Not yet built: `applyMove` + transitions (5), `view.ts` (6), `invariants.ts` (7), docs (8).
-- Tests: `pnpm test` = 16 files, 373 tests (domain 215 + rng 17 + sequence 47 + bidding 8 + play 15 + trick 10 + engine-create 61 + config/smoke/layer-boundaries).
+- `src/engine/engine.ts` is **complete** (spec FR-206, FR-211 to FR-235, FR-241): `ENGINE_VERSION`, `IllegalMoveError`, `InvalidGameSetupError`, `CreateGameInput`, `createGame`, `currentActor`, `legalMoves`, `applyMove`, `aiRng`, plus internal `dealHand`, `handDealtEvent`, `assertSeatInRange`, `nextSeat`. Games play to completion deterministically for every preset.
+- `tests/unit/engine/helpers.ts` has builders `card`, `cards`, `trick`, `rulesWith`, `makeHand`, `makeSeats`, `newGame`, `withHand`, and the game driver `playGame` with policies `firstMove` / `lastMove` (types `Policy`, `PlayedMove`, `PlayedGame`). **Frozen for Iterations 6–7: import, never modify.**
+- Not yet built: `view.ts` (6), `invariants.ts` (7), docs (8).
+- Tests: `pnpm test` = 20 files, 422 tests (engine dir: 10 files, 207 tests; Iteration 5 added engine-apply 40, determinism 4, golden 4, perf 1).
+- NFR-203 measured locally: 981 moves, median ≈ 45 ms (limit 250 ms).
 
 ## File map
 
@@ -23,9 +24,13 @@ Last updated by: Iteration 4 (Game creation, dealing and legal moves)
 | `src/engine/bidding.ts` | `legalBids` (FR-222, dealer restriction / *sucias*). |
 | `src/engine/play.ts` | `legalPlays` (FR-224 = design §5.4 algorithm). |
 | `src/engine/trick.ts` | `trickWinner` (FR-225). |
-| `src/engine/engine.ts` | Game engine: `createGame` (FR-211 validation, FR-212 state), internal `dealHand` (FR-213–217), `currentActor`, `legalMoves`, `aiRng`, error classes, `ENGINE_VERSION`. Iteration 5 adds `applyMove`. |
+| `src/engine/engine.ts` | Game engine: `createGame` (FR-211 validation, FR-212 state), internal `dealHand` (FR-213–217), `currentActor`, `legalMoves`, `applyMove` (FR-226–235: moves, transitions, events), `aiRng`, error classes, `ENGINE_VERSION`. |
+| `tests/unit/engine/engine-apply.test.ts` | VC-213 rotation, VC-214 hands 1–2, VC-216 dealing part, VC-217 real game-over, VC-218 `applyMove` rows, VC-222 to VC-227, `playGame` self-check. |
+| `tests/unit/engine/determinism.test.ts` | VC-231 (two runs + event replay, gamerules 5p), VC-232 (first vs last policy, argentina 4p and spain 3p). |
+| `tests/unit/engine/golden.test.ts` | VC-237 golden fixture (argentina-fidepo 4 seats, seed `golden-seed`) as literals; tripwire for `ENGINE_VERSION`. |
+| `tests/unit/engine/perf.test.ts` | NFR-203 timing (warm-up + median of 5, `performance.now()`), asserts < 250 ms and logs the runs. |
 | `tests/unit/engine/engine-create.test.ts` | VC-206, VC-211, VC-212, VC-213 (hand 0), VC-214 (hand 0), VC-215, VC-217 (bidding/playing + hand-built game-over), VC-218 (`legalMoves` rows), VC-219 `bid:` ids, VC-220 `play:` ids, VC-234. |
-| `tests/unit/engine/helpers.ts` | Shared test builders (see Public interfaces). Iterations 4–5 may add to it; 6–7 must not edit it. |
+| `tests/unit/engine/helpers.ts` | Shared test builders and `playGame` (see Public interfaces). Frozen after Iteration 5: 6–7 import, never edit. |
 | `tests/unit/engine/bidding.test.ts` | VC-219 at function level (ids are in `engine-create.test.ts`). |
 | `tests/unit/engine/play.test.ts` | VC-220 at function level: every spec row, each run under all 16 combos of the 4 play flags consistent with the row's fixed flags. |
 | `tests/unit/engine/trick.test.ts` | VC-221 (french + spanish decks, leader ≠ seat 0). |
@@ -97,7 +102,7 @@ All three are pure, never mutate their inputs, and compare ranks with `compareRa
 `trickWinner(plays, state.hand.trumpSuit, state.rules.deck)`. They read `toAct` / `phase` nowhere:
 turn and phase checks are the caller's job.
 
-### `@/src/engine/engine` (Iteration 4 part; `applyMove` comes in Iteration 5)
+### `@/src/engine/engine` (final API)
 
 ```ts
 export const ENGINE_VERSION = 1;
@@ -115,6 +120,7 @@ export interface CreateGameInput { gameId: string; rules: RuleSet; seats: SeatIn
 export function createGame(input: CreateGameInput): Transition;
 export function currentActor(state: GameState): number | null;   // null if game-over (or hand null)
 export function legalMoves(state: GameState, seat: number): LegalMove[];
+export function applyMove(state: GameState, seat: number, moveId: string): Transition;
 export function aiRng(state: GameState, seat: number): Rng;      // deriveRng(seed,'ai',seat,aiDecisionCount)
 ```
 
@@ -123,6 +129,17 @@ export function aiRng(state: GameState, seat: number): Rng;      // deriveRng(se
 - Internal `dealHand(state: GameState, handIndex: number, previousDealer: number | null): HandState` (not exported). Reads `seed`, `rules`, `seats.length`, `handPlan[handIndex]`; never mutates `state`. Stream `deriveRng(seed, 'deal', handIndex)`; `previousDealer === null` → dealer = `rng.int(0, N−1)` drawn **before** the shuffle; else dealer = `(previousDealer + 1) % N` (no draw). Shuffles `buildDeck(rules.deck, N)`; card `k` → seat `(dealer + 1 + k) % N`; trump = shuffled[`N·c`] (stock) or shuffled[`N·c − 1`] when whole deck dealt (`trumpCardInDealerHand true`); trumpCard is a copy. Sort: suit index in `rules.deck.suits`, then `compareRanks` high→low. Bids `null`, `tricksWon` 0, `currentTrick {leader: mano, plays: []}`, `toAct` mano, no `lastTrick` key. Iteration 5: next hand = `dealHand(state, handIndex + 1, hand.dealer)` plus the internal `handDealtEvent(handIndex, hand)` helper for the event.
 - `legalMoves`: `RangeError` unless `seat` is an integer in `0…N−1` (internal `assertSeatInRange(state, seat)`, reuse it in `applyMove`) → `[]` if `hand === null` or seat ≠ `currentActor` → bidding: `{id:'bid:<n>', move:{type:'bid',seat,tricks:n}}` from `legalBids` → otherwise (playing): `{id:'play:<cardId>', move:{type:'play',seat,card}}` from `legalPlays`, `card` a **copy** (D-003).
 - Internal `nextSeat(seat, N)` = `(seat + 1) % N`.
+- `applyMove(state, seat, moveId)`:
+  1. `assertSeatInRange` → `RangeError` (every phase, also at game over).
+  2. `phase === 'game-over'` (or `hand === null`) → `IllegalMoveError('game-over')`; seat ≠ `currentActor` → `'not-your-turn'`; `moveId` not an `id` in `legalMoves(state, seat)` → `'unknown-move'`. Validation reads the input only; the move applied is the `LegalMove.move` found.
+  3. **Single clone**: `const next = structuredClone(state)`, mutated in place and returned. Never mutate `state`; never copy sub-objects separately.
+  4. `seats[seat].kind === 'ai'` → `aiDecisionCount += 1`. `version` never touched.
+  5. Bid: `bids[seat] = n`, event `bid-made`; dealer → `phase 'playing'`, `toAct = next(dealer)`; else `toAct = next(seat)`.
+  6. Play: card spliced from `hands[seat]` (by `cardId`), pushed to `currentTrick.plays`, event `card-played` (card copy); trick not full → `toAct = next(seat)`.
+  7. Trick full (N plays): `winner = trickWinner(plays, trumpSuit, rules.deck)`, `tricksWon[winner]++`, `lastTrick = { winner, plays }` (the old plays array moves over), `currentTrick = { leader: winner, plays: [] }`, `toAct = winner`, event `trick-won { seat: winner, trickNumber = sum(tricksWon) }`.
+  8. `trickNumber === cardsPerPlayer`: push `HandResult { handIndex, cardsPerPlayer, dealer, trumpSuit, bids, tricks: [...tricksWon] }` to `completedHands`, event `hand-completed` with a `structuredClone` of the result.
+  9. Not last hand: `handIndex++`, `phase 'bidding'`, `hand = dealHand(next, handIndex, oldDealer)`, event `handDealtEvent(...)`. Last hand: `phase 'game-over'`, `hand = null`, `handIndex` unchanged, event `game-over`.
+- **Event order per `applyMove`** (FR-235): `bid-made | card-played` → `trick-won` → `hand-completed` → `hand-dealt | game-over`, each only when it occurs. Events never share objects with the returned state (D-003). No Zod parsing in `applyMove`; schema conformance is test-side.
 
 ### Test helpers — `tests/unit/engine/helpers.ts` (import as `./helpers`)
 
@@ -141,7 +158,26 @@ newGame(id: PresetId, players: number, seed = 'seed-1'): Transition;
 // createGame({ gameId: 'game-1', rules: getPreset(id), seats: makeSeats(players), seed }).
 withHand(state: GameState, overrides: Partial<HandState>, phase = 'bidding'): GameState;
 // clone of state with hand = makeHand(overrides, seats.length) and phase set (hand-built positions).
+
+type Policy = (moves: LegalMove[], state: GameState) => LegalMove;   // moves non-empty; return one of them
+const firstMove: Policy;   // moves[0]  (lowest bid / first card in hand order)
+const lastMove: Policy;    // moves.at(-1) (highest bid / last card)
+interface PlayedMove { seat: number; moveId: string; events: GameEvent[] }
+interface PlayedGame {
+  states: GameState[];   // [start.state, state after move 1, …]; length = moves.length + 1
+  events: GameEvent[];   // [...start.events, ...every move's events]
+  moves: PlayedMove[];   // moves[i] turned states[i] into states[i + 1]
+  final: GameState;      // states.at(-1), phase 'game-over'
+}
+playGame(start: Transition, policy: Policy = firstMove, maxMoves = 10_000): PlayedGame;
+// loop: actor = currentActor(state); legalMoves(state, actor); policy; applyMove — until actor null.
+// Throws if maxMoves exceeded or an actor has no legal move. Never mutates start.
 ```
+
+Usage: `const game = playGame(newGame('mexico-bazas', 3));` — every intermediate state for view/invariant
+sweeps is `game.states`; the state right after hand `i` was dealt is `game.states[j + 1]` where `j` is the
+move whose events contain `hand-dealt` with `handIndex i` (hand 0: `game.states[0]`). Each call replays a
+full game (argentina 3p ≈ 981 moves, ~50 ms); memoise in a test file if used repeatedly.
 
 `helpers.ts` now imports `@/src/engine/engine`, so every test that imports `./helpers` loads the engine.
 
@@ -176,6 +212,10 @@ Key domain facts for later iterations (from the Phase 1 hand-off):
 - `dependencies` must stay exactly `next, react, react-dom, zod, @noble/hashes` (NFR-202); add packages with exact versions (`pnpm add -E pkg@x.y.z`).
 - Commits: staged by explicit path, never `git add -A`; message ends with a blank line + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never push, PR or merge.
 - Error classes set `this.name` to the class name.
+- **Single-clone rule** (FR-227): any engine function returning a new state builds it from exactly one `structuredClone` of its input, mutated in place. Inputs are never mutated.
+- **Events carry copies** (D-003): cards, results and seat lists in events are copies, never objects of the returned state.
+- **Event order** (FR-235): `bid-made|card-played`, `trick-won`, `hand-completed`, `hand-dealt|game-over`.
+- `tests/unit/engine/golden.test.ts` literals change only together with an `ENGINE_VERSION` bump.
 
 ## Commands
 
@@ -194,8 +234,9 @@ pnpm prints an "Unsupported engine" WARN locally (Node 26 vs declared 24) and "I
 
 ## Known gaps
 
-- `applyMove` and the automatic transitions (Iteration 5), view (6), invariants (7) and docs (8) are not built yet.
-- VC parts deferred to Iteration 5: VC-213 rotation (every next hand's dealer), VC-214 hands 1–2, VC-216 dealing part, VC-217 at a real game-over, VC-218 `applyMove` rows (bidding and game-over). Deferred to Iteration 6: VC-216 view part, VC-218 `tableViewFor` row.
+- View (6), invariants (7) and docs (8) are not built yet.
+- Still open for Iteration 6: VC-216 view part, VC-218 `tableViewFor(state, N)` rows (bidding and game-over).
+- With the first-legal-move policy every bid is `0` (the dealer's forbidden value is `cardsPerPlayer`), so golden `completedHands` bids are all zero; `lastMove` gives non-trivial bids.
 - `legalPlays` / `trickWinner` assume cards belong to `deck` (`compareRanks` throws `InvalidCardError` otherwise); they do not validate seats or turn.
 - `int` accepts any `Number.isInteger` bounds, including unsafe integers beyond 2^53 (results there are imprecise); the spec only requires integers. Engine callers use small ranges.
 - `docs/development.md` still says `@noble/hashes` "is added when the engine needs hashing"; Iteration 8 updates the docs.

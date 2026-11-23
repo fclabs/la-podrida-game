@@ -3,8 +3,16 @@ import { parseCard, type Card } from '@/src/domain/cards';
 import { FRENCH_52, type DeckDefinition } from '@/src/domain/decks';
 import { getPreset } from '@/src/domain/presets';
 import type { PresetId, RuleSet } from '@/src/domain/rules';
-import type { GameState, HandState, SeatInfo, Transition, TrickPlay } from '@/src/domain/types';
-import { createGame } from '@/src/engine/engine';
+import type {
+  GameEvent,
+  GameState,
+  HandState,
+  LegalMove,
+  SeatInfo,
+  Transition,
+  TrickPlay,
+} from '@/src/domain/types';
+import { applyMove, createGame, currentActor, legalMoves } from '@/src/engine/engine';
 
 /** Parses one card id (`'9H'`, `'10S'`, `'3O'`) for `deck` (default french-52). */
 export function card(id: string, deck: DeckDefinition = FRENCH_52): Card {
@@ -93,4 +101,64 @@ export function withHand(
   phase: GameState['phase'] = 'bidding',
 ): GameState {
   return { ...structuredClone(state), phase, hand: makeHand(overrides, state.seats.length) };
+}
+
+/**
+ * Chooses one move from the non-empty list of legal moves of the seat to act (`state` is the
+ * position before the move). Must return an element of `moves`.
+ */
+export type Policy = (moves: LegalMove[], state: GameState) => LegalMove;
+
+/** Always the first legal move (lowest bid; first card in hand order). */
+export const firstMove: Policy = (moves) => moves[0];
+
+/** Always the last legal move (highest bid; last card in hand order). */
+export const lastMove: Policy = (moves) => moves[moves.length - 1];
+
+/** One applied move of a `playGame` run: who moved, the move id and the events it produced. */
+export interface PlayedMove {
+  seat: number;
+  moveId: string;
+  events: GameEvent[];
+}
+
+/** The full record of a `playGame` run. */
+export interface PlayedGame {
+  /** `start.state`, then the state after each move (`states.length === moves.length + 1`). */
+  states: GameState[];
+  /** `start.events`, then every move's events, in order. */
+  events: GameEvent[];
+  /** Every applied move in order; `moves[i]` turned `states[i]` into `states[i + 1]`. */
+  moves: PlayedMove[];
+  /** The last state (`phase === 'game-over'`). */
+  final: GameState;
+}
+
+/**
+ * Plays the game in `start` to completion: while `currentActor(state)` is not `null`, calls
+ * `legalMoves(state, actor)`, picks one with `policy` (default `firstMove`) and applies it with
+ * `applyMove`. Returns every state and every event. Throws if `maxMoves` moves are exceeded or a
+ * seat to act has no legal move. Pure: never mutates `start`.
+ */
+export function playGame(
+  start: Transition,
+  policy: Policy = firstMove,
+  maxMoves = 10_000,
+): PlayedGame {
+  const states: GameState[] = [start.state];
+  const events: GameEvent[] = [...start.events];
+  const moves: PlayedMove[] = [];
+  let state = start.state;
+  for (let actor = currentActor(state); actor !== null; actor = currentActor(state)) {
+    if (moves.length >= maxMoves) throw new Error(`playGame exceeded ${maxMoves} moves`);
+    const legal = legalMoves(state, actor);
+    if (legal.length === 0) throw new Error(`seat ${actor} to act has no legal move`);
+    const { id } = policy(legal, state);
+    const transition = applyMove(state, actor, id);
+    state = transition.state;
+    states.push(state);
+    events.push(...transition.events);
+    moves.push({ seat: actor, moveId: id, events: transition.events });
+  }
+  return { states, events, moves, final: state };
 }
