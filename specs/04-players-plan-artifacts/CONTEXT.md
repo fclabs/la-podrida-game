@@ -1,6 +1,6 @@
 # CONTEXT — Players, Player View, AI Loop and Simulation (Phase 4)
 
-Last updated by: Iteration 1 (players). Next: Iteration 2 (player view and AI loop).
+Last updated by: Iteration 2 (player view and AI loop). Next: Iteration 3 (simulation suite and CI step).
 
 **Protocol note (orchestrator):** the plan's parallel group A (Iterations 3–4) has been downgraded to sequential. **All iterations use the full artifact protocol** (each one rewrites this file, appends to `DECISIONS.md` and writes its own record); the plan's "reduced protocol" sections for Iterations 3 and 4 do not apply.
 
@@ -9,8 +9,10 @@ Last updated by: Iteration 1 (players). Next: Iteration 2 (player view and AI lo
 - Phases 0–3 are complete (`specs/00-project-scaffold-frozen.md`, `specs/01-domain-model-frozen.md`, `specs/02-engine-frozen.md`, `specs/03-score-engine-frozen.md`). Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (no `noUncheckedIndexedAccess`), pnpm 10.15.1, Node 24 declared, Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7, `@noble/hashes` 2.4.0, project-local layer-boundary lint rule, GitHub Actions CI (typecheck, lint, test, build; no `test:sim` step yet).
 - `dependencies` = `@noble/hashes, next, react, react-dom, zod` (NFR-402); unchanged.
 - **Iteration 1 shipped `src/players`**: `player.ts` (types `Player`, `AIStrategy`), `human-player.ts`, `ai-player.ts`, `strategies/random.ts`, `registry.ts`. `src/players/.gitkeep` is deleted.
-- Not yet built: `src/service/player-view.ts`, `src/service/ai-loop.ts` (Iteration 2; `src/service/.gitkeep` still present), `tests/sim/**` (still `.gitkeep`) and the CI `test:sim` step (Iteration 3), `scripts/simulate.ts` (still the scaffold stub; Iteration 4), docs (Iteration 5).
-- Tests: `tests/unit/players/` 3 files / 13 tests; full `pnpm test` 32 files / 582 tests green.
+- **Iteration 2 shipped `src/service`**: `player-view.ts` (`buildPlayerView`), `ai-loop.ts` (`runAiLoop`, `AiLoopLimitError`, `AiLoopOptions`, `AiLoopResult`). `src/service/.gitkeep` is deleted.
+- Not yet built: `tests/sim/**` (still `.gitkeep`) and the CI `test:sim` step (Iteration 3), `scripts/simulate.ts` (still the scaffold stub; Iteration 4), docs (Iteration 5).
+- Tests: `tests/unit/players/` 3 files / 13 tests; `tests/unit/service/` 2 files / 24 tests; full `pnpm test` 34 files / 606 tests green.
+- **Measured speed**: one argentina-fidepo 3-player all-AI game (981 moves) through `runAiLoop(createGame(P-4 input).state, createPlayers(seats))` takes **~58–60 ms** warm (74 ms first run) on the dev machine (`pnpm exec tsx`, 6 seeds `sim-argentina-fidepo-3-<k>`); ~0.06 ms per move including `buildPlayerView` + `evaluate`. Other presets/counts take 7–40 ms per game in vitest.
 
 ## File map
 
@@ -24,6 +26,10 @@ Last updated by: Iteration 1 (players). Next: Iteration 2 (player view and AI lo
 | `tests/unit/players/players.test.ts` | VC-401 (+ plain-object prototype check). |
 | `tests/unit/players/random.test.ts` | VC-402 (20-seed formula, 6,000-call uniformity on one Rng, throwing `Proxy` view). |
 | `tests/unit/players/registry.test.ts` | VC-403 (+ inherited names like `'constructor'` throw). |
+| `src/service/player-view.ts` | `buildPlayerView` (FR-406, FR-407). Only caller of `evaluate(` in `src` outside `src/score/`. |
+| `src/service/ai-loop.ts` | `runAiLoop`, `AiLoopLimitError`, types `AiLoopOptions`, `AiLoopResult` (FR-408 to FR-411); private `assertPlayersMatch` (FR-410). |
+| `tests/unit/service/player-view.test.ts` | VC-404, VC-405 (P-3 game; local `collectCards`/`collectKeys`/`leakedCards` walk, copied from `tests/unit/engine/view.test.ts`). |
+| `tests/unit/service/ai-loop.test.ts` | VC-406 to VC-410 (helpers `seatsFor` = P-4 seats, `startGame`, `countingStrategy`, `countingPlayers`, `appliedMoveId`). |
 | `src/domain/types.ts` | `SeatInfo`, `PlayerView`, `TableView`, `LegalMove`, `Move`, `Rng`, `DecisionContext`, `Decision`, `Transition`, `GameState`, `GameEvent`, `ScoreBoard`. |
 | `src/engine/engine.ts`, `view.ts`, `rng.ts`, `invariants.ts` | Engine API (`createGame`, `currentActor`, `legalMoves`, `applyMove`, `aiRng`, `tableViewFor`, `deriveRng`, `checkInvariants`). Never modify. |
 | `src/score/score-engine.ts` | `evaluate(state): ScoreBoard`. Never modify. |
@@ -61,9 +67,34 @@ export function getStrategy(name: string | undefined): AIStrategy; // undefined 
 export function createPlayers(seats: readonly SeatInfo[]): Player[]; // one per seat, array order
 ```
 
+```ts
+// src/service/player-view.ts
+export function buildPlayerView(state: GameState, seat: number | 'spectator'): PlayerView;
+// = { ...tableViewFor(state, seat), scoreboard: evaluate(state) } plus finalRanking = scoreboard.ranking
+//   only when phase === 'game-over' (otherwise the key is absent). RangeError for a bad seat (tableViewFor).
+
+// src/service/ai-loop.ts
+export interface AiLoopOptions {
+  maxMoves?: number;                                                // default 1000
+  onTransition?: (prev: GameState, transition: Transition) => void;
+}
+export interface AiLoopResult { state: GameState; events: GameEvent[]; moves: number }
+export class AiLoopLimitError extends Error { readonly moves: number; readonly state: GameState } // name 'AiLoopLimitError'
+export function runAiLoop(state: GameState, players: readonly Player[], options?: AiLoopOptions): AiLoopResult;
+```
+
+`runAiLoop` behaviour:
+1. Validates first (FR-410): `players.length === state.seats.length` (`RangeError` "players length X does not match the game's Y seats"), then per index `i`: `players[i].seat === i`, `players[i].kind === state.seats[i].kind` (`RangeError` starting `seat <i>:`). No move or decision happens before this.
+2. Loop: `seat = currentActor(state)`; `null` → return. If `moves >= maxMoves` and `state.seats[seat].kind === 'ai'` → throw `AiLoopLimitError(moves, state)` (a human at the cap is still asked; D-005). Otherwise `players[seat].requestDecision({ view: buildPlayerView(state, seat), legalMoves: legalMoves(state, seat), rng: aiRng(state, seat) })`; `await` → return; else `transition = applyMove(state, seat, moveId)`, `moves += 1`, `events.push(...transition.events)` (engine order: `bid-made|card-played`, `trick-won`, `hand-completed`, `hand-dealt|game-over`), `onTransition?.(prev, transition)`, `state = transition.state`.
+3. `result.events` excludes `createGame`'s own events (`game-started`, initial `hand-dealt`); only applied moves' events. `result.moves` = number of `bid-made` + `card-played` events.
+4. `IllegalMoveError` (from `@/src/engine/engine`) propagates unchanged; so does anything `onTransition` throws (the move it was called for is already applied and counted).
+5. `prev` passed to `onTransition` is the loop's own state object (the input `state` for the first move), not a copy; the engine never mutates states, so it is safe to keep.
+
+**All-AI game recipe (P-4)**: `seats[i] = { seat: i, playerId: 'ai-<i>', name: 'AI <i>', kind: 'ai' }` (no `strategy` → `random`); `const start = createGame({ gameId: 'sim', rules: getPreset(presetId), seats, seed })`; `runAiLoop(start.state, createPlayers(seats), { onTransition })`. Full event log = `[...start.events, ...result.events]`. argentina-fidepo 3 players with any seed = 981 moves.
+
 Details:
 - `UnknownStrategyError` message: `Unknown AI strategy "<name>" (known: random)`.
-- `createPlayers` maps `seats` in array order (a `GameState`'s seats are in seat order); `player.seat` = `info.seat`. It does not re-validate seat numbers; `runAiLoop` (Iteration 2) checks `players[i].seat === i` and kinds (FR-410). Unknown strategy → `UnknownStrategyError` from `getStrategy`.
+- `createPlayers` maps `seats` in array order (a `GameState`'s seats are in seat order); `player.seat` = `info.seat`. It does not re-validate seat numbers; `runAiLoop` checks `players[i].seat === i` and kinds (FR-410). Unknown strategy → `UnknownStrategyError` from `getStrategy`.
 - Players are plain object literals (prototype `Object.prototype`), not frozen.
 
 ## Conventions & invariants
@@ -74,8 +105,11 @@ Details:
   - `grep -rnE "src/(storage|state)|@/src/config|Math\.random|new Date|Date\.now|crypto\.|fetch\(|process\.|performance\." src/players`
 - **Error convention**: `class XError extends Error { constructor(message) { super(message); this.name = 'XError'; } }` (same as `UnknownPresetError`, `InvalidCardError`).
 - **Lookup tables** keyed by user-supplied names use `Map` or null-prototype objects so `'constructor'`, `'__proto__'` etc. are never found (D-001).
-- **Service layer** (Iteration 2+): `src/service/player-view.ts` and `ai-loop.ts` import only `@/src/domain/*`, `@/src/engine/*`, `@/src/score/*`, `@/src/players/*` and `./*` (P-2: `ai-loop.ts` imports `./player-view`). `buildPlayerView` is the only caller of `evaluate(` in `src` outside `src/score/`.
-- **Tests**: `tests/unit/players/*.test.ts`, `tests/unit/service/*.test.ts` (collected by `pnpm test`); `tests/sim/*.sim.test.ts` (only `pnpm test:sim`). Header comment names the FRs/VCs; one `describe` per VC. Tests may use `deriveRng` from `@/src/engine/rng`. Stub views: `{ … } as unknown as PlayerView`.
+- **Service layer purity** (BR-404): `src/service/player-view.ts` and `ai-loop.ts` import only `@/src/domain/*`, `@/src/engine/*`, `@/src/score/*`, `@/src/players/*` and `./*` (D-003: `ai-loop.ts` imports `./player-view`). The ESLint layer rule would also allow `state`/`storage`/`config` in `src/service`; BR-404 forbids them for these two files, enforced only by the grep. Greps (must print nothing except the first):
+  - `grep -rln "evaluate(" src | grep -v "^src/score/"` → only `src/service/player-view.ts`
+  - `grep -rnE "src/(storage|state)|@/src/config|Math\.random|new Date|Date\.now|crypto\.|fetch\(|process\.|performance\." src/service/player-view.ts src/service/ai-loop.ts src/players`
+- Import players and service modules directly (`@/src/players/registry`, `@/src/service/ai-loop`, …); no barrel `index.ts`.
+- **Tests**: `tests/unit/players/*.test.ts`, `tests/unit/service/*.test.ts` (collected by `pnpm test`); `tests/sim/*.sim.test.ts` (only `pnpm test:sim`). Header comment names the FRs/VCs; one `describe` per VC. Tests may use `deriveRng` from `@/src/engine/rng`. Stub views: `{ … } as unknown as PlayerView`. Stub strategies are wrapped with `createAiPlayer` and count their `choose` calls. Heavy deep-equality loops report via `if (bad) expect(detail).toBeNull()` to stay fast.
 - **Formatting**: Prettier formats `src/`, `tests/`, `scripts/`, config files; `docs/` and `specs/` are in `.prettierignore`. Run `pnpm exec prettier --write <paths>` before linting.
 - `docs/development.md` §1–§11 numbering is fixed until Iteration 5 (README links `#5-configuration`); Iteration 5 inserts "Players, views and simulation" as §12 and renumbers "Known limitations".
 - **Commits**: one per iteration, staged by explicit path (never `git add -A`); message ends with a blank line + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never push, PR or merge.
@@ -85,6 +119,7 @@ Details:
 | Command | What it does |
 |---|---|
 | `pnpm vitest run tests/unit/players/` | Players tests only. |
+| `pnpm vitest run tests/unit/service/` | Service helper tests only (~0.6 s). |
 | `pnpm typecheck` / `pnpm lint` / `pnpm test` | Required before every commit (lint = ESLint 0 warnings + `prettier --check .`). |
 | `pnpm test:sim` | `vitest.sim.config.ts`, `tests/sim` only (empty until Iteration 3; exits 0). |
 | `pnpm simulate` | `tsx scripts/simulate.ts` (stub until Iteration 4). |
@@ -96,6 +131,7 @@ pnpm prints an "Unsupported engine" WARN locally (Node 26 vs declared 24) and "I
 
 ## Known gaps
 
-- `createPlayers` trusts `seats` order and seat numbers; validation of players vs. state is `runAiLoop`'s job (FR-410, Iteration 2).
+- `createPlayers` trusts `seats` order and seat numbers; validation of players vs. state is `runAiLoop`'s job (FR-410, implemented).
+- `runAiLoop` does not validate `maxMoves` (a negative/NaN value just means "throw at the first AI decision" / "never cap"); callers pass the default or a positive integer.
 - `randomStrategy.choose` on an empty `moves` throws the engine Rng's `RangeError` (`int(0, -1): min must not exceed max`); the engine never offers an empty list to an actor, so there is no extra guard (FR-403 says "non-empty").
-- No `src/service`, sim suite, CLI or CI `test:sim` step yet (Iterations 2–4); docs not updated (Iteration 5).
+- No sim suite, CLI or CI `test:sim` step yet (Iterations 3–4); docs not updated (Iteration 5).
