@@ -48,7 +48,7 @@ tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
 
-Apart from `src/domain` (§9) and `src/engine` (§10), the layer folders under `src/` are empty for now (each holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
+Apart from `src/domain` (§9), `src/engine` (§10) and `src/score` (§11), the layer folders under `src/` are empty for now (each holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
 
 **Import alias.** `@/` maps to the **project root**, so imports read `@/src/engine/...` or `@/app/...`. It works in TypeScript, Next.js, Vitest and `tsx`.
 
@@ -262,7 +262,7 @@ The shapes themselves are described in [`design.md`](./design.md) §4 (cards, ru
 
 ### 9.3 Rule sets and presets
 
-A `RuleSet` is plain JSON data (no functions, classes or `undefined`) because each game freezes a copy of it into its state and persists it. The engine (and later the score engine) reads behaviour from it instead of special-casing presets.
+A `RuleSet` is plain JSON data (no functions, classes or `undefined`) because each game freezes a copy of it into its state and persists it. The engine and the score engine read behaviour from it instead of special-casing presets.
 
 - **Getting a preset.** `getPreset(id)` returns a fresh deep copy every time, so callers may change the result without affecting anyone else. `PRESET_IDS` lists the four ids in canonical order (`argentina-fidepo`, `spain-ludoteka`, `gamerules`, `mexico-bazas`) and `DEFAULT_PRESET_ID` is `argentina-fidepo`. Any other string, including `'__proto__'` or `'toString'`, throws `UnknownPresetError`.
 - **Reading a preset.** Every field of every preset is set explicitly; nothing falls back to a default. Some flags only matter when another flag is on: `beatNotRequiredAfterTrumped` qualifies `mustBeatLedSuit`, and `whenCannotOvertrump` qualifies `mustOvertrump`. When the qualified flag is `false` the engine ignores the dependent one, but it still carries a fixed value (marked `// unused` in `presets.ts`) so that presets stay comparable side by side. The values and their sources are in [`design.md`](./design.md) §4.2.
@@ -301,7 +301,7 @@ Domain tests live in `tests/unit/domain/<topic>.test.ts`.
 ### 9.6 Not in the domain yet
 
 - **Engine behaviour** lives in `src/engine` (§10): expanding a hand sequence into the game's `handPlan`, dealing, legal moves, transitions, table views, invariants and the seeded RNG.
-- **Scoring** (Phase 3) and **players and strategies** (Phase 4). `HandScore`, `ScoreBoard`, the view types and `DecisionContext` / `Decision` exist only as shapes.
+- **Scoring** lives in `src/score` (§11), which computes `HandScore` and `ScoreBoard` from the state. **Players and strategies** arrive in Phase 4; `PlayerView`, `PlayerUpdate` and `DecisionContext` / `Decision` exist only as shapes.
 - **Persistence types** `GameMeta`, `Commit` and `CommitBody` and their schemas (Phase 6, in the state layer).
 - No schema checks that a hand sequence makes sense for a player count (for example `range 5→max` when `max` is below 5); `expandHandSequence` checks it, and `createGame` reports it as a setup problem.
 
@@ -311,7 +311,7 @@ Domain tests live in `tests/unit/domain/<topic>.test.ts`.
 
 `src/engine` is the Game Engine: pure, deterministic functions that create a game from a rule set, seats and a secret seed, deal every hand from seeded random streams, list the legal bids and plays for the seat to act, apply a move together with every automatic transition that follows (bidding closed, trick won, hand completed, next deal, game over), build a per-seat table view, and check a state's invariants. Every rule difference between presets is read from the game's `RuleSet`; no code branches on a preset id.
 
-The engine **never scores**: no points, totals or rankings appear in its state, events or views. Scoring is the Score Engine's job, which reads `GameState.completedHands` (see [`design.md`](./design.md) §6).
+The engine **never scores**: no points, totals or rankings appear in its state, events or views. Scoring is the Score Engine's job, which reads `GameState.completedHands` (§11, [`design.md`](./design.md) §6).
 
 The engine is **pure** in the same way as the domain (§9): it imports only `@/src/domain/*`, its own files, `zod` and `@noble/hashes` (enforced by the layer rule, §3), and never uses ambient randomness, the clock or I/O. Check it with:
 
@@ -470,15 +470,154 @@ Shared helpers live in `tests/unit/engine/helpers.ts` (not a `*.test.ts`, so not
 - **`rngFromSource` reads each draw as `next() >>> 0`**, the identity for valid uint32 values, so a stub that returns `-1` is read as `2^32 − 1` instead of producing out-of-range results. Stubs should still return uint32 values.
 - **`rng.int(0, 2 ** 32 − 1)` returns raw generator outputs** (nothing is rejected at that range); use it to compare streams in tests. `int` accepts any integer bounds, including unsafe integers beyond 2^53 where results are imprecise; the engine only uses small ranges.
 - **`checkInvariants` does not bound `cardsPerPlayer` by the deck.** A state with an oversized `cardsPerPlayer` that still passes `(c)` and `(h)` reports nothing (and `(f)` is skipped for it). It also does not check the `trumpCard` itself in `(a)`/`(b)`; when the trump is in the dealer's hand it is checked as one of the dealer's cards.
-- **Not in the engine:** scoring and `live` hand status (Score Engine), `PlayerView`, players, strategies, the AI loop and the simulator, seed generation and setting `version` (GameService and the Game State Manager); see [`implementation.md`](./implementation.md) for when each arrives. Bid changes, revokes, target-score endings, tie-break hands and special hands are out of scope by design ([`design.md`](./design.md) §1.2, §4.2).
+- **Not in the engine:** scoring and `live` hand status (Score Engine, §11), `PlayerView`, players, strategies, the AI loop and the simulator, seed generation and setting `version` (GameService and the Game State Manager); see [`implementation.md`](./implementation.md) for when each arrives. Bid changes, revokes, target-score endings, tie-break hands and special hands are out of scope by design ([`design.md`](./design.md) §1.2, §4.2).
 
 ---
 
-## 11. Known limitations
+## 11. Score
+
+`src/score` is the Score Engine: pure functions that turn one seat's bid and tricks into points under the game's `ScoringSpec`, score a completed hand, and turn a whole `GameState` into a `ScoreBoard` — the per-hand score sheet (*planilla*), totals, made/missed counts, the live status of every seat in the hand in progress, and the ranking. The rules it implements are in [`design.md`](./design.md) §6; this section is about using and changing the code.
+
+The score is **derived, never stored**. `evaluate(state)` reads only its argument, so the same state always gives a deep-equal board and the score can never drift from the game. Nothing in the engine's state, events or views holds a point or a total.
+
+The Score Engine is **pure** like the domain and the engine: it imports only `@/src/domain/*` and its own files (the layer rule, §3, forbids `src/engine`), and never uses randomness, the clock or I/O. Check it with:
+
+```sh
+grep -rnE 'Math\.random|new Date|Date\.now|crypto\.|fetch\(|process\.|performance\.|src/engine|\.\./engine' src/score   # must find nothing
+```
+
+As in the engine, the grep also matches comments, so keep those words out of `src/score` comments.
+
+### 11.1 Module map
+
+Import from each module directly (`import { evaluate } from '@/src/score/score-engine'`); there is no barrel `index.ts`. `score-engine.ts` imports `handPoints` relatively (`./formulas`). Domain types (`ScoringSpec`, `RuleSet`, `HandResult`, `HandScore`, `ScoreBoard`, `GameState`) come from `@/src/domain/rules` and `@/src/domain/types`.
+
+| Module | Exports | What it does |
+|---|---|---|
+| `@/src/score/formulas` | `handPoints(scoring, bid, tricks)` | Points for one seat in one hand under a `ScoringSpec`. |
+| `@/src/score/score-engine` | `scoreHand(rules, result)` | One `HandScore` row: per seat `{ seat, bid, tricks, made, points }`, in seat order. |
+| | `evaluate(state)` | The full `ScoreBoard` of a game state. This is what callers normally use. |
+| | `rankSeats(totals, missedCount, tieBreak)` | `{ seat, total, place }[]` with competition places, listed by place then seat. |
+| | `liveStatus(bid, tricksWon, tricksLeft)`, type `LiveStatus` | `'on-track' \| 'made-so-far' \| 'busted'` for one seat in the hand in progress. |
+
+`scoreHand`, `rankSeats` and `liveStatus` are the building blocks of `evaluate`, exported so they can be tested and reused on their own.
+
+### 11.2 Using the score engine
+
+Score a game after every move and read the final result:
+
+```ts
+import { getPreset } from '@/src/domain/presets';
+import type { SeatInfo } from '@/src/domain/types';
+import { applyMove, createGame, currentActor, legalMoves } from '@/src/engine/engine';
+import { handPoints } from '@/src/score/formulas';
+import { evaluate, liveStatus, rankSeats, scoreHand } from '@/src/score/score-engine';
+
+const seats: SeatInfo[] = [
+  { seat: 0, playerId: 'p0', name: 'Ana', kind: 'human' },
+  { seat: 1, playerId: 'p1', name: 'Bot 1', kind: 'ai', strategy: 'random' },
+  { seat: 2, playerId: 'p2', name: 'Bot 2', kind: 'ai', strategy: 'random' },
+];
+const rules = getPreset('argentina-fidepo');
+let state = createGame({ gameId: 'game-1', rules, seats, seed: 'secret-seed' }).state;
+
+const opening = evaluate(state); // hand 0 dealt, nobody has bid
+// opening.hands is [], opening.totals is [0, 0, 0], every opening.ranking place is 1,
+// and opening.live is [{ seat: 0, bid: null, tricksWon: 0, status: 'on-track' }, …].
+
+for (let seat = currentActor(state); seat !== null; seat = currentActor(state)) {
+  const moves = legalMoves(state, seat);
+  state = applyMove(state, seat, moves[moves.length - 1].id).state;
+  const board = evaluate(state); // recomputed from the state after every move, never stored in it
+  const busted = board.live?.filter((row) => row.status === 'busted').map((row) => row.seat);
+  // busted: seats that can no longer make their bid in this hand (undefined at game over)
+}
+
+const final = evaluate(state); // state.phase === 'game-over'
+// final.hands: the score sheet, one { handIndex, perSeat: [{ seat, bid, tricks, made, points }] }
+//   per entry of state.handPlan; final.totals / madeCount / missedCount: one number per seat.
+// 'live' in final === false.
+const winners = final.ranking.filter((r) => r.place === 1).map((r) => r.seat); // shared on a tie
+
+// The building blocks work on plain numbers:
+handPoints(getPreset('spain-ludoteka').scoring, 5, 4); // -5 (bid 5, won 4)
+scoreHand(rules, state.completedHands[0]).perSeat[0].points; // seat 0's points in hand 0
+liveStatus(3, 1, 1); // 'busted': 1 trick won, 1 left, bid 3
+rankSeats([30, 25, 30], [2, 1, 1], 'fewest-misses');
+// [{ seat: 2, total: 30, place: 1 }, { seat: 0, total: 30, place: 2 }, { seat: 1, total: 25, place: 3 }]
+```
+
+### 11.3 The rules in code
+
+The full rules, with the per-preset table, are in [`design.md`](./design.md) §6.1–6.2. In short:
+
+- **`handPoints(scoring, b, t)`.** Made iff `t === b`. `bonus-plus-tricks`: made `bonus + perTrick·t`, missed `missedPerTrick·t`. `bonus-plus-bid`: made `bonus + b`, missed `0`. `spanish`: made `bonus + perTrick·t`, missed `−missPenaltyPerTrick·|t − b|`. Every number is read from the `ScoringSpec` object, never from a constant, and the `switch` on `scoring.kind` ends in a `never` check, so a new scoring kind is a compile error until it is handled.
+- **`scoreHand(rules, result)`** returns `{ handIndex, perSeat }` with `made = tricks === bid` and `points = handPoints(rules.scoring, bid, tricks)` per seat.
+- **`evaluate(state)`**: `hands` = `scoreHand` of every `completedHands` entry in order; `totals`, `madeCount`, `missedCount` summed from those rows (zeros when there are none); `ranking = rankSeats(totals, missedCount, rules.tieBreak)`; and, only when `state.hand !== null`, `live[s] = { seat, bid, tricksWon, status: liveStatus(bid, tricksWon, cardsPerPlayer − sum(tricksWon)) }`.
+- **`liveStatus(bid, tricksWon, tricksLeft)`**, first match wins: `null` bid → `on-track`; `tricksWon > bid` → `busted`; `tricksWon + tricksLeft < bid` → `busted`; `tricksWon === bid` → `made-so-far`; otherwise `on-track`.
+- **`rankSeats(totals, missedCount, tieBreak)`**: seat `r` is ahead of seat `s` when its total is higher, or, under `'fewest-misses'`, the totals are equal and `r` has fewer misses. `place = 1 + (number of seats ahead)`, so ties share a place and the next one skips (`1, 1, 3`). Entries are sorted by `place`, then `seat`; the seat number never decides a place. It is O(N²), which is nothing for at most 7 seats. Mid-game and at game over it is the same rule.
+
+### 11.4 How the score relates to the engine
+
+- **The engine hands over raw facts.** Each finished hand becomes a `HandResult` in `GameState.completedHands` (`bids`, `tricks`, `cardsPerPlayer`, `handIndex`, `dealer`, `trumpSuit`); the hand in progress is `state.hand` (bids may still be `null`, `tricksWon` so far). `evaluate` needs nothing else.
+- **Neither imports the other.** `src/score` never imports `src/engine` and the engine never imports `src/score` (both purity greps check it). Only tests and, later, `GameService` use both.
+- **`PlayerView` is composed outside both.** The engine's `tableViewFor` has no scores; `GameService` builds `{ ...tableViewFor(state, seat), scoreboard: evaluate(state), finalRanking }`, with `finalRanking = scoreboard.ranking` at game over ([`design.md`](./design.md) §5.5). The same view goes to AI decisions, so `evaluate` runs on every request and every AI move.
+- **No defensive copy.** `evaluate` and `scoreHand` never mutate their input and build every returned array and object fresh (they do not `structuredClone` the state; nothing in the output is taken from it by reference). A caller may mutate a board freely.
+- **Engine states never throw.** A state produced by `createGame` / `applyMove` always satisfies the checks below; they exist for hand-built or corrupted states.
+
+### 11.5 Errors
+
+Every error is a `RangeError` and only the first failed check is reported. Messages start with a fixed prefix, so callers and tests can match on it:
+
+| Thrown by | Message shape | Example |
+|---|---|---|
+| `handPoints`, `liveStatus` | `<function>: <argument> must be a non-negative integer, got <value>` | `handPoints: bid must be a non-negative integer, got -1` |
+| `rankSeats` | `rankSeats: totals and missedCount must have equal length, got <a> and <b>` | `… got 1 and 2` |
+| `scoreHand` | `scoreHand: handIndex <n>: <check>` | `scoreHand: handIndex 7: tricks[2] must be a non-negative integer, got -1` |
+| `evaluate`, completed hand `k` | `state.completedHands[<k>]: <check>` | `state.completedHands[1]: scoreHand: handIndex 1: sum(tricks) must equal cardsPerPlayer 16, got 15` |
+| `evaluate`, current hand | `state.hand: <check>` | `state.hand: tricksWon[1] must be a non-negative integer, got -1` |
+
+Check order:
+
+- `scoreHand`: `bids` and `tricks` have equal length → not empty → `cardsPerPlayer` is an integer ≥ 1 → every bid is an integer in `0 … cardsPerPlayer` (a `null` bid fails here) → every trick count is a non-negative integer → `sum(tricks) === cardsPerPlayer`.
+- `evaluate`: completed hands first, in index order; for each, `bids` and `tricks` have one entry per seat, then `scoreHand` runs and any `RangeError` it throws is rethrown with the `state.completedHands[k]: ` prefix added in front of the original message (other errors pass through unchanged). Then the current hand: `cardsPerPlayer` is an integer ≥ 1 → `bids` and `tricksWon` have one entry per seat → every `tricksWon` is a non-negative integer → `sum(tricksWon) ≤ cardsPerPlayer` → every non-null bid is an integer in `0 … cardsPerPlayer`. So a state broken in both places reports the completed hand.
+- `liveStatus` validates its arguments before looking at the bid, so `liveStatus(null, -1, 0)` throws.
+
+Assert on the full prefix (`state.hand: `, `state.completedHands[0]: `, `scoreHand: handIndex 7: `), never on a bare word such as `hand`, which also appears inside `handIndex`.
+
+### 11.6 Score tests
+
+Score tests live in `tests/unit/score/<topic>.test.ts`; each file names the requirements it checks in its header comment.
+
+| File | Protects |
+|---|---|
+| `formulas.test.ts` | Every worked example of [`game_rules.md`](./game_rules.md) §3.7 for each preset; custom `ScoringSpec` values change the result (the fields are read); no result is ever `-0`; bad arguments throw. |
+| `live-status.test.ts` | Every row of the live-status table and its argument checks. |
+| `ranking.test.ts` | Competition places (`1, 1, 3, 4`), the misses tie-break, `'shared'`, an all-zero board and the length check, as full deep-equal arrays. |
+| `score-hand.test.ts` | One exact `HandScore`, one row per malformed-input check, and that the input is not mutated. |
+| `evaluate.test.ts` | Hand-built boards (score sheet, totals, counts, ranking tie on misses, the empty board), `live` in bidding, playing and game over, and every `evaluate` error prefix. |
+| `full-game.test.ts` | Engine-played games: for every state, `evaluate` does not mutate it, repeats exactly and shares nothing with it; for each preset, `evaluate` after every move never throws, `live` is present exactly while a hand is in progress, and totals and counts agree with the score sheet. |
+| `perf.test.ts` | `evaluate` on the final state of an `argentina-fidepo` 3-player game (29 hands): median of 101 calls after 10 warm-up calls must be < 1 ms (it takes about 15 µs locally). The bound is a safety ceiling against an accidentally super-linear `evaluate`, not a target. Run it with `--silent=false` to see the median. |
+
+Score-only builders live in `tests/unit/score/helpers.ts` (not collected): `makeState({ players, completedHands, handIndex, hand, phase })` builds a schema-valid `argentina-fidepo` state (3 seats by default) whose current hand is a fresh bidding hand you can partially override, or `hand: null` for game over; `result(handIndex, cardsPerPlayer, bids, tricks)` builds a `HandResult`; `argentinaPlan(players)` gives the hand plan for 3–6 players. Engine-played states come from the engine helpers (`newGame`, `playGame`, `firstMove`, `lastMove`, §10.7), imported as `../engine/helpers`.
+
+### 11.7 Gotchas and limitations
+
+- **Never produce `-0`.** The spanish miss is written `0 - missPenaltyPerTrick * |t − b|`, not with unary minus, which would give `-0` for a zero penalty (and `-0` fails `Object.is` equality and can print as `-0`). Write any future negative formula the same way.
+- **No `live` key at game over.** `evaluate` builds the board without `live` and adds it only when `state.hand !== null`, so `'live' in board` is `false` at game over. Do not "simplify" this to `live: hand ? … : undefined`; consumers and tests check for the key.
+- **Custom `ScoringSpec`s need a double cast.** `ScoringSpecSchema` uses literal numbers (`bonus: 10`, `perTrick: 5`, …), so a spec with other numbers in a test must be written `{ ...spec, perTrick: 3 } as unknown as ScoringSpec`; a plain `as ScoringSpec` fails `pnpm typecheck`. Likewise a `null` bid in a `HandResult` needs `null as unknown as number`.
+- **`makeState` states are shape-valid, not real games.** Their hands hold no cards (the schema accepts empty hands and scoring never reads cards), so they fail `checkInvariants`; never feed them to engine functions that read cards.
+- **What `evaluate` does not check.** It does not cross-check the state beyond the checks in §11.5: not that `completedHands[k].handIndex === k`, not `handIndex` against `handPlan`, not `phase` against `hand`. `handPoints` trusts the `ScoringSpec` numbers and `rankSeats` checks only the lengths of its arrays, not that the values are integers. Engine states satisfy all of these by the engine's invariants (§10.4); callers hold schema-valid rule sets.
+- **`LiveStatus` is defined twice.** `ScoreBoard.live[].status` in `src/domain/types.ts` is an inline union equal to `LiveStatus`, because the domain may not import the score layer. Change both together.
+- **Not in the score engine:** composing `PlayerView` and `finalRanking` (GameService), persisting the scoreboard with each commit and writing `final.json` (Game State Manager), and target-score endings, tie-break hands, "Pocha" bonuses and suit multipliers ([`design.md`](./design.md) §4.2 and its open questions).
+
+---
+
+## 12. Known limitations
 
 - **Configuration is not validated at server startup yet.** `getConfig()` has no caller; it is wired in by its first user, the GameService factory (Phase 8 in [`implementation.md`](./implementation.md)). Until then a misconfigured deployment would still start.
 - **Storage credentials for the `blob` driver are not checked** by `loadConfig`; that check arrives with the storage layer (Phase 5).
 - **`pnpm simulate` is a stub** that prints `simulate: not implemented until Phase 4` and exits 0. The simulator and the `tests/sim` suite arrive in Phase 4.
 - **The layer rule does not check dynamic `import()` or `require()`.** Use static `import` statements.
-- **No scoring, players, persistence or API yet:** `src/domain` (§9) and `src/engine` (§10) exist; `src/score`, `src/players`, `src/state`, `src/storage` and `src/service` are empty, and `/` is a placeholder page. A game can be played only from code or tests.
-- **Engine limitations** are listed in §10.8.
+- **No players, persistence or API yet:** `src/domain` (§9), `src/engine` (§10) and `src/score` (§11) exist; `src/players`, `src/state`, `src/storage` and `src/service` are empty, and `/` is a placeholder page. A game can be played and scored only from code or tests.
+- **Engine limitations** are listed in §10.8, **score limitations** in §11.7.
