@@ -207,7 +207,7 @@ The expanded sequence is stored in the game state, so later preset changes never
 
 Seats are indexed `0..N-1`. "Next player" is always `(i + 1) % N`. Clockwise vs counter-clockwise is a UI concern only.
 
-- The first dealer is chosen with the game's deal RNG (§4.5).
+- The first dealer (hand 0) is `int(0, N − 1)` drawn from the hand-0 deal stream (§4.5), **before the shuffle** of that stream. Every later dealer is `next(previous dealer)`, with no draw.
 - *Mano* (first to bid and to lead the first trick) = `next(dealer)`. The dealer bids last.
 - The deal passes to `next(dealer)` after each hand.
 - The winner of a trick leads the next one.
@@ -226,8 +226,8 @@ interface GameState {
   seed: string;                   // server-generated secret; never leaves the server (§5.5)
   aiDecisionCount: number;        // number of AI decisions so far; input to the AI RNG
   phase: Phase;
-  handIndex: number;              // index into handPlan
-  hand: HandState | null;
+  handIndex: number;              // index into handPlan; stays at the last hand at game-over
+  hand: HandState | null;         // null exactly when phase is 'game-over'
   completedHands: HandResult[];   // bids and tricks per finished hand (input to the Score Engine)
   version: number;                // commit number; bumped on every commit
 }
@@ -247,12 +247,22 @@ interface HandState {
 }
 ```
 
-**Randomness.** Deals and AI choices use **separate random streams**, both derived from the secret `seed`:
+**Randomness.** Deals and AI choices use **separate random streams**, both derived from the secret `seed`. A stream for a list of labels is built like this:
 
-- Deal RNG for hand `i` = `PRNG(hash(seed, 'deal', i))`. It shuffles and deals hand `i` (and, for `i = 0`, picks the first dealer).
-- AI RNG for a decision = `PRNG(hash(seed, 'ai', seat, aiDecisionCount))`.
+1. `bytes = SHA-256(UTF-8(JSON.stringify([seed, ...labels])))`.
+2. The first 16 bytes, read as four **little-endian** uint32 words, are the initial state of a `xoshiro128**` generator (an all-zero state is replaced by the fixed words `0x9e3779b9, 0x243f6a88, 0xb7e15162, 0x6a09e667`).
+3. `int(min, max)` draws by rejection sampling (`range = max − min + 1`, `limit = floor(2^32 / range) · range`; draw until a raw output `u < limit`, return `min + u mod range`), and `shuffle` is Fisher–Yates from the last index down (`j = int(0, i)`, swap `i` and `j`).
 
-So AI choices never change later deals, and changing an AI strategy never changes the cards.
+`JSON.stringify` frames the labels unambiguously: `(seed, 'deal', 1)` never collides with `(seed, 'deal', '1')` or with any string concatenation, so it must not be "simplified" to joining strings. The two streams are:
+
+- **Deal stream** for hand `i` = labels `('deal', i)`. For `i = 0` it first draws the first dealer with `int(0, N − 1)` (§4.4), before the shuffle, and then shuffles the deck; for `i > 0` it only shuffles.
+- **AI stream** for a decision = labels `('ai', seat, aiDecisionCount)`. The engine never draws from it; it only exposes it (`aiRng(state, seat)`) for the AI player that is deciding (§8.1).
+
+So AI choices never change later deals, and changing an AI strategy never changes the cards. Hand `i`'s cards depend only on the seed, `i`, the rules and the player count (and, for `i > 0`, the first dealer).
+
+**Dealing hand `i`.** With `N` seats and `c = handPlan[i]` cards each, the deck (`buildDeck(rules.deck, N)`, in its fixed suit-then-rank order) is shuffled with the deal stream, and shuffled card `k` (`k = 0 … N·c − 1`) goes to seat `(dealer + 1 + k) mod N`. The trump card is shuffled card `N·c` (the next stock card), or the dealer's last card `N·c − 1` when the whole deck is dealt (see below). After dealing, every hand is **sorted** by suit (in the deck's suit order) and then by rank from high to low, so hand order, and the order of the legal plays listed from it, is stable. Bids start as `null`, *mano* (`next(dealer)`) acts first and leads the first trick.
+
+**Game over.** When the last hand of `handPlan` completes, `phase` becomes `game-over`, `hand` becomes `null`, and `handIndex` stays at the last hand (`handPlan.length − 1`). The results of every hand remain in `completedHands`.
 
 **Trump card when the whole deck is dealt.** When there is no stock left, the dealer's last card sets trump. Following table practice, that card is **shown to everyone** and stays in the dealer's hand (`trumpCardInDealerHand = true`). It is the one hidden-hand card that appears in views and events, by design.
 

@@ -18,8 +18,9 @@ This guide explains how the repository is organised, which rules the tooling enf
 | ESLint | 10 (flat config) | Plus `typescript-eslint`, the Next.js plugin and a local layer-boundary rule. |
 | Prettier | 3 | Checked by `pnpm lint`. |
 | Zod | 4 | Runtime dependency, used for configuration and the domain schemas (§9). |
+| `@noble/hashes` | 2.4.0 (exact) | Runtime dependency, used by the engine's seeded random streams (§10.6). |
 
-**Dependencies.** Runtime `dependencies` are limited to `next`, `react`, `react-dom`, `zod` and `@noble/hashes` (the last one is added when the engine needs hashing). Everything else is a `devDependency`. All versions in `package.json` are **exact pins** (no `^`/`~`): add packages with an explicit version, e.g. `pnpm add -D some-tool@1.2.3`, so every upgrade is a visible, deliberate change.
+**Dependencies.** Runtime `dependencies` are limited to `next`, `react`, `react-dom`, `zod` and `@noble/hashes` (SHA-256 for the engine's random streams, §10.6). Everything else is a `devDependency`. All versions in `package.json` are **exact pins** (no `^`/`~`): add packages with an explicit version, e.g. `pnpm add -D some-tool@1.2.3`, so every upgrade is a visible, deliberate change.
 
 ---
 
@@ -47,7 +48,7 @@ tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
 
-Apart from `src/domain` (§9), the layer folders under `src/` are empty for now (each holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
+Apart from `src/domain` (§9) and `src/engine` (§10), the layer folders under `src/` are empty for now (each holds a `.gitkeep` so git tracks it). The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
 
 **Import alias.** `@/` maps to the **project root**, so imports read `@/src/engine/...` or `@/app/...`. It works in TypeScript, Next.js, Vitest and `tsx`.
 
@@ -265,7 +266,7 @@ A `RuleSet` is plain JSON data (no functions, classes or `undefined`) because ea
 
 - **Getting a preset.** `getPreset(id)` returns a fresh deep copy every time, so callers may change the result without affecting anyone else. `PRESET_IDS` lists the four ids in canonical order (`argentina-fidepo`, `spain-ludoteka`, `gamerules`, `mexico-bazas`) and `DEFAULT_PRESET_ID` is `argentina-fidepo`. Any other string, including `'__proto__'` or `'toString'`, throws `UnknownPresetError`.
 - **Reading a preset.** Every field of every preset is set explicitly; nothing falls back to a default. Some flags only matter when another flag is on: `beatNotRequiredAfterTrumped` qualifies `mustBeatLedSuit`, and `whenCannotOvertrump` qualifies `mustOvertrump`. When the qualified flag is `false` the engine ignores the dependent one, but it still carries a fixed value (marked `// unused` in `presets.ts`) so that presets stay comparable side by side. The values and their sources are in [`design.md`](./design.md) §4.2.
-- **Hand sequences** are short lists of `range` and `repeat` segments whose bounds may be a number, `'max'` (cards per player when the whole deck is dealt), `{ min: [n, 'max'] }` (= min(n, max)) or `{ offset: ['max', n] }` (= max + n, with n ≤ 0). The offset bound is how `spain-ludoteka` stops its ramps at `max − 1`, so it plays exactly N hands at `max`. [`design.md`](./design.md) §4.3 lists all four sequences and the number of hands each one gives per player count. Turning a sequence into a list of card counts is the engine's job (see §9.6).
+- **Hand sequences** are short lists of `range` and `repeat` segments whose bounds may be a number, `'max'` (cards per player when the whole deck is dealt), `{ min: [n, 'max'] }` (= min(n, max)) or `{ offset: ['max', n] }` (= max + n, with n ≤ 0). The offset bound is how `spain-ludoteka` stops its ramps at `max − 1`, so it plays exactly N hands at `max`. [`design.md`](./design.md) §4.3 lists all four sequences and the number of hands each one gives per player count. Turning a sequence into a list of card counts is the engine's job (`expandHandSequence`, §10.1).
 - **Adding or changing a preset** is a design change first: update the preset table in `design.md` §4.2–4.3, then:
   1. add the id to `PresetIdSchema` in `schemas.ts`; that single list feeds the `PresetId` type, `PRESET_IDS` and `RuleSet.id` validation;
   2. add a constant in `presets.ts` with **every** `RuleSet` field spelled out (mark ignored flags `// unused`), using `structuredClone(FRENCH_52)` or `structuredClone(SPANISH_40)` for the deck, and register it in the `PRESETS` map (its `Record<PresetId, RuleSet>` type rejects a missing preset);
@@ -280,7 +281,7 @@ How the schemas behave:
 
 - **Strict at every level.** Every object, including each variant of a union, is a `z.strictObject`, so unknown keys are rejected. Every field is required except `SeatInfo.strategy` and `HandState.lastTrick`; `GameState.hand` must be present but may be `null`.
 - **Cards are validated as strings, not enums.** `CardSchema` refines `z.string()` to the union of both decks' suits (`KNOWN_SUITS`: `S H D C O E B`) and ranks (`KNOWN_RANKS`: `A K Q J 10 … 2 R C S`). Using `z.enum` would turn `Suit` and `Rank` into literal unions; with refined strings they stay `string`, because decks are data, not types. The same check applies to `trumpSuit`.
-- **Shape, not game consistency.** `GameStateSchema` checks that a card is a card of *some* deck, that counts and indexes are non-negative integers (`cardsPerPlayer`, `handPlan` entries and `trickNumber` are ≥ 1), that `gameId` and `seed` are non-empty and that `schemaVersion` is `1`. Whether a card belongs to *this* game's deck, whether array lengths match the seat count, or whether the phase agrees with the hand are engine invariants (§9.6).
+- **Shape, not game consistency.** `GameStateSchema` checks that a card is a card of *some* deck, that counts and indexes are non-negative integers (`cardsPerPlayer`, `handPlan` entries and `trickNumber` are ≥ 1), that `gameId` and `seed` are non-empty and that `schemaVersion` is `1`. Whether a card belongs to *this* game's deck, whether array lengths match the seat count, or whether the phase agrees with the hand are engine invariants (`checkInvariants`, §10.4).
 - **`removeRanksForPlayers` keys** must match `^[1-9][0-9]*$` and are kept as strings (`"03"` and `"0"` are rejected), and every removed rank must be in the same deck.
 - **`Phase` is `GameState['phase']`**, so the phase list exists only once, in `GameStateSchema`.
 - **Types without a schema.** `Move`, `LegalMove`, `Transition` and `Rng` are never persisted, and `HandScore`, `ScoreBoard`, `TableView`, `PlayerView`, `PlayerUpdate`, `DecisionContext` and `Decision` are computed views; all of these are written by hand in `types.ts`.
@@ -299,17 +300,185 @@ Domain tests live in `tests/unit/domain/<topic>.test.ts`.
 
 ### 9.6 Not in the domain yet
 
-- **Engine behaviour** ([`implementation.md`](./implementation.md) Phase 2): expanding a hand sequence into the game's `handPlan`, dealing, legal moves, transitions, player views, invariants and the seeded RNG. Its `handPlan` must reproduce the hand counts in `design.md` §4.3.
+- **Engine behaviour** lives in `src/engine` (§10): expanding a hand sequence into the game's `handPlan`, dealing, legal moves, transitions, table views, invariants and the seeded RNG.
 - **Scoring** (Phase 3) and **players and strategies** (Phase 4). `HandScore`, `ScoreBoard`, the view types and `DecisionContext` / `Decision` exist only as shapes.
 - **Persistence types** `GameMeta`, `Commit` and `CommitBody` and their schemas (Phase 6, in the state layer).
-- No schema checks that a hand sequence makes sense for a player count (for example `range 5→max` when `max` is below 5); that is checked when the engine expands it.
+- No schema checks that a hand sequence makes sense for a player count (for example `range 5→max` when `max` is below 5); `expandHandSequence` checks it, and `createGame` reports it as a setup problem.
 
 ---
 
-## 10. Known limitations
+## 10. Engine
+
+`src/engine` is the Game Engine: pure, deterministic functions that create a game from a rule set, seats and a secret seed, deal every hand from seeded random streams, list the legal bids and plays for the seat to act, apply a move together with every automatic transition that follows (bidding closed, trick won, hand completed, next deal, game over), build a per-seat table view, and check a state's invariants. Every rule difference between presets is read from the game's `RuleSet`; no code branches on a preset id.
+
+The engine **never scores**: no points, totals or rankings appear in its state, events or views. Scoring is the Score Engine's job, which reads `GameState.completedHands` (see [`design.md`](./design.md) §6).
+
+The engine is **pure** in the same way as the domain (§9): it imports only `@/src/domain/*`, its own files, `zod` and `@noble/hashes` (enforced by the layer rule, §3), and never uses ambient randomness, the clock or I/O. Check it with:
+
+```sh
+grep -rnE 'Math\.random|new Date|Date\.now|crypto\.|fetch\(|process\.|performance\.|src/score|\.\./score' src/engine   # must find nothing
+```
+
+The grep also matches comments, so avoid those words in `src/engine` comments too. `structuredClone` is a language global and is allowed.
+
+### 10.1 Module map
+
+Import from each module directly (`import { createGame } from '@/src/engine/engine'`); there is no barrel `index.ts`. Inside `src/engine`, modules import each other relatively (`./rng`).
+
+| Module | Exports | What it does |
+|---|---|---|
+| `@/src/engine/rng` | `rngFromSource(next)`, `createXoshiro128ss(words)`, `deriveRng(seed, ...labels)` | Seeded random numbers. `deriveRng` builds an independent `xoshiro128**` stream from a seed and labels (§10.3). `rngFromSource` wraps any `() => uint32` function as an `Rng`, for stub-driven tests. |
+| `@/src/engine/sequence` | `maxCardsPerPlayer(deck, players)`, `expandHandSequence(rules, players)` | Turns a rule set's hand sequence into the game's `handPlan` (cards per hand). Throws `RangeError` naming the offending value for a player count outside `rules.players` or a count `< 1` or `> max`. |
+| `@/src/engine/bidding` | `legalBids(hand, seat, rules)` | Bids `0 … cardsPerPlayer` ascending, minus the dealer's forbidden value (*sucias*) when the restriction applies ([`design.md`](./design.md) §5.3). |
+| `@/src/engine/play` | `legalPlays(hand, seat, rules, deck)` | The cards a seat may play, in hand order, for every combination of the play flags ([`design.md`](./design.md) §5.4). |
+| `@/src/engine/trick` | `trickWinner(plays, trumpSuit, deck)` | The seat (not the play index) of the highest trump, else of the highest card of the led suit. |
+| `@/src/engine/engine` | `ENGINE_VERSION`, `IllegalMoveError`, `IllegalMoveReason`, `InvalidGameSetupError`, `CreateGameInput`, `createGame`, `currentActor`, `legalMoves`, `applyMove`, `aiRng` | The engine proper: creation and validation, dealing, turn order, legal moves with their ids, applying moves, transitions and events. |
+| `@/src/engine/view` | `tableViewFor(state, seat \| 'spectator')` | The per-seat `TableView`: everything a seat may see, nothing it may not. |
+| `@/src/engine/invariants` | `checkInvariants(state)` | Returns one message per violated game-state rule (`[]` when valid). |
+
+`legalBids`, `legalPlays` and `trickWinner` are building blocks: they check neither the turn, the phase nor the seat range. Callers outside the engine should use `legalMoves`, which does.
+
+### 10.2 Using the engine
+
+A complete game, from creation to the final view:
+
+```ts
+import { getPreset } from '@/src/domain/presets';
+import type { GameEvent, SeatInfo } from '@/src/domain/types';
+import { applyMove, createGame, currentActor, legalMoves } from '@/src/engine/engine';
+import { checkInvariants } from '@/src/engine/invariants';
+import { tableViewFor } from '@/src/engine/view';
+
+const seats: SeatInfo[] = [
+  { seat: 0, playerId: 'p0', name: 'Ana', kind: 'human' },
+  { seat: 1, playerId: 'p1', name: 'Bot 1', kind: 'ai', strategy: 'random' },
+  { seat: 2, playerId: 'p2', name: 'Bot 2', kind: 'ai', strategy: 'random' },
+];
+
+// Validates the input (throws InvalidGameSetupError) and deals hand 0.
+const start = createGame({
+  gameId: 'game-1',
+  rules: getPreset('argentina-fidepo'),
+  seats,
+  seed: 'secret-seed', // in the app, generated on the server; never chosen by a client
+});
+
+let state = start.state;
+const events: GameEvent[] = [...start.events]; // game-started, hand-dealt
+
+// Play to the end, always choosing the first legal move.
+for (let seat = currentActor(state); seat !== null; seat = currentActor(state)) {
+  const moves = legalMoves(state, seat); // e.g. [{ id: 'bid:0', move: { type: 'bid', seat, tricks: 0 } }, …]
+  const next = applyMove(state, seat, moves[0].id); // a move is chosen by its id only
+  state = next.state;
+  events.push(...next.events);
+  if (checkInvariants(state).length > 0) throw new Error('broken state');
+}
+
+// state.phase === 'game-over', state.hand === null, state.completedHands has one entry per hand.
+const view = tableViewFor(state, 0); // what seat 0 may see; 'spectator' for a seatless viewer
+```
+
+**Creating a game.** `createGame({ gameId, rules, seats, seed })` returns a `Transition` (`{ state, events }`). The state holds deep copies of `rules` and `seats`, the expanded `handPlan`, `version: 0`, `aiDecisionCount: 0`, `phase: 'bidding'` and hand 0 dealt; the events are exactly `[game-started, hand-dealt]`. Invalid input throws `InvalidGameSetupError`, whose `problems` array lists **every** problem found, in a fixed order: rules failing `RuleSetSchema` → seat count outside `rules.players` → hand sequence that does not expand for that count (the `RangeError` message verbatim) → per seat, a wrong `seat` index and a `SeatInfoSchema` failure → one problem per duplicated `playerId` → empty `gameId` → empty `seed`. One cause gives one problem: when the rules fail the schema, the checks that read them are skipped, and when the seat count is out of range, the sequence is not expanded. It reports everything at once for the same reason configuration does (§5): fix it in one pass.
+
+**Whose turn it is.** `currentActor(state)` is `state.hand.toAct`, or `null` at game over. Turn order is `next(seat) = (seat + 1) mod N`; *mano* (`next(dealer)`) bids first and leads the first trick, the dealer bids last, the trick winner leads the next trick.
+
+**Listing legal moves.** `legalMoves(state, seat)` returns `[]` for any seat that is not the current actor (and for every seat at game over). For the actor it returns `{ id, move }` entries: `bid:<n>` (decimal, ascending) during bidding and `play:<cardId>` (e.g. `play:10S`, in hand order) during play. A seat that is not an integer in `0 … N − 1` throws `RangeError`, in every phase.
+
+**Applying a move.** `applyMove(state, seat, moveId)` accepts a move **only by the id of a currently legal move**, so revokes and *sucias* bids cannot happen. It checks, in order: the seat range (`RangeError`, even at game over), then `IllegalMoveError` with `reason` `'game-over'`, `'not-your-turn'` or `'unknown-move'` (the error also carries `seat` and `moveId`, and its message names both). A legal move returns a new `Transition`; the input state is never touched. Each call's events come in this order, each only when it happens: `bid-made` or `card-played` → `trick-won` → `hand-completed` → `hand-dealt` or `game-over`. A move by a seat whose `kind` is `'ai'` adds 1 to `aiDecisionCount`; `applyMove` never changes `version` (the persistence layer owns it).
+
+**AI randomness.** `aiRng(state, seat)` returns the AI stream for that seat's next decision, `deriveRng(state.seed, 'ai', seat, state.aiDecisionCount)`. The engine itself never draws from it; it is for the AI player deciding the move. Because `aiDecisionCount` increases with every AI move, each decision gets a fresh stream, and replaying the same moves recreates the same streams.
+
+**Building a view.** `tableViewFor(state, seat)` (or `'spectator'`) returns the viewer's own hand, every seat's card count, bid and tricks won, the current and last trick, the dealer, the trump card and whose turn it is. It never contains another seat's cards, except the trump card when the whole deck was dealt (shown to everyone, still in the dealer's hand), and never the seed, the rules, `aiDecisionCount` or any undealt card. At game over (`hand` is `null`) it has no trump, trick or hand, every seat shows `cardCount 0`, `bid null`, `tricksWon 0`, and `dealer` is the dealer of the last completed hand. Every array and card in a view is a fresh copy (cards are copied field by field as `{ suit, rank }`), so a caller may mutate or extend a view (for example into a `PlayerView` with the scoreboard) without cloning it and without corrupting the state.
+
+### 10.3 Determinism rules
+
+The same `createGame` input followed by the same sequence of `(seat, moveId)` calls always yields deep-equal states and events. That is what makes a game replayable from its seed and its `bid-made` / `card-played` events ([`design.md`](./design.md) §7). Keep these rules when changing the engine:
+
+- **Two kinds of random stream, nothing else.** The deal stream for hand `i` is `deriveRng(seed, 'deal', i)`; the AI stream is `deriveRng(seed, 'ai', seat, aiDecisionCount)`. `deriveRng` seeds `xoshiro128**` with the first 16 bytes (four little-endian uint32) of `SHA-256(UTF-8(JSON.stringify([seed, ...labels])))`. The labels are framed with `JSON.stringify` because it is unambiguous (`('s', 'deal', 1)` never collides with `('s', 'deal', '1')`); do not replace it with string joining. The full algorithm, including how `int` and `shuffle` draw, is in [`design.md`](./design.md) §4.5.
+- **What changes a deal.** Hand `i`'s cards depend only on the seed, `i`, the rules, the player count and (for `i > 0`) the first dealer. AI choices, bids and plays never change a deal, so changing an AI strategy never changes the cards. The first dealer is drawn from the hand-0 stream with `int(0, N − 1)` **before** the shuffle; later dealers rotate without drawing. Card `k` of the shuffled deck goes to seat `(dealer + 1 + k) mod N`, and hands are then sorted by suit (deck order) and rank high→low.
+- **One clone per move.** `applyMove` makes exactly one `structuredClone` of the input state, mutates that clone in place and returns it. That single step guarantees both that the input is never mutated and that the result shares no object with it; do not "optimise" it into partial copies.
+- **Moves and events carry copies.** Cards in `LegalMove`s, events (`card-played`, `hand-dealt`'s trump card, `hand-completed`'s result, `game-started`'s seats and plan) and views are copies, never objects of the returned state. A caller that mutates an event or a move cannot corrupt the game.
+- **Fixed event order** per `applyMove`, as listed in §10.2. Clients animate events in that order.
+- **No validation cost on the hot path.** `applyMove` does not run Zod parsing; only `createGame` parses its input. That every returned state parses with `GameStateSchema` and every event with `GameEventSchema` is a property checked by the tests.
+- **No ambient inputs.** No clock, no `Math.random`, no environment. The seed is the only source of randomness, and it is always supplied by the caller.
+
+### 10.4 Invariants
+
+`checkInvariants(state)` returns a `string[]`: empty for a valid state, otherwise one human-readable message per violation, each starting with its tag. It never throws for a state that parses with `GameStateSchema`, performs no I/O and does not mutate its input.
+
+| Tag | Rule |
+|---|---|
+| `(s)` | Structure: `handIndex < handPlan.length`; with a hand, `hands`, `bids` and `tricksWon` have one entry per seat, and `toAct`, `dealer` and `currentTrick.leader` are seats. |
+| `(a)` | No card appears twice across all hands and the current trick. |
+| `(b)` | Every such card belongs to this game's deck (`buildDeck(rules.deck, N)`). |
+| `(c)` | Each seat holds `cardsPerPlayer` − completed tricks − (1 if it has played to the current trick) cards. |
+| `(d)` | In `playing`, every bid is set. |
+| `(e)` | In `playing`, on a hand where the dealer restriction applies, the sum of bids ≠ `cardsPerPlayer`. |
+| `(f)` | While the game is not over, `legalMoves(state, toAct)` is not empty. |
+| `(g)` | `hand` is `null` exactly when `phase` is `game-over`. |
+| `(h)` | `hand.cardsPerPlayer === handPlan[handIndex]`. |
+| `(i)` | `completedHands.length` is `handIndex` during the game and `handPlan.length` at game over. |
+
+Some checks are skipped so that no check runs on data it cannot handle, and so that one cause gives one message:
+
+- If any `(s)` check fails, only the `(s)` messages are returned (the other rules would index out of range).
+- `(f)` calls `legalMoves`, so it is skipped when `(a)` or `(b)` fails (ranking a card from another deck throws), and also when `cardsPerPlayer` exceeds the deck size (listing the bids of such a "hand" would allocate an enormous array). Neither situation can arise in a real game.
+- `(e)` runs only when every bid is set; a missing bid is reported once, by `(d)`.
+
+**When to call it.** In tests and in the simulator, after every move, asserting `[]`; that is how the engine's own tests sweep full games for every preset. It is not called inside `applyMove`: legal moves cannot produce an invalid state, and the engine keeps the move path free of extra work. Card conservation across a whole hand (hands + played cards + stock = deck) needs the history of the hand, so it is not an invariant of a single state; the simulator checks it from the event log ([`design.md`](./design.md) §5.6). Tests should assert on the tags, not the full message text.
+
+### 10.5 `ENGINE_VERSION`
+
+`ENGINE_VERSION` (exported from `@/src/engine/engine`, currently `1`) identifies the engine's behaviour. A stored game can only be replayed by the engine version that created it, so the version is saved with each game's metadata ([`architecture.md`](./architecture.md) §6.2).
+
+**Bump it by 1 with any change that alters the deals or move outcomes for an existing seed and move sequence.** For example: the RNG, the stream derivation or its labels; the deck order or `buildDeck`; the dealing order, trump choice or hand sorting; the legal bids or plays; trick resolution; hand-sequence expansion; any transition. Refactors, new exports, error messages and view changes that leave every state and event the same do not need a bump.
+
+**The tripwire.** `tests/unit/engine/golden.test.ts` pins, as literals that are never recomputed, the hand-0 dealer, trump card and hands, and the full `completedHands` of an `argentina-fidepo` 4-seat game with seed `golden-seed` played by first legal move. If a change makes it fail, that change alters behaviour: either it is a bug, or you must bump `ENGINE_VERSION` (and `GOLDEN_ENGINE_VERSION` in the test) and only then update the literals. The fixture covers dealing, sorting and French-deck trick resolution on that path; other paths (Spanish deck, other play flags, other presets) are covered by the tests that recompute expected values and by code review, so a green golden test does not prove a change is behaviour-neutral.
+
+### 10.6 The `@noble/hashes` dependency
+
+`deriveRng` needs SHA-256, and the engine may not use Node's `crypto` (it must run unchanged in browsers, tests, the simulator and serverless functions) or the asynchronous Web Crypto API (the engine is synchronous). `@noble/hashes` is a small, audited, dependency-free pure-JavaScript implementation, so it is the engine's only new runtime dependency, pinned to exactly `2.4.0`; `CORE_EXTERNALS` in `eslint.config.mjs` allows it in the core.
+
+Version 2 is ESM-only and its export map has only `.js` subpaths: import `sha256` from `@noble/hashes/sha2.js` and `utf8ToBytes` from `@noble/hashes/utils.js`. The bare `@noble/hashes/sha2` does not resolve. Hash input is a `Uint8Array`. Changing the hash library is safe only if it produces identical bytes. `rng.test.ts` computes its expected stream with `@noble/hashes` itself, so it would not notice a different library; `golden.test.ts` (§10.5), whose literals depend on every hash, would.
+
+### 10.7 Engine tests
+
+Engine tests live in `tests/unit/engine/<topic>.test.ts`; each file names the requirements it checks in its header comment. Expected values are computed independently of the code under test (for example, the deal is recomputed in the test from `buildDeck` and `deriveRng`, and the RNG is checked against an in-test BigInt reference).
+
+| File | Protects |
+|---|---|
+| `rng.test.ts`, `sequence.test.ts`, `bidding.test.ts`, `play.test.ts`, `trick.test.ts` | The building blocks. `sequence.test.ts` holds every preset's hand plan as a literal array; `play.test.ts` runs each case under every combination of the play flags. |
+| `engine-create.test.ts`, `engine-apply.test.ts` | Creation and validation, dealing, legal moves and ids, move errors, transitions, events, immutability. |
+| `determinism.test.ts` | Two runs give identical states and events; replaying the move events reproduces the game; deals do not depend on the moves chosen. |
+| `golden.test.ts` | The `ENGINE_VERSION` tripwire (§10.5). |
+| `view.test.ts` | View contents, the game-over view, and a leak sweep over every state of a full game for every viewer. |
+| `invariants.test.ts` | Valid sweeps over full games for every preset, and one mutation per rule. |
+| `perf.test.ts` | One full `argentina-fidepo` 3-player game (29 hands, 981 moves) by first legal move, median of 5 timed runs after a warm-up, must take < 250 ms (it takes about 45 ms locally). Run it with `--silent=false` to see the timings. |
+
+Shared helpers live in `tests/unit/engine/helpers.ts` (not a `*.test.ts`, so not collected): card builders (`card('10S')`, `cards('KS AH 3H')`, `trick(leader, ids)`), `rulesWith(presetId, overrides)`, `makeHand`, `makeSeats(n, kinds)`, `newGame(presetId, players, seed)`, `withHand(state, overrides, phase)` for hand-built positions, and the game driver `playGame(start, policy = firstMove)`. `playGame` returns `{ states, events, moves, final }`, where `states[0]` is the start state, `moves[i]` (`{ seat, moveId, events }`) turned `states[i]` into `states[i + 1]`, and `final` is the game-over state; it throws if an actor has no legal move or a move cap is exceeded. Sweep tests iterate `game.states`; per-move checks use `game.moves`. Policies `firstMove` and `lastMove` pick the first or last legal move.
+
+### 10.8 Gotchas and limitations
+
+- **`firstMove` always bids 0**, so in first-move games the dealer's forbidden bid is `cardsPerPlayer` and every bid is 0 (the golden fixture's bids are all zero). Use `lastMove` when a test needs varied bids or a live dealer restriction.
+- **Hand-built positions are not valid games.** `withHand` states use `makeHand` defaults (4 cards, dealer 0) that need not match `handPlan` or the dealt cards: fine for `legalMoves`, but they fail `checkInvariants`.
+- **`helpers.ts` imports the engine**, so a broken `engine.ts` breaks every engine test file, not just the engine's own.
+- **`hand === null` means game over everywhere.** `currentActor` returns `null`, `applyMove` throws `'game-over'` and `tableViewFor` returns the game-over shape for a `null` hand even if `phase` says otherwise (and the game-over view's `dealer` falls back to 0 if `completedHands` is empty). Such malformed states are reported by `checkInvariants` (`(g)`, `(i)`), not by these functions.
+- **The seat-range check exists twice.** `view.ts` has a private copy of `engine.ts`'s private `assertSeatInRange` (same condition, same message), because exporting it would widen the engine's public API. Keep the two in sync, or export one and remove the other.
+- **`legalPlays` returns the hand's own card objects** (a new array, but not copied cards); never mutate them. `legalMoves` copies them into its moves.
+- **`legalPlays` and `trickWinner` assume the cards belong to `deck`**: `compareRanks` throws `InvalidCardError` otherwise. `trickWinner([])` throws `RangeError` (a trick has at least one play; the engine only calls it with a full trick).
+- **`rngFromSource` reads each draw as `next() >>> 0`**, the identity for valid uint32 values, so a stub that returns `-1` is read as `2^32 − 1` instead of producing out-of-range results. Stubs should still return uint32 values.
+- **`rng.int(0, 2 ** 32 − 1)` returns raw generator outputs** (nothing is rejected at that range); use it to compare streams in tests. `int` accepts any integer bounds, including unsafe integers beyond 2^53 where results are imprecise; the engine only uses small ranges.
+- **`checkInvariants` does not bound `cardsPerPlayer` by the deck.** A state with an oversized `cardsPerPlayer` that still passes `(c)` and `(h)` reports nothing (and `(f)` is skipped for it). It also does not check the `trumpCard` itself in `(a)`/`(b)`; when the trump is in the dealer's hand it is checked as one of the dealer's cards.
+- **Not in the engine:** scoring and `live` hand status (Score Engine), `PlayerView`, players, strategies, the AI loop and the simulator, seed generation and setting `version` (GameService and the Game State Manager); see [`implementation.md`](./implementation.md) for when each arrives. Bid changes, revokes, target-score endings, tie-break hands and special hands are out of scope by design ([`design.md`](./design.md) §1.2, §4.2).
+
+---
+
+## 11. Known limitations
 
 - **Configuration is not validated at server startup yet.** `getConfig()` has no caller; it is wired in by its first user, the GameService factory (Phase 8 in [`implementation.md`](./implementation.md)). Until then a misconfigured deployment would still start.
 - **Storage credentials for the `blob` driver are not checked** by `loadConfig`; that check arrives with the storage layer (Phase 5).
 - **`pnpm simulate` is a stub** that prints `simulate: not implemented until Phase 4` and exits 0. The simulator and the `tests/sim` suite arrive in Phase 4.
 - **The layer rule does not check dynamic `import()` or `require()`.** Use static `import` statements.
-- **No game logic yet:** only `src/domain` (types, schemas, presets) exists; the other `src/` layers are empty, and `/` is a placeholder page.
+- **No scoring, players, persistence or API yet:** `src/domain` (§9) and `src/engine` (§10) exist; `src/score`, `src/players`, `src/state`, `src/storage` and `src/service` are empty, and `/` is a placeholder page. A game can be played only from code or tests.
+- **Engine limitations** are listed in §10.8.
