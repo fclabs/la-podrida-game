@@ -4,16 +4,35 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { DEFAULT_PRESET_ID, getPreset, UnknownPresetError } from '@/src/domain/presets';
 import type { PresetId, RuleSet } from '@/src/domain/rules';
-import type { GameEvent, PlayerUpdate, SeatInfo } from '@/src/domain/types';
-import { createGame, ENGINE_VERSION, legalMoves } from '@/src/engine/engine';
+import type { GameEvent, PlayerUpdate, SeatInfo, Transition } from '@/src/domain/types';
+import {
+  applyMove,
+  createGame,
+  ENGINE_VERSION,
+  IllegalMoveError,
+  legalMoves,
+} from '@/src/engine/engine';
 import { createPlayers } from '@/src/players/registry';
 import { evaluate } from '@/src/score/score-engine';
-import { GameNotFoundError, InvalidGameIdError } from '@/src/state/errors';
+import {
+  CommitConflictError,
+  CommitNotFoundError,
+  GameNotFoundError,
+  InvalidGameIdError,
+} from '@/src/state/errors';
 import type { GameStateManager } from '@/src/state/game-state-manager';
 import { assertValidGameId, MAX_COMMIT_VERSION } from '@/src/state/keys';
 import type { Commit, CommitBody, GameMeta } from '@/src/state/schemas';
 import { runAiLoop } from './ai-loop';
-import { GameNotFound, GameUnsupported, InvalidRequest, Unauthorized } from './errors';
+import {
+  GameNotFound,
+  GameUnsupported,
+  IllegalMove,
+  InvalidRequest,
+  NotYourTurn,
+  Unauthorized,
+  VersionConflict,
+} from './errors';
 import { buildPlayerView } from './player-view';
 
 /** The collaborators of `GameService` (FR-700). Only `state` is required. */
@@ -58,6 +77,9 @@ const MAX_AI_COUNT = 5;
 const GAME_ID_BYTES = 16;
 const SEED_BYTES = 32;
 const SEAT_TOKEN_BYTES = 32;
+/** The longest `moveId` and `clientRequestId` (FR-713). */
+const MAX_MOVE_ID = 32;
+const MAX_CLIENT_REQUEST_ID = 128;
 /** The most `state.load` calls `#missedEvents` keeps in flight at once (FR-716). */
 const MISSED_EVENTS_CONCURRENCY = 8;
 
@@ -89,6 +111,16 @@ function seatTokenHash(seatToken: string): string {
 /** True iff `value` is an integer from `min` to `max`. */
 function isIntInRange(value: unknown, min: number, max: number): value is number {
   return Number.isInteger(value) && (value as number) >= min && (value as number) <= max;
+}
+
+/** True iff `value` is a string of `min` to `max` UTF-16 code units. */
+function isStringOfLength(value: unknown, min: number, max: number): value is string {
+  return typeof value === 'string' && value.length >= min && value.length <= max;
+}
+
+/** True iff `commit` was made by `seat` for the request `clientRequestId` (FR-714 match test). */
+function isSameRequest(commit: Commit, seat: number, clientRequestId: string): boolean {
+  return commit.clientRequestId === clientRequestId && commit.actorSeat === seat;
 }
 
 /**
@@ -198,16 +230,57 @@ export class GameService {
     return this.#update(tip, seat, events);
   }
 
-  /** Applies the human's move and the AIs' replies as one commit (FR-712–FR-722). */
+  /**
+   * Applies the human's move and the AIs' replies as one commit (FR-712–FR-722): validates, loads
+   * and authenticates; answers a stale `req.version` with the original result of the same request
+   * or a `VersionConflict`; otherwise applies the move, runs the AI loop and commits `version + 1`
+   * with a create-only write, turning a lost race into the winner's result or a `VersionConflict`.
+   */
   async submitMove(
     gameId: string,
     seatToken: string,
     req: SubmitMoveRequest,
   ): Promise<PlayerUpdate> {
-    void gameId;
-    void seatToken;
-    void req;
-    throw new Error('not implemented');
+    this.#validateIdAndToken(gameId, seatToken);
+    this.#validateSubmit(req);
+    const { tip, seat } = await this.#loadAndAuthenticate(gameId, seatToken);
+
+    if (req.version !== tip.version) {
+      if (req.version < tip.version) {
+        const next = await this.#state.load(gameId, req.version + 1);
+        if (isSameRequest(next, seat, req.clientRequestId)) {
+          return this.#update(next, seat, next.events);
+        }
+      }
+      const missed = await this.#missedEvents(gameId, req.version, tip);
+      throw new VersionConflict(this.#update(tip, seat, missed));
+    }
+
+    const human = this.#applyHumanMove(tip, seat, req.moveId);
+    const loop = runAiLoop(human.state, createPlayers(human.state.seats));
+    const version = req.version + 1;
+    const state = { ...loop.state, version };
+    const body: CommitBody = {
+      version,
+      at: this.#now().toISOString(),
+      actorSeat: seat,
+      clientRequestId: req.clientRequestId,
+      events: [...human.events, ...loop.events],
+      state,
+      scoreboard: evaluate(state),
+    };
+
+    let committed: Commit;
+    try {
+      committed = await this.#state.commit(gameId, body);
+    } catch (err) {
+      if (err instanceof CommitConflictError) return this.#resolveRace(gameId, seat, req);
+      throw err;
+    }
+    if (committed.state.phase === 'game-over') {
+      await this.#state.writeFinalScores(gameId, committed.version, committed.scoreboard);
+    }
+    return this.#update(committed, seat, committed.events);
   }
 
   /**
@@ -259,6 +332,57 @@ export class GameService {
       throw err;
     }
     if (typeof seatToken !== 'string' || seatToken.length === 0) throw new Unauthorized();
+  }
+
+  /** FR-713 checks, in order, first failure wins: `version`, `moveId`, `clientRequestId`. */
+  #validateSubmit(req: SubmitMoveRequest): void {
+    const { version, moveId, clientRequestId } = req;
+    if (!isIntInRange(version, 0, MAX_COMMIT_VERSION - 1)) throw new InvalidRequest('version');
+    if (!isStringOfLength(moveId, 1, MAX_MOVE_ID)) throw new InvalidRequest('moveId');
+    if (!isStringOfLength(clientRequestId, 1, MAX_CLIENT_REQUEST_ID)) {
+      throw new InvalidRequest('clientRequestId');
+    }
+  }
+
+  /**
+   * Applies the human's move to the tip (FR-715). The engine's `not-your-turn` → `NotYourTurn`;
+   * `game-over` and `unknown-move` → `IllegalMove`. Other errors propagate.
+   */
+  #applyHumanMove(tip: Commit, seat: number, moveId: string): Transition {
+    try {
+      return applyMove(tip.state, seat, moveId);
+    } catch (err) {
+      if (!(err instanceof IllegalMoveError)) throw err;
+      if (err.reason === 'not-your-turn') throw new NotYourTurn(seat);
+      throw new IllegalMove(moveId, err.reason);
+    }
+  }
+
+  /**
+   * After a `CommitConflictError` on commit `req.version + 1` (FR-719): resolves to that commit's
+   * update when it holds the same request from the same seat (no `final.json` write, FR-721).
+   * Otherwise (including a missing commit) rejects with `VersionConflict` from a fresh tip, with
+   * the missed events from `req.version`.
+   */
+  async #resolveRace(gameId: string, seat: number, req: SubmitMoveRequest): Promise<PlayerUpdate> {
+    let winner: Commit | null = null;
+    try {
+      winner = await this.#state.load(gameId, req.version + 1);
+    } catch (err) {
+      if (!(err instanceof CommitNotFoundError)) throw err;
+    }
+    if (winner !== null && isSameRequest(winner, seat, req.clientRequestId)) {
+      return this.#update(winner, seat, winner.events);
+    }
+    let latest: Commit;
+    try {
+      latest = await this.#state.loadLatest(gameId);
+    } catch (err) {
+      if (err instanceof GameNotFoundError) throw new GameNotFound(gameId);
+      throw err;
+    }
+    const missed = await this.#missedEvents(gameId, req.version, latest);
+    throw new VersionConflict(this.#update(latest, seat, missed));
   }
 
   /**

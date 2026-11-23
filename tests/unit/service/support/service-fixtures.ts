@@ -1,7 +1,18 @@
 // Shared fixtures for the GameService tests (plan P-10). Tests may import any layer.
-import type { PlayerUpdate } from '@/src/domain/types';
-import { GameService, type GameServiceDeps } from '@/src/service/game-service';
+import { createHash } from 'node:crypto';
+import { DEFAULT_PRESET_ID, getPreset } from '@/src/domain/presets';
+import type { PlayerUpdate, SeatInfo } from '@/src/domain/types';
+import { createGame, ENGINE_VERSION } from '@/src/engine/engine';
+import { createPlayers } from '@/src/players/registry';
+import { evaluate } from '@/src/score/score-engine';
+import { runAiLoop } from '@/src/service/ai-loop';
+import {
+  GameService,
+  type CreateGameResult,
+  type GameServiceDeps,
+} from '@/src/service/game-service';
 import { GameStateManager } from '@/src/state/game-state-manager';
+import type { Commit, GameMeta } from '@/src/state/schemas';
 import { MemoryObjectStore } from '@/src/storage/memory-store';
 import type { ObjectStore } from '@/src/storage/object-store';
 import { RecordingStore } from '../../state/support/store-wrappers';
@@ -58,4 +69,83 @@ export function firstLegalMoveId(update: PlayerUpdate): string {
   const [first] = update.legalMoves;
   if (first === undefined) throw new Error(`no legal move at version ${update.version}`);
   return first.id;
+}
+
+/**
+ * Plays `created`'s game to `game-over` through `submitMove`: the human always plays its first
+ * legal move at the latest version, with a fresh `clientRequestId` per call (`play-<n>`). Returns
+ * every response, in order (the last one is the game-over update).
+ */
+export async function playToEnd(
+  service: GameService,
+  created: CreateGameResult,
+): Promise<PlayerUpdate[]> {
+  const responses: PlayerUpdate[] = [];
+  let update = created.update;
+  while (update.view.phase !== 'game-over') {
+    update = await service.submitMove(created.gameId, created.seatToken, {
+      version: update.version,
+      moveId: firstLegalMoveId(update),
+      clientRequestId: `play-${responses.length + 1}`,
+    });
+    responses.push(update);
+  }
+  return responses;
+}
+
+/** The 64-character lowercase hex SHA-256 of a seat token (FR-702). */
+export function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+/** Options of `storeHandmadeGame`. */
+export interface HandmadeGameOptions {
+  gameId: string;
+  seats: SeatInfo[];
+  /** One entry per seat: the seat token of a human seat, `null` for an AI seat. */
+  tokens: (string | null)[];
+  seed: string;
+  /** Run the AI loop before commit 0, as `createGame` does (default `true`). */
+  runLoop?: boolean;
+}
+
+/**
+ * Writes a game built without the service (engine `createGame`, optionally the AI loop) with
+ * `GameStateManager.create`: default preset, `FIXED_NOW`, the given seats and seat tokens. Used
+ * for states `createGame` cannot produce (an AI to act at the tip; several human seats).
+ */
+export async function storeHandmadeGame(
+  state: GameStateManager,
+  opts: HandmadeGameOptions,
+): Promise<{ meta: GameMeta; commit0: Commit }> {
+  const start = createGame({
+    gameId: opts.gameId,
+    rules: getPreset(DEFAULT_PRESET_ID),
+    seats: opts.seats,
+    seed: opts.seed,
+  });
+  const loop =
+    opts.runLoop === false
+      ? { state: start.state, events: [] }
+      : runAiLoop(start.state, createPlayers(opts.seats));
+  const at = FIXED_NOW.toISOString();
+  const meta: GameMeta = {
+    schemaVersion: 1,
+    gameId: opts.gameId,
+    presetId: DEFAULT_PRESET_ID,
+    engineVersion: ENGINE_VERSION,
+    createdAt: at,
+    seats: opts.seats,
+    seatTokenHashes: opts.tokens.map((t) => (t === null ? null : sha256Hex(t))),
+  };
+  const commit0 = await state.create(meta, {
+    version: 0,
+    at,
+    actorSeat: null,
+    clientRequestId: null,
+    events: [...start.events, ...loop.events],
+    state: loop.state,
+    scoreboard: evaluate(loop.state),
+  });
+  return { meta, commit0 };
 }

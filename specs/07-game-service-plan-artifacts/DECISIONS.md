@@ -83,3 +83,31 @@
 - **Decision**: `async submitMove(gameId, seatToken, req)` with `void gameId; void seatToken; void req;` before the throw (so it rejects rather than throwing synchronously).
 - **Rejected**: an `eslint-disable` comment; underscore-prefixed names (not ignored by the config).
 - **Consequences**: Iteration 3 replaces the whole body; the `void` lines go away.
+
+## D-013: submitMove flow per P-8  (Iteration 3)
+
+- **Context**: FR-712–FR-722 and P-8 fix the order; the Iteration 2 helpers must be reused.
+- **Decision**: `submitMove` = `#validateIdAndToken` → `#validateSubmit` (FR-713; `typeof` before `.length`, `isIntInRange` for `version`, `isStringOfLength` in UTF-16 units) → `#loadAndAuthenticate` → retry check (FR-714) or `#applyHumanMove` (FR-715) → `runAiLoop` on `createPlayers(human.state.seats)` → commit body with `state = { ...loop.state, version }` → `state.commit` → `#resolveRace` on `CommitConflictError` → `writeFinalScores` at `game-over` → `#update(committed, …)`. The match test is a module function `isSameRequest(commit, seat, clientRequestId)` shared by FR-714 and FR-719. The stale-path `load(req.version + 1)` is not reused by `#missedEvents`; its errors propagate (P-7 does not map them).
+- **Rejected**: a separate retry helper duplicating `#update`/`#missedEvents`; reusing the retry-check load (breaks NFR-702).
+- **Consequences**: success = 8 calls (+1 at game over); stale 409 = 8 + 2·(t − v − 1); updates come only from `#update`.
+
+## D-014: Race resolution per P-7 and FR-719  (Iteration 3)
+
+- **Context**: FR-719 re-reads commit `v + 1` after `CommitConflictError`, then `loadLatest`; P-7 maps `GameNotFoundError` "from `loadMeta`/`loadLatest`" and `CommitNotFoundError` from this re-read.
+- **Decision**: `#resolveRace` treats `CommitNotFoundError` from `load(v + 1)` as no match (other errors propagate), returns the winner's update with its events on a match (no `final.json` write, FR-721), and otherwise calls `loadLatest`, mapping its state `GameNotFoundError` to `GameNotFound(gameId)` as P-7 states for `loadLatest`, then throws `VersionConflict` with the missed events from `req.version`.
+- **Rejected**: letting the race-path `GameNotFoundError` escape as a state error (P-7 names `loadLatest` without restricting it to the first load).
+- **Consequences**: a game deleted mid-race answers 404 rather than 500; the update's version is ≥ `v + 1` whenever commit `v + 1` exists (probe from a stale head).
+
+## D-015: Shared test helpers beyond `playToEnd`  (Iteration 3)
+
+- **Context**: VC-716 (`NotYourTurn`) and VC-719 need games `createGame` cannot build (an AI to act at the tip; two human seats), in both `submit.test.ts` and `secrets.test.ts`.
+- **Decision**: `service-fixtures.ts` (listed in Touches) also gets `sha256Hex(text)` and `storeHandmadeGame(state, { gameId, seats, tokens, seed, runLoop? })`, which writes meta + commit 0 with `GameStateManager.create` (default preset, `FIXED_NOW`). `playToEnd` uses `clientRequestId` `play-<n>` (n = the commit version it creates).
+- **Rejected**: copying the `twoHumanGame` recipe into each test file (two copies); a new support file (not in Touches).
+- **Consequences**: test-only; `auth-crypto.test.ts` keeps its own local copy (Iteration 2 file, not edited).
+
+## D-016: How VC-725 detects cards and serializes errors  (Iteration 3)
+
+- **Context**: VC-725 asks for "no card of another seat's hand" in updates and "cards only in `card-played.card` and `hand-dealt.trumpCard`" in events; R-033 asks for the error JSON `{ name, message, ...ownFields }`.
+- **Decision**: a card is any object whose keys are exactly `rank` and `suit` (the strict `CardSchema` shape), found by a recursive walk that records the property path. Errors serialize as `{ ...err, name, message }` (own fields first so TypeScript accepts the override). The test also asserts that cards were found (non-vacuous) and that the seat token appears only in `createGame` results.
+- **Rejected**: string-matching card ids in the JSON (ids like `"QH"` could collide with other text).
+- **Consequences**: test-only.
