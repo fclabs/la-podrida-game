@@ -193,7 +193,7 @@ It works this way because a misconfigured deployment should be fixed in one pass
 
 ## 7. Continuous integration
 
-`.github/workflows/ci.yml` runs on every push to any branch and on every pull request. One job on `ubuntu-latest`:
+`.github/workflows/ci.yml` runs on pull requests only: when one is opened, and on every push to its branch. Pushing a branch with no open pull request runs nothing. One job on `ubuntu-latest`:
 
 1. Checkout.
 2. Set up pnpm (version read from `packageManager` in `package.json`).
