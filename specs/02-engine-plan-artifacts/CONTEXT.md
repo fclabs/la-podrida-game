@@ -1,6 +1,6 @@
 # CONTEXT — Game Engine (Phase 2)
 
-Last updated by: Iteration 2 (Hand-plan expansion)
+Last updated by: Iteration 3 (Legal bids, legal plays, trick winner)
 
 ## Current state
 
@@ -8,8 +8,10 @@ Last updated by: Iteration 2 (Hand-plan expansion)
 - `@noble/hashes` 2.4.0 is now a runtime dependency (exact pin). `dependencies` = `@noble/hashes, next, react, react-dom, zod` (spec NFR-202).
 - `src/engine/rng.ts` is done (spec FR-200 to FR-205): `rngFromSource`, `createXoshiro128ss`, `deriveRng`. `src/engine/.gitkeep` was deleted.
 - `src/engine/sequence.ts` is done (spec FR-207 to FR-210): `maxCardsPerPlayer`, `expandHandSequence`.
-- Not yet built: `bidding.ts` / `play.ts` / `trick.ts` (3), `engine.ts` (4–5), `view.ts` (6), `invariants.ts` (7), docs (8).
-- Tests: `pnpm test` = 12 files, 279 tests (domain 215 + rng 17 + sequence 47 + config/smoke/layer-boundaries).
+- `src/engine/bidding.ts` (FR-222 `legalBids`), `src/engine/play.ts` (FR-224 `legalPlays`), `src/engine/trick.ts` (FR-225 `trickWinner`) are done.
+- `tests/unit/engine/helpers.ts` exists with builders `card`, `cards`, `trick`, `rulesWith`, `makeHand`.
+- Not yet built: `engine.ts` (4–5), `view.ts` (6), `invariants.ts` (7), docs (8).
+- Tests: `pnpm test` = 15 files, 312 tests (domain 215 + rng 17 + sequence 47 + bidding 8 + play 15 + trick 10 + config/smoke/layer-boundaries).
 
 ## File map
 
@@ -17,6 +19,13 @@ Last updated by: Iteration 2 (Hand-plan expansion)
 |---|---|
 | `src/engine/rng.ts` | Seeded RNG: `rngFromSource`, `createXoshiro128ss` (xoshiro128**), `deriveRng` (SHA-256 stream derivation). |
 | `src/engine/sequence.ts` | Hand plans: `maxCardsPerPlayer`, `expandHandSequence` (bound resolution, range/repeat expansion, `RangeError` checks). |
+| `src/engine/bidding.ts` | `legalBids` (FR-222, dealer restriction / *sucias*). |
+| `src/engine/play.ts` | `legalPlays` (FR-224 = design §5.4 algorithm). |
+| `src/engine/trick.ts` | `trickWinner` (FR-225). |
+| `tests/unit/engine/helpers.ts` | Shared test builders (see Public interfaces). Iterations 4–5 may add to it; 6–7 must not edit it. |
+| `tests/unit/engine/bidding.test.ts` | VC-219 at function level (ids deferred to Iteration 4). |
+| `tests/unit/engine/play.test.ts` | VC-220 at function level: every spec row, each run under all 16 combos of the 4 play flags consistent with the row's fixed flags. |
+| `tests/unit/engine/trick.test.ts` | VC-221 (french + spanish decks, leader ≠ seat 0). |
 | `tests/unit/engine/sequence.test.ts` | VC-207 to VC-210; the 18 preset hand plans as hand-written literal arrays (`PLANS`, `// prettier-ignore`). |
 | `tests/unit/engine/rng.test.ts` | VC-201 to VC-205; includes an independent BigInt xoshiro128** reference and a golden test computed in-test from `@noble/hashes`. |
 | `src/domain/*.ts` | Phase 1 domain (schemas, cards, decks, rules, types, presets). Use, never redefine. |
@@ -62,6 +71,41 @@ export function expandHandSequence(rules: RuleSet, players: number): number[];
 - player count not an integer in `rules.players`: message `player count <n> is outside <min>–<max> for rule set <id>`;
 - after full expansion, the first count `< 1` or `> max`: message `hand of <count> cards is outside 1–<max> for <players> players with rule set <id>`.
 Iteration 4 (`createGame`, FR-211) uses `err.message` verbatim as the `InvalidGameSetupError` problem; VC-211 checks the message contains `20` for `{repeat, cards: 20}` with 4 seats.
+
+### `@/src/engine/bidding`, `@/src/engine/play`, `@/src/engine/trick`
+
+```ts
+export function legalBids(hand: HandState, seat: number, rules: RuleSet): number[];
+// 0…cardsPerPlayer ascending (new array). If seat === hand.dealer && rules.bidding.dealerRestriction
+// && !dealerRestrictionExemptCardCounts.includes(cardsPerPlayer): removes
+// cardsPerPlayer − sum(other seats' bids) (null bids count as 0) when it is in range.
+export function legalPlays(hand: HandState, seat: number, rules: RuleSet, deck: DeckDefinition): Card[];
+// Design §5.4 over hand.hands[seat], using hand.currentTrick.plays and hand.trumpSuit.
+// Returns a NEW array holding the hand's own Card objects (not copies), in hand order.
+// Waiver: beatNotRequiredAfterTrumped && a trump on the table && led suit !== trump.
+export function trickWinner(plays: readonly TrickPlay[], trumpSuit: Suit, deck: DeckDefinition): number;
+// Seat of highest trump, else of highest led-suit card (led = plays[0].card.suit).
+// Throws RangeError on an empty plays array (D-002).
+```
+
+All three are pure, never mutate their inputs, and compare ranks with `compareRanks(deck, a, b) > 0`.
+`engine.ts` (Iteration 4) calls `legalBids(state.hand, seat, state.rules)`,
+`legalPlays(state.hand, seat, state.rules, state.rules.deck)` and
+`trickWinner(plays, state.hand.trumpSuit, state.rules.deck)`. They read `toAct` / `phase` nowhere:
+turn and phase checks are the caller's job.
+
+### Test helpers — `tests/unit/engine/helpers.ts` (import as `./helpers`)
+
+```ts
+card(id: string, deck = FRENCH_52): Card;          // parseCard
+cards(ids: string, deck = FRENCH_52): Card[];      // 'KS AH 3H' → cards, order kept
+trick(leader, ids, seatCount = 4, deck = FRENCH_52): TrickPlay[]; // seats leader, leader+1, … mod N
+rulesWith(id: PresetId, { play?, bidding? } = {}): RuleSet;      // getPreset clone + shallow overrides
+makeHand(overrides: Partial<HandState> = {}, seatCount = 4): HandState;
+// defaults: cardsPerPlayer 4, dealer 0, trumpCard 2S, trumpCardInDealerHand false, trumpSuit 'S',
+// hands [[]×N], bids [null×N], tricksWon [0×N], currentTrick { leader: 1, plays: [] }, toAct 1;
+// no lastTrick key.
+```
 
 ### Domain (Phase 1, unchanged) — import map, no barrel
 
@@ -112,6 +156,8 @@ pnpm prints an "Unsupported engine" WARN locally (Node 26 vs declared 24) and "I
 
 ## Known gaps
 
-- Everything after sequence expansion (legal bids/plays, trick winner, engine, view, invariants, docs) is not built yet.
+- `engine.ts` (createGame, dealing, legalMoves, applyMove), view, invariants and docs are not built yet.
+- VC-219 `bid:<n>` ids and VC-220 `play:<cardId>` ids are tested through `legalMoves` in Iteration 4.
+- `legalPlays` / `trickWinner` assume cards belong to `deck` (`compareRanks` throws `InvalidCardError` otherwise); they do not validate seats or turn.
 - `int` accepts any `Number.isInteger` bounds, including unsafe integers beyond 2^53 (results there are imprecise); the spec only requires integers. Engine callers use small ranges.
 - `docs/development.md` still says `@noble/hashes` "is added when the engine needs hashing"; Iteration 8 updates the docs.
