@@ -83,3 +83,39 @@
 **Decision**: `create` runs `assertValidGameId(meta.gameId)`, then `GameMetaSchema`, then `CommitSchema` on `{ schemaVersion: 1, ...initial }`, then `initial-version`, `initial-state-version`, `state-game-id`, `seats-mismatch`. Seats are compared with a private `jsonEqual` (key-order independent; a key holding `undefined` counts as absent). `create` writes and returns the parsed (validated) documents.
 **Rejected**: `node:util.isDeepStrictEqual` (a Node built-in; P-8 says not needed); `JSON.stringify` equality (key-order dependent).
 **Consequences**: `load` validates `version` via `commitKey(gameId, version)` before any I/O (id first, then `RangeError`).
+
+## D-015: Commit write path and validation order  (Iteration 3)
+**Context**: FR-611–FR-614; `#createOrMatch` throws `GameExistsError`, so `commit` cannot reuse it.
+**Decision**: `commit` runs `assertValidGameId(gameId)`, then `CommitSchema.safeParse({ schemaVersion: 1, ...next })` (`commit-schema:<path>`), then `commit-version` (`version ≥ 1`), `state-version`, `state-game-id` (P-2). It serializes once (`serializeCommit`, P-4), writes with `store.put(key, bytes, { mode: 'create-only', contentType: 'application/json' })` inline, and on `ObjectExistsError` re-reads with a raw `store.get` + `bytesEqual`: identical → success; different or `null` → `CommitConflictError(gameId, version)`. Any other error from the put or the re-read propagates as is. Then `#writeHead` (the single `mode: 'overwrite'` site). Returns the Zod-parsed commit.
+**Rejected**: Generalising `#createOrMatch` with an error factory (one extra indirection for two call sites); checking game existence or tip + 1 (spec FR-611: orphan allowed, 2 calls).
+**Consequences**: A schema-valid commit-0 body gives `commit-version`; a v1 body relabelled 0 fails the schema first (`commit-schema:actorSeat`).
+
+## D-016: Bounded parallel reads in eventsSince  (Iteration 3)
+**Context**: P-6, FR-615, NFR-602.
+**Decision**: Module-private `mapLimit(items, limit, fn)`: a pool of `min(limit, n)` workers pulling the next index; results kept in item order; `Promise.all` over the workers rejects with the first rejection, and a shared `failed` flag stops workers from starting new calls after it. `EVENTS_READ_CONCURRENCY = 8` (module constant, not exported). `eventsSince` validates the id, then `version` (`RangeError` `Invalid version <v>: version must be an integer >= 0`), calls `#findTip`, returns `[]` when `version ≥ tip.version`, reads `version+1 … tip−1` via `#readCommit` (`null` → `CommitNotFoundError(gameId, v)`) and appends the probe's `tip.commit`.
+**Rejected**: A dependency such as p-limit (NFR-603); unbounded `Promise.all`.
+**Consequences**: Calls = 5 + (t − v − 1) with an exact hint. Verified to bite: with the limit at 16 the VC-619 bound test fails (16 > 8).
+
+## D-017: Stored bytes come from the caller's validated input  (Iteration 3)
+**Context**: VC-615 requires the stored bytes to equal `JSON.stringify` of the document with keys in the documented order. Zod 4 re-orders nested keys to schema order (scoreboard `live` before `ranking`), while `evaluate()` emits `ranking` before `live`, so serializing the parsed data broke VC-615.
+**Decision**: `serializeCommit`/`serializeMeta` fix the top-level key order and take nested values from the caller's input after it validated: `commit` serializes `{ schemaVersion: 1, ...next }`, and `create` now serializes `meta` and `{ schemaVersion: 1, ...initial }` too (same rule for both). Returned documents stay the parsed ones (D-014; equal content).
+**Rejected**: Serializing the parsed data (fails VC-615 literally); deep key sorting (not the spec's order).
+**Consequences**: Nested key order of stored documents is whatever the caller built; the byte compare is still same-process (spec Assumptions). Strict schemas mean the input holds no extra keys.
+
+## D-018: Final scores write and read  (Iteration 3)
+**Context**: FR-616, FR-617.
+**Decision**: `writeFinalScores` validates the id, then the board (`board-schema:<path>`), then `version` with `FinalScoresSchema.shape.version` (safe integer ≥ 0, `final-version`), so whatever it writes reads back. It writes `{ schemaVersion, gameId, version, ranking, totals, madeCount, missedCount }` (parsed board fields) with `putJson(..., { mode: 'create-only' })` and swallows every error. `readFinalScores` = `getJson(FinalScoresSchema)`, plus `CorruptObjectError(key, 'schema', 'gameId')` when the stored `gameId` differs (same rule as `loadMeta`, D-009).
+**Rejected**: `Number.isInteger` only (accepts unsafe integers the schema rejects); no gameId check (would return another game's result).
+**Consequences**: The gameId check is an addition beyond FR-617's text, consistent with "never return unvalidated data"; Iteration 4 should document it.
+
+## D-019: Race and concurrency tests  (Iteration 3)
+**Context**: VC-616, VC-619; P-11.
+**Decision**: VC-616 creates the game through the manager on a fresh store per round (memory: new `MemoryObjectStore`; file: a `round-<n>` subfolder of one `mkdtemp` folder removed in `afterEach`), then races two v1 bodies differing in `clientRequestId` via `Promise.allSettled`; 20 rounds each. VC-619's 0…40 case uses a `get` hook that sleeps 2 ms before delegating and counts in-flight commit reads; it asserts ≤ 8 (and `maxConcurrentGets ≤ 8`) and exactly 8 reached.
+**Rejected**: Reusing one store with 20 game ids (would need 20 valid ids; same proof).
+**Consequences**: The file-store races cost ≈ 1.8 s locally (fsync per put); still far under NFR-604.
+
+## D-020: Secret-leak tests provoke real errors  (Iteration 3)
+**Context**: VC-624, BR-604.
+**Decision**: `errors.test.ts` creates a game whose commit-0 `state.seed` is `SECRET-SEED-123` and whose meta hash is `'ab'.repeat(32)`, then provokes each class through the manager (bad id, deleted commit 0, re-create with another `createdAt`, `load` past the tip, conflicting commit, invalid bodies/meta/board that hold the secrets). It checks `message`, `String(err)` and `InvalidCommitError.reason`.
+**Rejected**: Constructing errors directly only (would not prove the manager never passes secrets in).
+**Consequences**: None for the code: messages already carry only gameId/version/reason tokens.

@@ -1,14 +1,14 @@
 # CONTEXT — Game State Manager (Phase 6)
 
-Last updated by: Iteration 2 (`GameStateManager` create/load). Next: Iteration 3 (`commit`, `eventsSince`, final scores).
+Last updated by: Iteration 3 (`commit`, `eventsSince`, final scores). Next: Iteration 4 (docs only).
 
 ## Current state
 
 - Phases 0–5 are complete (domain, engine, score, players + AI loop in `src/service/ai-loop.ts`, storage). Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (no `noUncheckedIndexedAccess`; target ES2022), pnpm 10.15.1, Node 24 declared (local Node may be newer: pnpm prints an "Unsupported engine" WARN, not fatal), Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7. `package.json` dependencies unchanged in this phase (NFR-603).
 - **Shipped in Iteration 1**: `src/state/keys.ts`, `src/state/errors.ts`, `src/state/schemas.ts`; tests `tests/unit/state/keys.test.ts` (30 tests), `tests/unit/state/schemas.test.ts` (45 tests), `tests/unit/state/types.test-d.ts` (compile-time only). `src/state/.gitkeep` deleted.
 - **Shipped in Iteration 2**: `src/state/game-state-manager.ts` (`GameStateManager` with `constructor`, `create`, `loadMeta`, `load`, `loadLatest`); test support `tests/unit/state/support/{store-wrappers,fixtures}.ts`; tests `tests/unit/state/create.test.ts` (26 tests), `tests/unit/state/load.test.ts` (30 tests).
-- Not yet built: `commit`, `eventsSince`, `writeFinalScores`, `readFinalScores`, `mapLimit`/`EVENTS_READ_CONCURRENCY` (Iteration 3); docs (Iteration 4).
-- Full `pnpm test`: 46 passed + 1 skipped files / 903 passed + 30 skipped tests. `tests/unit/state` ≈ 0.5 s (131 tests).
+- **Shipped in Iteration 3**: `GameStateManager.commit`, `eventsSince`, `writeFinalScores`, `readFinalScores`, module-private `mapLimit` + `EVENTS_READ_CONCURRENCY = 8`; `create` now serializes the caller's input (D-017). Tests `tests/unit/state/commit.test.ts` (24), `events-final.test.ts` (21), `errors.test.ts` (10), `io-budget.test.ts` (3). The code and the public interface of `src/state` are final; only docs remain (Iteration 4).
+- Full `pnpm test`: 50 passed + 1 skipped files / 961 passed + 30 skipped tests. `tests/unit/state`: 8 files, 189 tests, per-file durations summing to ≈ 2.3 s locally (commit.test.ts ≈ 1.8 s, the file-store races).
 
 ## File map
 
@@ -20,10 +20,14 @@ Last updated by: Iteration 2 (`GameStateManager` create/load). Next: Iteration 3
 | `tests/unit/state/keys.test.ts` | VC-601 (id part), VC-602: exact keys, `RangeError`s, leap day, `assertValidKey`/`assertValidPrefix` on every key/prefix, no key is a path prefix of another, `parseCommitKey`, code-unit sort order. |
 | `tests/unit/state/schemas.test.ts` | Valid docs round-trip; VC-603 at schema level (via `putJson`/`getJson` on `MemoryObjectStore`, asserting `CorruptObjectError` `reason 'schema'` + exact `issuePath`); `firstIssuePath`; VC-604 per-preset full all-AI game. |
 | `tests/unit/state/types.test-d.ts` | `Assert<Equals<z.infer<typeof ScoreBoardSchema>, ScoreBoard>>` (D-005). |
-| `src/state/game-state-manager.ts` | `GameStateManager`. Module-private: `Tip`, `encodeJson`, `serializeMeta`, `serializeCommit`, `bytesEqual`, `jsonEqual`. Private methods: `#findTip`, `#probeFrom`, `#existsCommit`, `#listedVersions`, `#readHint`, `#readCommit`, `#createOrMatch`, `#writeHead`. Imports `@/src/storage/object-store`, `./errors`, `./keys`, `./schemas`. |
+| `src/state/game-state-manager.ts` | `GameStateManager` (8 public methods). Module-private: `Tip`, `EVENTS_READ_CONCURRENCY`, `encodeJson`, `serializeMeta`, `serializeCommit`, `bytesEqual`, `jsonEqual`, `mapLimit`. Private methods: `#findTip`, `#probeFrom`, `#existsCommit`, `#listedVersions`, `#readHint`, `#readCommit`, `#createOrMatch`, `#writeHead`. Imports `@/src/domain/types` (types only), `@/src/storage/object-store`, `./errors`, `./keys`, `./schemas`. |
 | `tests/unit/state/support/store-wrappers.ts` | `RecordingStore`, `RecordedCall`, `StoreHooks`, `StoreMethod` (D-011). |
 | `tests/unit/state/support/fixtures.ts` | Ids, `makeMeta`, `makeInitial`, `makeCommitBody`, `toCommit`, `makeChain`, `storeGame` (D-011). |
 | `tests/unit/state/create.test.ts` | VC-601 (create/loadMeta/load/loadLatest, 0 calls), VC-605 (keys, order, modes, key order of stored docs), P-11 file-store round-trip, VC-606 (six reasons, 0 calls), VC-607 (five bullets), VC-608 (N = 1…4). |
+| `tests/unit/state/commit.test.ts` | VC-601 (commit, eventsSince, writeFinalScores, readFinalScores; 0 calls), VC-615 (+ stored bytes, six invalid bodies, v3 after tip 1, orphan), VC-616 (memory + file store, 20 rounds each), VC-617 (retry landed, differing body, null re-read), VC-618 (+ re-read error propagates). |
+| `tests/unit/state/events-final.test.ts` | VC-619 (all bullets; 0…40 with a delayed `get` hook: ≤ 8 and exactly 8 commit reads in flight), VC-614 (eventsSince part + a mismatched commit inside the range), VC-620 (+ stored key order, foreign-gameId `final.json`). |
+| `tests/unit/state/errors.test.ts` | VC-624: each of the six error classes provoked through the manager on a game with seed `SECRET-SEED-123` and hash `'ab'.repeat(32)`; `message`, `String(err)` and `reason` hold neither. |
+| `tests/unit/state/io-budget.test.ts` | VC-625 in full: `loadLatest` 5 calls, `eventsSince(g, 2)` 7 calls, `commit` v6 = exactly 2 puts. |
 | `tests/unit/state/load.test.ts` | VC-603 (loadMeta), VC-609, VC-610 (a)–(g) + net + corrupt hinted commit, VC-611 (+ multi-page list), VC-612, VC-613 (+ orphan, single read for v0), VC-614 (load, loadLatest), VC-625 (loadLatest = 5 calls). |
 
 ## Public interfaces
@@ -74,15 +78,25 @@ export class GameStateManager {
   loadMeta(gameId: string): Promise<GameMeta>;                    // GameNotFoundError, CorruptObjectError ('gameId')
   load(gameId: string, version: number): Promise<Commit>;         // RangeError, CommitNotFoundError, GameNotFoundError
   loadLatest(gameId: string): Promise<Commit>;                    // GameNotFoundError
-  // Iteration 3: commit, eventsSince, writeFinalScores, readFinalScores
+  commit(gameId: string, next: CommitBody): Promise<Commit>;      // InvalidCommitError, CommitConflictError; other storage errors propagate
+  eventsSince(gameId: string, version: number): Promise<GameEvent[]>; // RangeError, GameNotFoundError, CommitNotFoundError, CorruptObjectError
+  writeFinalScores(gameId: string, version: number, board: ScoreBoard): Promise<void>; // InvalidCommitError; storage errors swallowed
+  readFinalScores(gameId: string): Promise<FinalScores | null>;   // CorruptObjectError (schema, invalid-json, or 'gameId' mismatch)
 }
-// Private, for Iteration 3 to reuse (D-008, D-009, D-013):
+// Every method rejects with InvalidGameIdError before any I/O for a bad id. Matches spec Data &
+// Interfaces exactly; extra exports of the layer are only GAME_ID_PATTERN and firstIssuePath.
+// RangeError of eventsSince: `Invalid version <v>: version must be an integer >= 0`.
+// InvalidCommitError reasons: create → meta-schema:<p>, commit-schema:<p>, initial-version,
+// initial-state-version, state-game-id, seats-mismatch; commit → commit-schema:<p>,
+// commit-version, state-version, state-game-id; writeFinalScores → board-schema:<p>, final-version.
+// Module-private internals (D-008, D-009, D-013, D-015, D-016):
 //   interface Tip { version: number; commit: Commit }
 //   #findTip(gameId): Promise<Tip>              — FR-608 steps 1–3 (validates the id first)
 //   #probeFrom(gameId, start): Promise<Tip|null> — null iff commit `start` is missing
 //   #readCommit(gameId, v): Promise<Commit|null> — getJson + FR-610 identity checks
 //   #writeHead(gameId, v): Promise<void>         — putJson overwrite, errors swallowed
 //   #createOrMatch(gameId, key, bytes)           — create-only put; ObjectExistsError → raw re-read + bytesEqual, else GameExistsError
+//   mapLimit(items, limit, fn)                   — ≤ limit pending, order kept, first rejection wins, no new calls after it
 //   serializeCommit(commit): Uint8Array          — keys: schemaVersion, version, at, actorSeat, clientRequestId, events, state, scoreboard
 //   serializeMeta(meta): Uint8Array              — keys: schemaVersion, gameId, presetId, engineVersion, createdAt, seats, seatTokenHashes
 //   bytesEqual(a, b): boolean
@@ -126,7 +140,8 @@ Issue paths produced by the rules (what `getJson` puts in `CorruptObjectError.is
   - `grep -rnE "from '\.\./" src/state`
   - `grep -rniwE "ifMatch|lock|locking" src/state` (P-9: keep these words out of comments too)
   - `grep -rnE "mode: 'overwrite'" src/state` must match only `#writeHead` (VC-622).
-- **Manager**: every public method validates the gameId (and `load`'s version, via `commitKey`) before any I/O; methods are `async`, so validation errors arrive as rejections. Writes: create-only for everything but `head.json`; `head.json` writes are best-effort (`#writeHead`). Reads: commits via `#readCommit` only; the FR-605 re-read is a raw `store.get` + `bytesEqual`, never parsed. `loadLatest` never writes.
+- **Manager**: every public method validates the gameId first, then its other arguments, before any I/O; methods are `async`, so validation errors arrive as rejections. Writes: create-only for everything but `head.json` (`create` and `commit` both go through `#writeHead`, best-effort); `final.json` is `putJson` create-only with every error swallowed. Reads: commits via `#readCommit` only; the FR-605/FR-613 re-reads are a raw `store.get` + `bytesEqual`, never parsed. `loadLatest` and `eventsSince` never write. `commit` does not check game existence or tip + 1.
+- **Serialization** (D-017): stored meta/commit bytes = `JSON.stringify` of the caller's validated input with the top-level keys in the documented order; nested key order is the caller's. Returned documents are the Zod-parsed ones (equal content; nested key order may differ, e.g. scoreboard `live`/`ranking`).
 - **Validation first**: every builder validates the gameId before anything else (all compose through `gameKeyPrefix`).
 - **Schemas**: `z.strictObject` + `schemaVersion: z.literal(1)`; single-field rules on the field, cross-field rules in `.superRefine` (runs only when the shape parsed). Validate a `CommitBody` with `CommitSchema.safeParse({ schemaVersion: 1, ...next })` (there is no body schema). Timestamps must be exact `Date#toISOString` output.
 - **Errors**: messages carry only gameId / version / reason token (BR-604). `InvalidCommitError.reason` per D-002; never a Zod message.
@@ -141,10 +156,12 @@ All with `env -u BLOB_READ_WRITE_TOKEN -u BLOB_STORE_ID -u VERCEL_OIDC_TOKEN` pr
 
 | Command | What it does |
 |---|---|
-| `pnpm vitest run tests/unit/state` | State unit tests (≈ 0.5 s). |
+| `pnpm vitest run tests/unit/state` | State unit tests (8 files, 189 tests, ≈ 2 s). |
+| `pnpm vitest run tests/unit/state --reporter json --outputFile <scratch>/state.json` | Per-file durations (NFR-604 proxy). Without `--outputFile` the JSON reporter writes `.vitest/json/output.json`, which breaks `prettier --check`: delete it. |
 | `pnpm vitest run tests/unit/state/keys.test.ts` | Keys only (30 tests). |
 | `pnpm vitest run tests/unit/state/schemas.test.ts` | Schemas + VC-604 (45 tests). |
 | `pnpm vitest run tests/unit/state/create.test.ts tests/unit/state/load.test.ts` | Manager create/load (56 tests). |
+| `pnpm vitest run tests/unit/state/{commit,events-final,errors,io-budget}.test.ts` | Manager commit/events/final/errors/budgets (58 tests). |
 | `pnpm typecheck` | `next typegen && tsc --noEmit`; also checks `tests/unit/state/types.test-d.ts`. |
 | `pnpm lint` | ESLint 0 warnings + `prettier --check .`. |
 | `pnpm test` | Full unit/contract suite (Blob contract skipped without a token). |
@@ -152,7 +169,8 @@ All with `env -u BLOB_READ_WRITE_TOKEN -u BLOB_STORE_ID -u VERCEL_OIDC_TOKEN` pr
 
 ## Known gaps
 
-- `commit`, `eventsSince`, `writeFinalScores`, `readFinalScores` arrive in Iteration 3 (with VC-601 for those methods, VC-614's `eventsSince` part, VC-615–VC-620, VC-624, the rest of VC-625).
+- Docs not updated: `docs/architecture.md` §6.2, `docs/design.md` §7, `docs/development.md` "Game state" section, `docs/implementation.md` Phase 1 task 6 (Iteration 4).
+- NFR-604: the CI "Test" step's `tests/unit/state` durations must be read after the push (local sum ≈ 2.3 s).
+- `pnpm test:sim` and `pnpm build` not run yet in this phase (Final Verification, Iteration 4).
 - `schemas.test.ts` keeps its own meta/commit fixture (not moved to `support/fixtures.ts`).
-- Docs not updated (Iteration 4).
-- NFR-604 CI timing to be read after the push.
+- Accepted limits (spec): a gap below the probe start goes unnoticed by `loadLatest`; an orphan `commit` is written but never loaded; `final.json` may be missing (best-effort cache).

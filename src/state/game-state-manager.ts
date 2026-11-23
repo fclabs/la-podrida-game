@@ -5,7 +5,9 @@ import {
   putJson,
   type ObjectStore,
 } from '@/src/storage/object-store';
+import type { GameEvent, ScoreBoard } from '@/src/domain/types';
 import {
+  CommitConflictError,
   CommitNotFoundError,
   GameExistsError,
   GameNotFoundError,
@@ -15,6 +17,7 @@ import {
   assertValidGameId,
   commitKey,
   commitsPrefix,
+  finalScoresKey,
   headKey,
   indexCreatedKey,
   MAX_COMMIT_VERSION,
@@ -23,17 +26,21 @@ import {
 } from './keys';
 import {
   CommitSchema,
+  FinalScoresSchema,
   firstIssuePath,
   GameMetaSchema,
   HeadSchema,
+  ScoreBoardSchema,
   type Commit,
   type CommitBody,
+  type FinalScores,
   type GameMeta,
 } from './schemas';
 
 /*
  * The Game State Manager (architecture §6.2–§6.5): creates games in a fixed write order, loads
- * meta, any version and the tip, over any `ObjectStore`. Commits are the truth; `head.json` is
+ * meta, any version and the tip, appends commits, reads missed events and keeps the final scores,
+ * over any `ObjectStore`. Commits are the truth; `head.json` is
  * only a hint, so the tip is found by probing forward from it. Create-only writes are the only
  * ordering guard, and a create-only write that finds identical bytes (a retried write of our own)
  * counts as success.
@@ -45,12 +52,21 @@ interface Tip {
   commit: Commit;
 }
 
+/** The most commit reads `eventsSince` keeps in flight at once. */
+const EVENTS_READ_CONCURRENCY = 8;
+
 const encoder = new TextEncoder();
 
 /** Encodes a JSON document as UTF-8 bytes, once, so the same bytes are written and compared. */
 function encodeJson(value: unknown): Uint8Array {
   return encoder.encode(JSON.stringify(value));
 }
+
+/*
+ * Serialization: the top-level keys follow the documented order; nested values are the caller's
+ * validated input as given (`JSON.stringify` keeps their key order), so the stored bytes equal
+ * `JSON.stringify` of the caller's document with its top-level keys in the documented order.
+ */
 
 /** `meta.json` bytes, keys in the documented order. */
 function serializeMeta(meta: GameMeta): Uint8Array {
@@ -104,6 +120,34 @@ function jsonEqual(a: unknown, b: unknown): boolean {
   return leftKeys.every((k) => Object.hasOwn(right, k) && jsonEqual(left[k], right[k]));
 }
 
+/**
+ * Maps `items` through `fn` with at most `limit` calls pending at once. Results keep the order of
+ * `items`. Rejects with the first rejection and starts no further calls after it.
+ */
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let failed = false;
+  async function worker(): Promise<void> {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await fn(items[index]);
+      } catch (err) {
+        failed = true;
+        throw err;
+      }
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 export class GameStateManager {
   readonly #store: ObjectStore;
 
@@ -143,8 +187,12 @@ export class GameStateManager {
     } catch (err) {
       if (!(err instanceof ObjectExistsError)) throw err;
     }
-    await this.#createOrMatch(gameId, metaKey(gameId), serializeMeta(validMeta));
-    await this.#createOrMatch(gameId, commitKey(gameId, 0), serializeCommit(commit));
+    await this.#createOrMatch(gameId, metaKey(gameId), serializeMeta(meta));
+    await this.#createOrMatch(
+      gameId,
+      commitKey(gameId, 0),
+      serializeCommit({ schemaVersion: 1, ...initial }),
+    );
     await this.#writeHead(gameId, 0);
     return commit;
   }
@@ -182,6 +230,105 @@ export class GameStateManager {
   async loadLatest(gameId: string): Promise<Commit> {
     const tip = await this.#findTip(gameId);
     return tip.commit;
+  }
+
+  /**
+   * Appends commit `next.version` with a create-only write, then sets `head.json` (best-effort).
+   * Does not check that the game exists or that `next.version` is the tip + 1: the create-only
+   * write is the only ordering guard. When the commit key already holds identical bytes (our own
+   * retried write landed), it counts as success; different or vanished bytes reject with
+   * `CommitConflictError`. Other storage errors propagate.
+   */
+  async commit(gameId: string, next: CommitBody): Promise<Commit> {
+    assertValidGameId(gameId);
+    const parsed = CommitSchema.safeParse({ schemaVersion: 1, ...next });
+    if (!parsed.success) {
+      throw new InvalidCommitError(`commit-schema:${firstIssuePath(parsed.error)}`);
+    }
+    const commit = parsed.data;
+    if (commit.version < 1) throw new InvalidCommitError('commit-version');
+    if (commit.state.version !== commit.version) throw new InvalidCommitError('state-version');
+    if (commit.state.gameId !== gameId) throw new InvalidCommitError('state-game-id');
+
+    const key = commitKey(gameId, commit.version);
+    const bytes = serializeCommit({ schemaVersion: 1, ...next });
+    try {
+      await this.#store.put(key, bytes, { mode: 'create-only', contentType: 'application/json' });
+    } catch (err) {
+      if (!(err instanceof ObjectExistsError)) throw err;
+      const stored = await this.#store.get(key);
+      if (stored === null || !bytesEqual(stored.body, bytes)) {
+        throw new CommitConflictError(gameId, commit.version);
+      }
+    }
+    await this.#writeHead(gameId, commit.version);
+    return commit;
+  }
+
+  /**
+   * The events of commits `version + 1 … tip`, concatenated in version order; `[]` when `version`
+   * is at or past the tip. Reads at most `EVENTS_READ_CONCURRENCY` commits at once.
+   * `CommitNotFoundError` when a commit in that range is missing.
+   */
+  async eventsSince(gameId: string, version: number): Promise<GameEvent[]> {
+    assertValidGameId(gameId);
+    if (!Number.isInteger(version) || version < 0) {
+      throw new RangeError(`Invalid version ${version}: version must be an integer >= 0`);
+    }
+    const tip = await this.#findTip(gameId);
+    if (version >= tip.version) return [];
+    const missed: number[] = [];
+    for (let v = version + 1; v < tip.version; v++) missed.push(v);
+    const commits = await mapLimit(missed, EVENTS_READ_CONCURRENCY, async (v) => {
+      const commit = await this.#readCommit(gameId, v);
+      if (commit === null) throw new CommitNotFoundError(gameId, v);
+      return commit;
+    });
+    commits.push(tip.commit);
+    return commits.flatMap((commit) => commit.events);
+  }
+
+  /**
+   * Writes `final.json` from `board` (create-only), best-effort: every storage error, including
+   * an existing file, is swallowed. Invalid input rejects with `InvalidCommitError` before I/O.
+   */
+  async writeFinalScores(gameId: string, version: number, board: ScoreBoard): Promise<void> {
+    assertValidGameId(gameId);
+    const parsed = ScoreBoardSchema.safeParse(board);
+    if (!parsed.success) {
+      throw new InvalidCommitError(`board-schema:${firstIssuePath(parsed.error)}`);
+    }
+    if (!FinalScoresSchema.shape.version.safeParse(version).success) {
+      throw new InvalidCommitError('final-version');
+    }
+    const { ranking, totals, madeCount, missedCount } = parsed.data;
+    const document: FinalScores = {
+      schemaVersion: 1,
+      gameId,
+      version,
+      ranking,
+      totals,
+      madeCount,
+      missedCount,
+    };
+    try {
+      await putJson(this.#store, finalScoresKey(gameId), document, { mode: 'create-only' });
+    } catch {
+      // final.json is a cache of the terminal commit; the commit stays the truth.
+    }
+  }
+
+  /**
+   * The validated `final.json`, or `null` when it is missing. `CorruptObjectError` when it fails
+   * its schema or names another game.
+   */
+  async readFinalScores(gameId: string): Promise<FinalScores | null> {
+    const key = finalScoresKey(gameId);
+    const scores = await getJson(this.#store, key, FinalScoresSchema);
+    if (scores !== null && scores.gameId !== gameId) {
+      throw new CorruptObjectError(key, 'schema', 'gameId');
+    }
+    return scores;
   }
 
   /**
