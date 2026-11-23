@@ -1,8 +1,8 @@
 # CONTEXT — Players, Player View, AI Loop and Simulation (Phase 4)
 
-Last updated by: Iteration 4 (simulator CLI, `scripts/simulate.ts`). Next: Iteration 5 (docs: `docs/design.md` §8, `docs/development.md` §12).
+Last updated by: Iteration 5 (docs). **Phase 4 is complete**: every iteration (01–05) is committed. Remaining (orchestrator): the `SIM_SEEDS=2000` run (NFR-404), `verify-spec`, the push and PR with the branch CI run (VC-411 / VC-416 CI parts).
 
-**Protocol note (orchestrator):** the plan's parallel group A (Iterations 3–4) has been downgraded to sequential. Iterations 3 and 4 both used the full artifact protocol (rewrote this file, appended to `DECISIONS.md`, wrote their own records); no reconciliation commit is needed before Iteration 5 and no `D-?` placeholders exist.
+Protocol note: the plan's parallel group A (Iterations 3–4) ran sequentially with the full artifact protocol, so there was no reconciliation commit; `DECISIONS.md` holds D-001 to D-012 with no `D-?` placeholders.
 
 ## Current state
 
@@ -12,7 +12,7 @@ Last updated by: Iteration 4 (simulator CLI, `scripts/simulate.ts`). Next: Itera
 - **Iteration 2 shipped `src/service`**: `player-view.ts` (`buildPlayerView`), `ai-loop.ts` (`runAiLoop`, `AiLoopLimitError`, `AiLoopOptions`, `AiLoopResult`). `src/service/.gitkeep` is deleted.
 - **Iteration 3 shipped `tests/sim`**: `harness.ts`, `ledger.ts`, `ledger.sim.test.ts` and one `<presetId>.sim.test.ts` per preset; `tests/sim/.gitkeep` is deleted; `.github/workflows/ci.yml` runs `pnpm test:sim` (step "Simulation tests") right after "Test".
 - **Iteration 4 shipped `scripts/simulate.ts`** (`pnpm simulate`, FR-418/FR-419; see "Simulator CLI" below).
-- Not yet built: docs (Iteration 5).
+- **Iteration 5 shipped the docs**: `docs/design.md` §8 (8.1 Model — plain objects, no class diagram; 8.2 `randomStrategy`; 8.3 Strategy registry; 8.4 Building the player view; 8.5 The AI loop), plus wording fixes in §1.1 (goal 4, no "subclass") and §5.5 (`buildPlayerView` builds every view). `docs/development.md` §12 "Players, views and simulation" (12.1 module map … 12.8 gotchas) and §13 "Known limitations" (was §12); §2, §4, §7 (CI list + local command now include `pnpm test:sim`), §9.6, §10.4, §10.8, §11.4, §11.7 updated to point at §12. §1–§11 numbering unchanged (README links `#5-configuration`).
 - Tests: `tests/unit/players/` 3 files / 13 tests; `tests/unit/service/` 2 files / 24 tests; full `pnpm test` 34 files / 606 tests green. `pnpm test:sim` 5 files / 3,605 tests (18 combinations × 200 seeds + 5 ledger tests) green.
 - **Measured sim time**: default `pnpm test:sim` (S = 200) **45.9 s wall** (`/usr/bin/time -p`: real 45.94, user 172.09 s) on the dev machine; vitest "Duration 45.52s". `SIM_SEEDS=3` ≈ 2 s. The argentina-fidepo file dominates (3p games ≈ 60 ms of play + checks).
 - **Measured CLI time**: default `pnpm simulate` (argentina-fidepo, 3 players, 100 games) prints `duration: 5.6 s`; `/usr/bin/time -p pnpm --silent simulate` real 6.03 s. `--preset gamerules --players 4 --games 5 --seed t` ≈ 0.2 s.
@@ -44,6 +44,8 @@ Last updated by: Iteration 4 (simulator CLI, `scripts/simulate.ts`). Next: Itera
 | `.github/workflows/ci.yml` | CI: checkout, pnpm, node, install, typecheck, lint, test, **Simulation tests** (`pnpm test:sim`), build. |
 | `scripts/simulate.ts` | `pnpm simulate` CLI (FR-418, FR-419). Self-contained, no exports; private `UsageError`, `parseOptions`, `aiSeats` (P-4 recipe, re-created inline — `scripts/` never imports `tests/`), `oneDecimal`, `main`. Covered by `pnpm typecheck` (tsconfig `include` has `scripts/**/*.ts`), ESLint (`eslint .`, no layer rule outside `src/`/`app/`) and Prettier. |
 | `tests/unit/engine/helpers.ts` | `newGame`, `makeSeats`, `playGame`, `firstMove`, … — import only, **never modify**. |
+| `docs/design.md` §8 | Player model, `randomStrategy`, registry, `buildPlayerView`, `runAiLoop` (design-level contract). |
+| `docs/development.md` §12, §13 | Developer guide for players, the AI loop, `pnpm simulate`, `pnpm test:sim`, ledger and replay; Known limitations. |
 
 ## Public interfaces
 
@@ -173,7 +175,7 @@ Details:
 - **Tests**: `tests/unit/players/*.test.ts`, `tests/unit/service/*.test.ts` (collected by `pnpm test`); `tests/sim/*.sim.test.ts` (only `pnpm test:sim`; `tests/sim/*.ts` helpers without `.test.ts` are not collected). Sim test names are exactly `<presetId> <players>p seed <i>` (no `describe` wrapper); every sim file imports the harness, so an invalid `SIM_SEEDS` fails all of them at load (D-009). Header comment names the FRs/VCs; one `describe` per VC. Tests may use `deriveRng` from `@/src/engine/rng`. Stub views: `{ … } as unknown as PlayerView`. Stub strategies are wrapped with `createAiPlayer` and count their `choose` calls. Heavy deep-equality loops report via `if (bad) expect(detail).toBeNull()` to stay fast.
 - **Scripts** (`scripts/`): outside the layer rule; may use `process`, `performance`, `node:util`; must not import from `tests/` (re-create helpers such as the P-4 seat recipe inline). Errors go to stderr with a `simulate: ` prefix and `process.exitCode = 1` (no `process.exit`).
 - **Formatting**: Prettier formats `src/`, `tests/`, `scripts/`, config files; `docs/` and `specs/` are in `.prettierignore`. Run `pnpm exec prettier --write <paths>` before linting.
-- `docs/development.md` §1–§11 numbering is fixed until Iteration 5 (README links `#5-configuration`); Iteration 5 inserts "Players, views and simulation" as §12 and renumbers "Known limitations".
+- `docs/development.md` §1–§13 numbering is now fixed (README links `#5-configuration`); a new topic goes after §12 and "Known limitations" moves down, with every `§N` reference updated. Docs never reference specs, plans or artifact directories.
 - **Commits**: one per iteration, staged by explicit path (never `git add -A`); message ends with a blank line + `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never push, PR or merge.
 
 ## Commands
@@ -199,7 +201,20 @@ pnpm prints an "Unsupported engine" WARN locally (Node 26 vs declared 24) and "I
 - `createPlayers` trusts `seats` order and seat numbers; validation of players vs. state is `runAiLoop`'s job (FR-410, implemented).
 - `runAiLoop` does not validate `maxMoves` (a negative/NaN value just means "throw at the first AI decision" / "never cap"); callers pass the default or a positive integer.
 - `randomStrategy.choose` on an empty `moves` throws the engine Rng's `RangeError` (`int(0, -1): min must not exceed max`); the engine never offers an empty list to an actor, so there is no extra guard (FR-403 says "non-empty").
-- Docs not updated (Iteration 5).
+- `README.md` line 34 still describes `pnpm simulate` as "a stub for now" — README was outside Iteration 5's Touches; fix it in the next change that touches the README.
+- `docs/implementation.md` still names the strategy `RandomStrategy` (Phase 4 step list); it is a historical build plan, left unchanged.
 - The CLI's runtime-error path (`game <prefix>-<i> failed`) has no automated test; it was checked once by hand with a scratch copy using `maxMoves: 10` (see `iterations/04-simulate-cli.md`). The CLI has no `--help` and no `--strategy` (out of scope).
-- VC-411 / VC-416 CI parts (the branch CI run and its "Simulation tests" duration < 10 min) and VC-413's `SIM_SEEDS=2000` run are pending: the orchestrator does them before/at the PR.
+- VC-411 / VC-416 CI parts (the branch CI run and its "Simulation tests" duration < 10 min) and VC-413's `SIM_SEEDS=2000` run are pending: the orchestrator does them before/at the PR (local S = 200 run in Iteration 5: real 45.54 s, 3,605 tests).
 - The sim keeps every step's state of a game in memory (≈ 1,000 states for argentina 3p) for replay; fine at current sizes.
+
+## Hand-off to Phase 5+
+
+What `GameService` (Phase 7) and later phases need from Phase 4:
+
+- **Players per request.** Build players from the stored state with `createPlayers(state.seats)` (`@/src/players/registry`). It throws `UnknownStrategyError` for an unknown `seats[i].strategy`; an AI seat without a strategy plays `random`. Players are cheap plain objects; rebuild them per request, never persist them.
+- **AI loop.** Call `runAiLoop(state, players)` (`@/src/service/ai-loop`) right after `createGame` (the first bidders may be AIs) and after applying each human move. It stops when a human must act (`currentActor` is a human seat) or at game over. Persist `result.state`; the commit's events are the human move's transition events followed by `result.events` (at creation: `createGame`'s events followed by `result.events`, since `runAiLoop` never includes `createGame`'s own). Use `onTransition` if per-move hooks are needed (e.g. logging); it receives `(prev, transition)` in engine order.
+- **Errors.** `AiLoopLimitError` (`moves`, `state`; default cap 1000, longest real game 981) means a bug: do not commit, log it and return a server error. `RangeError` from `runAiLoop` means players and seats disagree (also a bug). `IllegalMoveError` from inside the loop means a strategy returned an illegal id (bug). Validate the human's own move with `applyMove` before the loop; its `IllegalMoveError` is the client's fault (map to 4xx).
+- **Views.** Build every response view with `buildPlayerView(state, seat)` (`@/src/service/player-view`), or `'spectator'`; never compose `tableViewFor` + `evaluate` by hand. `finalRanking` is present only at game over. `PlayerUpdate` assembly (`version`, events since the client's version, `legalMoves(state, seat)`) is still to be written.
+- **Seeds.** The seed comes from the service (`crypto.randomBytes(32)` on the server, design §9); the core never generates one, and clients never choose one. Strategies only draw from `aiRng(state, seat)`, so stored games replay from seed + `bid-made`/`card-played` events without any player (`tests/sim/harness.ts` `replay` is the reference).
+- **Layering.** `player-view.ts` and `ai-loop.ts` must stay pure (BR-404 grep), even though the ESLint layer rule lets `src/service` import `state`/`storage`/`config`; put `GameService` in its own file(s) in `src/service`.
+- **Simulation as a regression net.** Any engine, score or player change must keep `pnpm test:sim` green (CI step "Simulation tests", < 10 min; ~46 s locally); run `SIM_SEEDS=2000 pnpm test:sim` after engine changes. `pnpm --silent simulate …` gives quick batch statistics (random AI baseline: made-bid rate ≈ 11.1 % for argentina-fidepo 3p, 100 games).

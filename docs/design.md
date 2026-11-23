@@ -18,7 +18,7 @@ This document describes **what** the system does: its components and their respo
    - **Game Engine** — validates state changes, runs the game forward, lists legal moves per player.
    - **Game State Manager** — stores and loads state.
    - **Score Engine** — computes each player's score from the state and keeps the score history.
-   - **Player** (generic, human or AI), with an **AI Player** subclass. The first AI strategy picks uniformly at random from the legal moves.
+   - **Player** (generic, human or AI): one plain `Player` shape for both, where an AI player delegates to a named strategy. The first AI strategy picks uniformly at random from the legal moves.
 5. **Multi-user games later** without redesigning the core.
 
 ### 1.2 Non-goals for the MVP
@@ -398,7 +398,7 @@ interface PlayerView extends TableView {
 }
 ```
 
-`GameService` builds every `PlayerView` the same way: `{ ...engine.tableViewFor(state, seat), scoreboard: scoreEngine.evaluate(state), finalRanking }`. This applies both to HTTP responses and to each AI `DecisionContext` inside the AI loop. Per-seat totals are read from `scoreboard.totals`.
+Every `PlayerView` is built the same way, by `buildPlayerView` (§8.4): `{ ...engine.tableViewFor(state, seat), scoreboard: scoreEngine.evaluate(state) }`, plus `finalRanking` at game over. This applies both to HTTP responses and to each AI `DecisionContext` inside the AI loop. Per-seat totals are read from `scoreboard.totals`.
 
 The view **never** contains other seats' hands (apart from the publicly shown dealer trump card, §4.5), the stock, the seed, or any RNG state. It is the only way state leaves the server, for both humans and AIs.
 
@@ -512,40 +512,30 @@ Deals come from the deal RNG (§4.5), so they are reproduced exactly. Replay req
 
 ## 8. Players
 
+Players and strategies live in `src/players`, which is part of the pure core: it imports only `src/domain`, never the engine, the score engine or the service, and it never sees a `GameState`. Building a seat's view and running the AI turns are two small pure helpers in `src/service` (§8.4, §8.5), shared by `GameService` (§9), the command-line simulator and the simulation tests.
+
 ### 8.1 Model
 
-```mermaid
-classDiagram
-  class Player {
-    <<abstract>>
-    +seat: number
-    +name: string
-    +kind: 'human' | 'ai'
-    +requestDecision(ctx: DecisionContext) Decision
-  }
-  class HumanPlayer {
-    +requestDecision() → await
-  }
-  class AIPlayer {
-    +strategy: AIStrategy
-    +requestDecision(ctx) → move
-  }
-  class AIStrategy {
-    <<interface>>
-    +name: string
-    +choose(view, moves, rng) LegalMove
-  }
-  class RandomStrategy
-
-  Player <|-- HumanPlayer
-  Player <|-- AIPlayer
-  AIPlayer o-- AIStrategy
-  AIStrategy <|.. RandomStrategy
-```
+Players and strategies are **plain objects built by factory functions**, not classes. The only class in `src/players` is the error `UnknownStrategyError` (an `Error` subclass, so callers can use `instanceof`).
 
 ```ts
+interface Player {
+  seat: number;
+  name: string;
+  kind: 'human' | 'ai';
+  requestDecision(ctx: DecisionContext): Decision;
+}
+
+interface AIStrategy {
+  name: string;
+  choose(view: PlayerView, moves: LegalMove[], rng: Rng): LegalMove;
+}
+
+createHumanPlayer(seat: number, name: string): Player                       // kind 'human'
+createAiPlayer(seat: number, name: string, strategy: AIStrategy): Player     // kind 'ai'
+
 interface DecisionContext {
-  view: PlayerView;            // the same restricted view a human sees (composed by GameService)
+  view: PlayerView;            // the same restricted view a human sees (built by buildPlayerView, §8.4)
   legalMoves: LegalMove[];
   rng: Rng;                    // the AI stream for this decision (§4.5); never the deal stream
 }
@@ -554,23 +544,67 @@ type Decision = { type: 'move'; moveId: string } | { type: 'await' };
 interface PlayerUpdate { version: number; events: GameEvent[]; view: PlayerView; legalMoves: LegalMove[] }
 ```
 
-- `AIPlayer` returns `{ type: 'move' }` right away.
-- `HumanPlayer` returns `{ type: 'await' }`. The orchestrator saves and stops; the human's answer arrives in a later request and goes through the same `applyMove`.
+- **AI player.** `requestDecision(ctx)` asks its strategy right away and returns `{ type: 'move', moveId: strategy.choose(ctx.view, ctx.legalMoves, ctx.rng).id }`.
+- **Human player.** `requestDecision` always returns `{ type: 'await' }`. The orchestrator saves and stops; the human's answer arrives in a later request and goes through the same `applyMove`.
 
-Humans and AIs therefore go through the same `legalMoves` → choose → `applyMove` path and are validated identically. AIs see only the `PlayerView`; no strategy may read hidden state.
+Humans and AIs therefore go through the same `legalMoves` → choose → `applyMove` path and are validated identically. A strategy receives only the `DecisionContext`; no strategy can read hidden state, because the player layer never receives the game state at all.
 
-### 8.2 `RandomStrategy` (first AI)
+### 8.2 `randomStrategy` (first AI)
 
 ```ts
-class RandomStrategy implements AIStrategy {
-  name = 'random';
-  choose(_view, moves, rng) { return moves[rng.int(0, moves.length - 1)]; }
-}
+const randomStrategy: AIStrategy = {
+  name: 'random',
+  choose: (_view, moves, rng) => moves[rng.int(0, moves.length - 1)],
+};
 ```
 
-- Chooses uniformly from **all** legal moves (bids and card plays).
+- Chooses uniformly from **all** legal moves (bids and card plays alike), with exactly one draw per decision. It never reads the view.
 - Uses the AI random stream, so its choices are deterministic for a given seed and never affect the cards dealt.
-- Future strategies (`heuristic`, `monte-carlo`, …) implement the same interface and are picked per seat by name (`seats[i].strategy`) through a registry.
+
+### 8.3 Strategy registry
+
+Strategies are picked per seat by name (`seats[i].strategy`) through a registry:
+
+```ts
+STRATEGY_NAMES: readonly string[]                       // ['random']
+getStrategy(name: string | undefined): AIStrategy       // 'random' → randomStrategy; undefined or '' → randomStrategy
+class UnknownStrategyError extends Error                // any other name; the message contains the name
+createPlayers(seats: readonly SeatInfo[]): Player[]     // one player per seat, in seat order
+```
+
+`createPlayers` builds `createHumanPlayer(seat, name)` for a `human` seat and `createAiPlayer(seat, name, getStrategy(strategy))` for an `ai` seat, so an AI seat without a strategy plays `random` and an unknown strategy name throws `UnknownStrategyError`. Names such as `'constructor'` are unknown too: the registry is a `Map`, not an object. Future strategies (`heuristic`, `monte-carlo`, …) implement `AIStrategy` and are added to the registry; nothing else changes.
+
+### 8.4 Building the player view
+
+```ts
+buildPlayerView(state: GameState, seat: number | 'spectator'): PlayerView
+```
+
+`buildPlayerView` is the **only** place a `PlayerView` is built (§5.5): it returns `{ ...tableViewFor(state, seat), scoreboard: evaluate(state) }`, and adds `finalRanking = scoreboard.ranking` only when the phase is `game-over`. Before that the view has no `finalRanking` property at all (not one set to `undefined`). The view contains no card held in another seat's hand except the publicly shown trump card, and never the seed, the rules or `aiDecisionCount`. A seat outside `0 … N − 1` throws `RangeError`. The same function builds the view for HTTP responses and for every AI decision.
+
+### 8.5 The AI loop
+
+```ts
+runAiLoop(state: GameState, players: readonly Player[], options?: AiLoopOptions): AiLoopResult
+
+interface AiLoopOptions {
+  maxMoves?: number;                                              // default 1000
+  onTransition?: (prev: GameState, transition: Transition) => void;
+}
+interface AiLoopResult { state: GameState; events: GameEvent[]; moves: number }
+class AiLoopLimitError extends Error { readonly moves: number; readonly state: GameState }
+```
+
+`runAiLoop` plays turns until a human must act or the game ends:
+
+1. **Check the players first.** `players.length` must equal the number of seats, and for every `i`, `players[i].seat === i` and `players[i].kind === state.seats[i].kind`. Otherwise it throws `RangeError` naming the length mismatch or the seat, before any decision is requested or move applied.
+2. **Loop.** `seat = currentActor(state)`; stop if it is `null` (game over). Build `ctx = { view: buildPlayerView(state, seat), legalMoves: legalMoves(state, seat), rng: aiRng(state, seat) }` and call `players[seat].requestDecision(ctx)`. Stop on `{ type: 'await' }`; otherwise `applyMove(state, seat, moveId)`.
+3. **Observe each move.** After each applied move, `onTransition(prev, transition)` is called with the state before the move and the engine's `Transition`, before the next decision. An exception it throws propagates out of `runAiLoop` (the move it was called for has already been applied).
+4. **Result.** `{ state, events, moves }`: the final state, the events of every applied move in engine order, and the number of moves applied. `createGame`'s own events are not included.
+5. **Safety cap.** When `maxMoves` moves (default `1000`) have been applied and the current actor is still an AI seat, the loop throws `AiLoopLimitError` with `moves` and the `state` reached instead of asking for another decision. A human to act or a finished game at the cap ends the loop normally. The longest game (`argentina-fidepo`, 3 players, 981 moves) fits under the default cap, so an all-AI game is played to the end in one call.
+6. **Illegal choices.** A strategy that returns a move id that is not legal makes `applyMove` throw `IllegalMoveError`, which propagates unchanged.
+
+`runAiLoop` never mutates its input and uses no clock, storage or ambient randomness: every AI draw comes from `aiRng`, so the same state and players always give the same result.
 
 ---
 
