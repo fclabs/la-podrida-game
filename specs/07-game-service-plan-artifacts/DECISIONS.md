@@ -111,3 +111,10 @@
 - **Decision**: a card is any object whose keys are exactly `rank` and `suit` (the strict `CardSchema` shape), found by a recursive walk that records the property path. Errors serialize as `{ ...err, name, message }` (own fields first so TypeScript accepts the override). The test also asserts that cards were found (non-vacuous) and that the seat token appears only in `createGame` results.
 - **Rejected**: string-matching card ids in the JSON (ids like `"QH"` could collide with other text).
 - **Consequences**: test-only.
+
+## D-017: Documentation choices for the shipped service  (Iteration 4)
+
+- **Context**: FR-725 and Iteration 4 ask for docs organised by reader need; three points were open: how to show the Phase 8 status mapping without deciding it, what to do with `implementation.md` Phase 8's "`?since` ahead → 400" (it contradicts FR-711's `[]`), and how to run the doc examples "verbatim".
+- **Decision**: `development.md` §15.7 gives the mapping as "intended" plus a compiled sketch (`toHttpStatus`) in which `GameUnsupported` → 410 `game_unsupported` is labelled a proposal; `architecture.md` §7's table is left for Phase 8 (§10 says the row is not there yet). Phase 8's `since` line is left untouched (Phase 7 lines only) and flagged in `CONTEXT.md` hand-off. The temporary `doc-example.test.ts` lifts and dedupes the examples' imports, pastes each example body verbatim into `it` blocks (the mock example's `vi.mock` part at module level), and adds assertions for the examples' comments.
+- **Rejected**: adding a `GameUnsupported` row to `architecture.md` §7 (decides Phase 8's status); rewriting Phase 8's `since` rule (out of Touches' "Phase 7 only").
+- **Consequences**: Phase 8 must choose the `GameUnsupported` status and the `since > tip` behaviour.

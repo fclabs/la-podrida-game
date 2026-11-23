@@ -2,7 +2,7 @@
 
 La Podrida is a trick-taking card game, the Hispanic version of _Oh Hell!_, in which each player must predict exactly how many tricks they will take. This project lets you play it in the browser: one human against 2–5 AI players. The backend is authoritative: it holds the game state, computes each player's legal moves and accepts the player's choice, while the browser only renders the view it gets and sends back the chosen move. Every state change is persisted, so a game can be resumed, audited and replayed.
 
-The repository currently holds the project foundation (Next.js app, test runner, lint-enforced architecture rules, validated configuration and CI). The game itself is built on top of it in later phases.
+The repository currently holds the project foundation (Next.js app, test runner, lint-enforced architecture rules, validated configuration and CI), the game core (rules engine, scoring, AI players and simulator), persistence and the game service that ties them together. The HTTP API and the browser UI are built on top of it in later phases.
 
 ## Prerequisites
 

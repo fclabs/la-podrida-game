@@ -113,7 +113,7 @@ src/
   players/     player.ts, human-player.ts, ai-player.ts, strategies/random.ts, registry.ts
   state/       game-state-manager.ts, keys.ts, schemas.ts, errors.ts
   storage/     object-store.ts, memory-store.ts, file-store.ts, vercel-blob-store.ts, index.ts (factory)
-  service/     game-service.ts, errors.ts
+  service/     game-service.ts, errors.ts, replay.ts, player-view.ts, ai-loop.ts
   config.ts    env parsing (validated with Zod at startup)
 tests/
   unit/  contract/  sim/  api/
@@ -160,7 +160,7 @@ sequenceDiagram
 - The AI loop is pure CPU (well under 1 ms per move). A safety cap (1,000 moves per request) catches engine bugs.
 - `createGame` runs the same loop right after the first deal, because the first bidders may be AIs.
 - The browser replays the returned `events` as animations, then renders the new view.
-- I/O per move request in the normal case (`head.json` exact), in three rounds: (1) 1 `meta.json` read (immutable, cacheable) in parallel with the existence checks of `meta.json` and commit 0 and 1 consistent `head.json` read; (2) 1 commit read in parallel with 1 consistent probe for the next commit; (3) 1 commit write, then 1 `head.json` write. The latency target must be measured in preview for cold, warm and stale-hint paths (open question 1).
+- I/O per move request in the normal case (`head.json` exact), in three rounds: (1) 1 `meta.json` read (immutable, cacheable) in parallel with the existence checks of `meta.json` and commit 0 and 1 consistent `head.json` read; (2) 1 commit read in parallel with 1 consistent probe for the next commit; (3) 1 commit write, then 1 `head.json` write. That is 8 store calls, plus 1 `final.json` write on the move that ends the game. A `GET` without `?since` costs rounds (1) and (2) only (6 calls); each commit strictly between `since` (or a stale `version`) and the tip adds one commit read (2 calls). A stale `version` also adds the read of commit `version + 1` for the retry check. The latency target must be measured in preview for cold, warm and stale-hint paths (open question 1).
 
 ---
 
@@ -270,7 +270,7 @@ Vercel Blob has no transactions. It does support ETag-conditional writes (`put` 
 2. **Immutable data is safe to cache.** Commits and `meta.json` never change after they are written.
 3. **Finding the tip.** Read `head.json` with a consistent read for a hint `h`, then probe commit `h+1`, `h+2`, … with consistent reads until one is missing. Because `head.json` is rewritten after every commit, the hint is normally exact or one behind. If `head.json` is missing or unreadable, or the hinted commit does not exist (hint ahead of reality), use `list(prefix)` as a hint only and confirm by probing forward from the highest listed key that exists; if nothing usable is listed, probe from commit 0. `head.json` is updated best-effort after each commit with a plain overwrite. An `ifMatch` write would keep it from ever moving backwards, but the `ObjectStore` interface does not offer `ifMatch` (§6.1); without it a hint can briefly move backwards, which only costs extra probes. A stale tip can only cause a create-only collision (409), never a lost update.
 4. **Client-declared version.** Each move request carries the `version` the client saw. A mismatch returns 409 with the current update, so moves are never applied to a view the player didn't see. After a create-only collision on `v+1`, the server knows `v+1` exists, so it loads forward from `v+1` with consistent reads before building the 409 body. That way the 409 never carries a stale update.
-5. **Idempotent retries.** Each move carries a `clientRequestId`. The server compares it, together with the authenticated seat, against commit `req.version + 1`, not the tip. It does this both when the version is stale and after a create-only collision. On a match it returns that commit's result for this seat instead of 409 (design §9 step 3). This covers a retry after a lost response, a retry after later commits landed, and two concurrent copies of the same request.
+5. **Idempotent retries.** Each move carries a `clientRequestId`. The server compares it, together with the authenticated seat, against commit `req.version + 1`, not the tip. It does this both when the version is stale and after a create-only collision. On a match it returns that commit's result for this seat instead of 409 (design §9 step 2). This covers a retry after a lost response, a retry after later commits landed, and two concurrent copies of the same request.
 
 ### 6.4 Schema versioning
 
@@ -357,8 +357,8 @@ Parsed and validated once in `src/config.ts`.
 ## 10. Observability and error handling
 
 - **Logging:** one structured JSON line per request via `console.log`, visible in Vercel's function logs: `{ route, gameId, seat, fromVersion, toVersion, aiMoves, status, durationMs, errorCode }`. Never log seat tokens or hands.
-- **Errors:** domain errors (`VersionConflict`, `IllegalMove`, `NotYourTurn`, `Unauthorized`, `GameNotFound`) are typed in `service/errors.ts` and mapped to HTTP in one place. Unexpected errors return 500 and are logged with a stack trace.
-- **Debugging a game:** commits are immutable and contain the seed-derived state, so any game can be loaded locally and replayed with `scripts/simulate.ts` or a test.
+- **Errors:** the seven service errors (`InvalidRequest`, `Unauthorized`, `GameNotFound`, `GameUnsupported`, `NotYourTurn`, `IllegalMove`, `VersionConflict`, design §9) are typed in `service/errors.ts` and mapped to HTTP in one place (§7; `GameUnsupported`, a game stored by another engine version, has no row there yet: the proposal is 410). Their messages and fields never hold a seed, a seat token, a token hash or a hand, so they are safe to send. Every other error is **server-only**: engine, state and storage errors, and `AiLoopLimitError`, which carries the full game state including every hand and the seed. These are logged with a stack trace, answered with `500 internal`, and never serialized into a response.
+- **Debugging a game:** commits are immutable and contain the seed-derived state, so any game can be loaded locally and rebuilt from its seed and move events with `replayGame` (`src/service/replay.ts`, design §9) in a script or a test.
 - No metrics or tracing stack in the MVP; Vercel's built-in function analytics are enough.
 
 ---

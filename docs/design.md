@@ -512,7 +512,7 @@ If two requests try to create the same version, exactly one wins; the other gets
 1. Call `createGame` with the stored `seed`, rules and seats.
 2. Apply every `bid-made` and `card-played` event, in commit order and starting with commit 0, as a move via `applyMove`.
 
-Deals come from the deal RNG (§4.5), so they are reproduced exactly. Replay requires the same `engineVersion` that is stored in the game metadata (`architecture.md` §6.2).
+Deals come from the deal RNG (§4.5), so they are reproduced exactly. Replay requires the same `engineVersion` that is stored in the game metadata (`architecture.md` §6.2). `replayGame` (§9) implements this; the rules come from commit 0's stored state, and `createGame`'s own events are skipped because commit 0 already holds them.
 
 ---
 
@@ -616,33 +616,80 @@ class AiLoopLimitError extends Error { readonly moves: number; readonly state: G
 
 ## 9. GameService (orchestrator)
 
-The only place that combines the engine, scores, players and state manager.
+The only place that combines the engine, scores, players and state manager. It lives in `src/service/game-service.ts`, generates every secret (game id, seed, seat token), authenticates seats, applies the human's move, lets the AIs play until a human must act, and saves the result as **one** create-only commit. Usage, limits and tests: `development.md` §15.
 
 ```ts
+interface GameServiceDeps {
+  state: GameStateManager;                  // all I/O goes through it
+  defaultPresetId?: PresetId;               // default DEFAULT_PRESET_ID ('argentina-fidepo')
+  now?: () => Date;                         // default () => new Date()
+  randomBytes?: (n: number) => Uint8Array;  // default node:crypto randomBytes
+}
+
 class GameService {
+  constructor(deps: GameServiceDeps);       // stores deps; no I/O, does not read the app config
+
   createGame(req: { rulesPreset?: string; humanName: string; aiCount: number })
-    : Promise<{ gameId; seat; seatToken; update: PlayerUpdate }>;
+    : Promise<{ gameId: string; seat: number; seatToken: string; update: PlayerUpdate }>;
 
-  getUpdate(gameId, seatToken, sinceVersion?): Promise<PlayerUpdate>;
+  getUpdate(gameId: string, seatToken: string, sinceVersion?: number): Promise<PlayerUpdate>;
 
-  submitMove(gameId, seatToken, req: { version; moveId; clientRequestId })
-    : Promise<PlayerUpdate>;           // throws VersionConflict | IllegalMove | NotYourTurn | Unauthorized
+  submitMove(gameId: string, seatToken: string,
+             req: { version: number; moveId: string; clientRequestId: string })
+    : Promise<PlayerUpdate>;
 }
 ```
 
-`submitMove`:
+Every `PlayerUpdate` the service returns, including the one inside `VersionConflict`, is built the same way from one commit `c` for one seat `s`: `{ version: c.version, events, view: buildPlayerView(c.state, s), legalMoves: legalMoves(c.state, s) }` (§8.4). Only `events` differs from method to method.
 
-1. **Authenticate** the seat token against the game's metadata. This gives the requesting seat.
-2. Load the latest commit (the tip).
-3. **Retry check.** If `req.version` ≠ tip version, load commit `req.version + 1`. If its `clientRequestId` and `actorSeat` match this request, the move was already committed (for example, a retry after a lost response). Return that result projected for this seat. Otherwise return `VersionConflict` with the current update.
-4. Apply the human's move.
-5. **AI loop:** while the current actor is an AI, build its `PlayerView`, ask it for a decision and apply it (with a safety cap).
-6. Compute the scoreboard.
-7. Save commit `req.version + 1` (create-only). On `CommitConflictError`, do the retry check from step 3 against the commit that won: if it is this request, return its result, otherwise return 409.
-8. If the game is over, write `final.json` best-effort (§6.3).
-9. Return the requesting seat's `PlayerUpdate`, with events since `req.version`.
+**Errors.** The service throws seven typed errors (`src/service/errors.ts`). Each sets `name` to its class name and carries only the fields listed, never a seed, a seat token, a token hash or a hand:
 
-`createGame` generates a secret seed with a cryptographically secure RNG (`crypto.randomBytes(32)`), never accepts one from the client, and runs the same AI loop right after the first deal, because the first bidders may be AIs.
+| Error | Fields | When |
+|---|---|---|
+| `InvalidRequest` | `reason`: the field name | An argument fails validation, before any I/O. |
+| `GameNotFound` | `gameId` (first 64 characters) | The id is malformed, or `meta.json` or commit 0 is missing. |
+| `Unauthorized` | – | The seat token is empty or matches no seat. |
+| `GameUnsupported` | `gameId`, `engineVersion` | The game was stored by another `ENGINE_VERSION`. |
+| `NotYourTurn` | `seat` | Another seat must act. |
+| `IllegalMove` | `moveId`, `reason`: `'game-over'` \| `'unknown-move'` | The move is not legal now. |
+| `VersionConflict` | `update`: the current `PlayerUpdate` for this seat | `req.version` is not the current version and the request is not a retry of the move that made it. |
+
+Any other error (from the engine, the AI loop, the state manager or storage, e.g. `AiLoopLimitError`) propagates unchanged and is a server error (`architecture.md` §10).
+
+**`createGame`:**
+
+1. **Validate**, first failure wins: `humanName` is a string of 1–40 characters after trimming; `aiCount` is an integer 2–5; `rulesPreset`, when given, is a known preset id (absent → `defaultPresetId`); `aiCount + 1` is inside the preset's `players.min…max`. Failures → `InvalidRequest`.
+2. **Generate secrets** from `randomBytes`: `gameId` (16 bytes, 26 lowercase base32 characters), `seed` (32 bytes, 64 hex characters) and `seatToken` (32 bytes, 43 base64url characters). Only the token's SHA-256 is stored. Nothing of the three is ever accepted from the caller.
+3. **Seats:** the human at seat 0 (`human-0`, the trimmed name), then `ai-<i>` named `AI <i>`, playing `random`.
+4. **Play:** engine `createGame`, then the AI loop (§8.5), because the first bidders may be AIs.
+5. **Save** meta (with `engineVersion: ENGINE_VERSION`) and commit 0 with `state.create`. Return `{ gameId, seat: 0, seatToken, update }`, where `update.events` are commit 0's events.
+
+**Loading and authentication** (`getUpdate` and `submitMove`):
+
+1. Validate before any I/O: a malformed `gameId` → `GameNotFound`; an empty or non-string token → `Unauthorized`; then the method's own arguments → `InvalidRequest`.
+2. Load `meta.json` and the tip in parallel. A missing game → `GameNotFound`.
+3. **Authenticate:** hash the token and compare it, in constant time, with **every** non-null `seatTokenHashes` entry, whatever the outcome. The matching index is the seat; no match → `Unauthorized`.
+4. **Engine version:** `meta.engineVersion !== ENGINE_VERSION` → `GameUnsupported`. Nothing is applied or written. Such a game stays unplayable until retention deletes it (`architecture.md` §6.4).
+
+`getUpdate` returns the tip for the seat. Without `sinceVersion`, `events` is `[]`. With it (an integer from 0 to `MAX_COMMIT_VERSION`, else `InvalidRequest`), `events` are the **missed events** from `sinceVersion` to the tip.
+
+**Missed events** from a version `a` to an already loaded tip `t` are the events of commits `a + 1 … t.version` in order: `[]` when `a ≥ t.version`, otherwise commits `a + 1 … t.version − 1` read one by one (at most 8 at a time) plus the tip's own events. The service never re-reads the tip for this, so the events always end **exactly** at `update.version`, even if another commit lands meanwhile.
+
+**`submitMove`:**
+
+1. **Validate** (`version` an integer from 0 to `MAX_COMMIT_VERSION − 1`, `moveId` 1–32 characters, `clientRequestId` 1–128 characters), **load and authenticate** as above. This gives the tip `t` and the requesting seat.
+2. **Retry check** when `req.version ≠ t.version`. If `req.version < t.version`, load commit `req.version + 1`. If its `clientRequestId` equals the request's **and** its `actorSeat` is this seat, the move was already committed (a retry after a lost response, possibly after later commits): return that commit's update with that commit's events, and write nothing. Otherwise (no match, or `req.version` ahead of the tip) throw `VersionConflict` with the tip's update and the missed events from `req.version`.
+3. **Apply the human's move** with `applyMove`. The engine's `not-your-turn` → `NotYourTurn`; `game-over` or `unknown-move` → `IllegalMove`. Nothing is written.
+4. **AI loop** (§8.5) with players rebuilt from the stored `state.seats`. Rules and hand plan come from the stored state, never from the preset registry, so preset changes never affect a game in progress.
+5. **Score:** `scoreboard = evaluate(state)` on the final state, with `state.version = req.version + 1`.
+6. **Commit** `req.version + 1` with `state.commit` (create-only): `actorSeat` is the seat, `clientRequestId` the request's, and `events` the human move's events followed by the AIs'.
+7. **Commit race.** On `CommitConflictError`, another request won `req.version + 1`. Load that commit and apply the step 2 test: if it is this request (two copies of one request raced), return its update with its events. Otherwise (including when the commit cannot be found) reload the tip and throw `VersionConflict` with the missed events from `req.version`. Because the winner exists, the reloaded tip is at least `req.version + 1`, even while `head.json` still names `req.version`; so a 409 body is never stale. If that reload finds the game gone, the answer is `GameNotFound`. Any other commit error propagates; the service never retries a commit.
+8. **Final scores.** If the committed state is `game-over`, await `writeFinalScores` (best-effort, §6.3). A matched retry does not write it.
+9. **Return** the committed update for this seat with the commit's events. `view.finalRanking` is present only at game over.
+
+Each `createGame` writes exactly one game, and each `submitMove` at most one commit.
+
+**Replay.** `replayGame(meta, commits)` in `src/service/replay.ts` rebuilds a stored game from its seed and move events as described in §7. It is pure and synchronous, throws `RangeError` unless the commits are exactly versions `0 … n`, throws `GameUnsupported` on an `engineVersion` mismatch, and returns one `GameState` per commit.
 
 ---
 
