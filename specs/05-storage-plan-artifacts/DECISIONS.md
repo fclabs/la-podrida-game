@@ -36,3 +36,28 @@
 **Context**: VC-507 requires proof that at least one `get` is issued before the put settles.
 **Decision**: start `put` without awaiting, attach `.finally(() => settled = true)`, then loop `get` in a `do … while (!settled)`, counting reads issued while `!settled`; assert the count ≥ 1 and zero bad reads. Bodies are 8 MiB filled with `0xa5` (old) / `0x5a` (new), compared with `Buffer.equals`. Test timeout 30 s.
 **Consequences**: the first `get` is always issued synchronously before the put's promise can settle, so the counter assertion holds on every driver.
+
+## D-009: File store temp files (P-4 applied)  (Iteration 2)
+**Context**: P-4 fixes the randomness source; FR-512 fixes the temp-file location.
+**Decision**: temp file = `<target folder>/.tmp-<randomUUID()>`, opened with flag `'wx'` (fails instead of reusing an existing file), written with `handle.writeFile`, `handle.sync()`, closed, then published. It is unlinked in a `finally` (ENOENT ignored), so it never survives success, `EEXIST` or an I/O error.
+**Consequences**: temp names start with `.`, so `list` never sees them; a crash can leave a stray `.tmp-*` that is harmless (hidden) and never cleaned up automatically.
+
+## D-010: Parent-folder fsync is best effort (P-5 applied)  (Iteration 2)
+**Context**: P-5 says to fsync the parent folder after `link`/`rename` and ignore an fsync error.
+**Decision**: `syncFolder(dir)` opens the folder read-only, `sync()`s and closes it, ignoring *any* error from open or sync (and from close). It runs only after a successful publish.
+**Rejected**: propagating an `open` error — the object is already published, so a rejection would make a successful create-only look like a failure.
+**Consequences**: durability where the OS supports folder fsync (macOS and Linux both accept it); no behavioural difference elsewhere.
+
+## D-011: What counts as "missing" on the file store  (Iteration 2)
+**Context**: FR-512 says a missing path or a folder counts as missing; it says nothing about a key whose parent path is a file.
+**Decision**: `get` → `null` on `ENOENT`, `ENOTDIR` or `EISDIR`; `exists` → `stat().isFile()`, `false` on `ENOENT`/`ENOTDIR`; `delete` ignores `ENOENT`/`ENOTDIR`. Other errors propagate. Unlinking a key that is a folder is unspecified (FR-512) and propagates the OS error.
+**Consequences**: reads and probes never throw for prefix-colliding keys, which the spec puts out of scope anyway.
+
+## D-012: File-store list walk  (Iteration 2)
+**Decision**: `list` validates with `checkListArgs` first, then walks recursively with `readdir({ withFileTypes: true })`, skipping names starting with `.`, keeping only regular files (symlinks and other types are ignored), and descending only into folders `d/` where `d/` starts with the prefix or the prefix starts with `d/`; then `pageKeys`. A missing root (or a folder vanishing mid-walk) lists nothing for that subtree.
+**Consequences**: every page re-walks the matching subtree (O(matching keys) per page); acceptable for local dev.
+
+## D-013: P-11 test writes its 1,001 files directly  (Iteration 2)
+**Context**: 1,001 `put`s with two fsyncs each took ~14 s on macOS APFS, slowing `pnpm test`.
+**Decision**: the P-11 unit test creates one key with `put` (which creates the folder) and writes the other 1,000 files with `fs.writeFile`; it then pages with the default limit (1000 + 1) as VC-508 requires.
+**Consequences**: the test exercises the listing/paging path on real files in ~0.1 s; `put` itself is covered by the contract run and the other VC-513 tests.

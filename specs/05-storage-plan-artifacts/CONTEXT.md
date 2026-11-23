@@ -1,14 +1,16 @@
 # CONTEXT — Storage (Phase 5)
 
-Last updated by: Iteration 1 (contract + memory). Next: Iteration 2 (file store).
+Last updated by: Iteration 2 (file store). Next: Iteration 3 (Vercel Blob driver + factory).
 
 ## Current state
 
 - Phases 0–4 are complete (`specs/00-…-frozen.md` to `specs/04-players-frozen.md`). Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (no `noUncheckedIndexedAccess`; target ES2022, so class fields are *defined* properties), pnpm 10.15.1, Node 24 declared (local Node may differ: pnpm prints an "Unsupported engine" WARN, not fatal), Vitest 5.1.1, ESLint 10 flat config + Prettier 3, zod 4.6.7, `@noble/hashes` 2.4.0, project-local layer-boundary lint rule, GitHub Actions CI (install, typecheck, lint, test, Simulation tests, build).
 - `dependencies` = `@noble/hashes, next, react, react-dom, zod` — `@vercel/blob@2.9.0` is added in Iteration 3, not before.
 - **Iteration 1 shipped** `src/storage/object-store.ts` (interface, errors, key/prefix validation, list helpers, `getJson`/`putJson`) and `src/storage/memory-store.ts` (`MemoryObjectStore`); the shared contract suite `tests/contract/object-store.contract.ts` and its memory run; unit tests in `tests/unit/storage/`. `src/storage/.gitkeep` and `tests/contract/.gitkeep` are deleted.
-- Not yet built: `file-store.ts` (Iteration 2), `vercel-blob-store.ts`, `index.ts` (`createObjectStore`), `tests/contract/prefixed-store.ts`, Blob contract file (Iteration 3), docs (Iteration 4). `src/state` still holds only `.gitkeep` (Phase 6).
-- Tests: `tests/unit/storage/` 3 files / 51 tests; `tests/contract/memory-store.contract.test.ts` 30 tests (~10 ms, the 8 MiB VC-507 test ~7 ms); full `pnpm test` 38 files / 687 tests green.
+- **Iteration 2 shipped** `src/storage/file-store.ts` (`FileObjectStore`, FR-512), its contract run `tests/contract/file-store.contract.test.ts` and `tests/unit/storage/file-store.test.ts` (VC-513, P-11).
+- Not yet built: `vercel-blob-store.ts`, `index.ts` (`createObjectStore`), `tests/contract/prefixed-store.ts`, Blob contract file (Iteration 3), docs (Iteration 4). `src/state` still holds only `.gitkeep` (Phase 6).
+- Tests: `tests/unit/storage/` 4 files / 63 tests; contract: memory 30 tests (~15 ms), file 30 tests (~950 ms; VC-507 8 MiB ~90 ms); full `pnpm test` 40 files / 729 tests green (~1.6 s wall).
+- NFR-503 local measure (Apple Silicon macOS, APFS): memory + file contract files ≈ 16 ms + 950 ms ≈ 1 s (budget 30 s; early-warning threshold 15 s).
 
 ## File map
 
@@ -16,8 +18,11 @@ Last updated by: Iteration 1 (contract + memory). Next: Iteration 2 (file store)
 |---|---|
 | `src/storage/object-store.ts` | Types `StoredObject`, `PutOptions`, `ListOptions`, `ListResult`, `ObjectStore`; `MAX_KEY_LENGTH` (512), `MAX_LIST_LIMIT` (1000); `ObjectExistsError`, `InvalidKeyError`, `CorruptObjectError`; `assertValidKey`, `assertValidPrefix`; list helpers `resolveListLimit`, `checkListArgs`, `pageKeys` (D-007); `putJson`, `getJson`. Private `KEY_SEGMENT` regex, `isValidKey`, `compareCodeUnits`. |
 | `src/storage/memory-store.ts` | `MemoryObjectStore` (FR-511): private `#objects: Map<string, Uint8Array>`. |
+| `src/storage/file-store.ts` | `FileObjectStore` (FR-512): private `#root` (`path.resolve(rootDir)`), `#pathOf(key)`, `#walk`; module helpers `errorCode`, `isMissing` (`ENOENT`/`ENOTDIR`), `unlinkIfPresent`, `syncFolder` (P-5, best effort). Imports `node:crypto`, `node:fs/promises`, `node:path`, `./object-store`. |
 | `tests/contract/object-store.contract.ts` | `runObjectStoreContract` + types `ContractStore`, `ContractOptions` (P-13). Not collected by vitest (no `.test.ts`). Covers driver parts of VC-501/502 and VC-503 to VC-511. |
 | `tests/contract/memory-store.contract.test.ts` | Calls the contract with a fresh `MemoryObjectStore` per test, `exactCursor: true`. |
+| `tests/contract/file-store.contract.test.ts` | Calls the contract with a fresh `FileObjectStore` on `fs.mkdtemp(os.tmpdir()/lp-store-)` per test, removed in `cleanup`; `exactCursor: true`. |
+| `tests/unit/storage/file-store.test.ts` | VC-513 (nothing created before first put, on-disk path, relative root, missing root, no `.tmp-` after race/sequence, hand-made `.tmp-zzz` hidden, folder `a` → null, hidden folders, key below a file → missing, delete only key), cross-folder code-unit order, P-11 1,001-key paging (files written directly). |
 | `tests/unit/storage/keys.test.ts` | VC-501/VC-502 tables, exact `InvalidKeyError` messages. |
 | `tests/unit/storage/json.test.ts` | P-1 `CorruptObjectError` messages (incl. root `(root)`), nested `issuePath`, schema output (transforms), `putJson` arguments and `TypeError` cases (undefined, function, symbol). |
 | `tests/unit/storage/memory-store.test.ts` | VC-512 copies (incl. subarray view), separate instances, VC-508 1,001-key default-limit paging, P-3 cursor rule + errors, P-2 validation order and "no synchronous throw". |
@@ -70,6 +75,15 @@ export function getJson<S extends z.ZodType>(store, key, schema: S): Promise<z.o
 
 // src/storage/memory-store.ts
 export class MemoryObjectStore implements ObjectStore { constructor() }
+
+// src/storage/file-store.ts
+export class FileObjectStore implements ObjectStore { constructor(rootDir: string) } // rootDir resolved vs cwd
+//   key a/b/c → <root>/a/b/c. put: mkdir -p parent; open `<parent>/.tmp-<randomUUID>` 'wx'; writeFile; sync; close;
+//   create-only → fs.link(temp, target) (EEXIST → ObjectExistsError) | overwrite → fs.rename(temp, target);
+//   finally unlink temp (ENOENT ignored); then fsync parent folder (any error ignored).
+//   get: readFile; ENOENT/ENOTDIR/EISDIR → null. exists: stat().isFile(); ENOENT/ENOTDIR → false.
+//   list: checkListArgs → walk root (missing root → []), skip names starting '.', files only, prune folders
+//   that cannot match the prefix → pageKeys. delete: validate all, then unlink each (ENOENT/ENOTDIR ignored).
 ```
 
 How a driver implements `list` with the shared helpers (memory does exactly this; the file store should too):
@@ -94,7 +108,7 @@ export function runObjectStoreContract(
 ): void; // describe(`ObjectStore contract: ${name}`); beforeEach → makeStore(); afterEach → cleanup()
 ```
 
-A driver file is just:
+A driver file is just (this is exactly `file-store.contract.test.ts`):
 
 ```ts
 import { runObjectStoreContract } from './object-store.contract';
@@ -135,7 +149,10 @@ Contract keys used: `../x`, `ok`, `s`, `bytes`, `empty`, `k`, `race`, `o`, `m`, 
 
 ## Known gaps
 
-- `FileObjectStore`, `VercelBlobObjectStore`, `createObjectStore`, the Blob contract wrapper and the docs are not built yet (Iterations 2–4).
+- `VercelBlobObjectStore`, `createObjectStore`, the Blob contract wrapper and the docs are not built yet (Iterations 3–4).
+- **Case-insensitive filesystems** (macOS APFS default, Windows): on the file store, keys differing only in letter case (`A/1` vs `a/1`) map to the same file, so the second create-only put fails with `ObjectExistsError`. The spec does not cover it; the contract keys are all lowercase. Phase 6 key builders should use one case (worth a line in the Iteration 4 docs).
+- File store `put` costs two fsyncs (file + folder): ~14 ms per put on macOS APFS. Fine for dev; tests needing many keys should write files directly (as the P-11 test does) or keep counts small.
+- A key whose path is an existing folder, or whose parent is an existing file, has unspecified behaviour on the file store (FR-512); not tested. `get`/`exists` treat both as missing.
 - The P-3 cursor rule is implemented in the shared `checkListArgs`/`pageKeys`; Blob cursors are opaque SDK strings and must NOT go through `checkListArgs` (Blob uses `assertValidPrefix` + `resolveListLimit` directly).
 - The 8 MiB VC-507 test on memory is trivially satisfied (the memory put completes synchronously inside the call); the counter still proves one read was issued before the put settled. The file store is where it is meaningful.
 - `MemoryObjectStore.put` does not validate `opts.mode` values outside the type (anything other than `'create-only'`/undefined behaves as overwrite); TypeScript callers cannot pass one.
