@@ -16,3 +16,17 @@ Decisions locked in while implementing `specs/02-engine-plan.md`. Append only; e
 **Decision**: `trickWinner([], …)` throws `RangeError('trickWinner needs at least one play')`. Non-empty inputs (every spec case) are unaffected.
 **Rejected**: returning `-1` or `undefined` (a seat-typed value that is not a seat); letting it crash with a `TypeError`.
 **Consequences**: `engine.ts` only calls it with a full trick (N plays), so this path is never hit from the engine.
+
+## D-003: Moves and events carry card copies, never state objects  (Iteration 4)
+
+**Context**: `legalPlays` returns the hand's own `Card` objects (Iteration 3); the spec does not say whether `LegalMove.move.card` or the `hand-dealt` / `game-started` payloads may share objects with the state.
+**Decision**: `legalMoves` puts `{ ...card }` in each play move; `hand-dealt.trumpCard` is a copy; `game-started` carries `structuredClone(seats)` and a copy of `handPlan`. `dealHand` also stores a copy as `hand.trumpCard`.
+**Rejected**: sharing the state's objects (a caller mutating a move or event would corrupt the state).
+**Consequences**: Iteration 5 events (`card-played`, `hand-completed`, …) should follow the same rule; tests compare cards by value or `cardId`, not identity.
+
+## D-004: `createGame` problem granularity  (Iteration 4)
+
+**Context**: FR-211 lists the checks and the "one cause, one problem" rule for rules/player range/expansion, but not how many problems a multi-seat failure produces.
+**Decision**: one problem per seat whose `seat !== i`, one per seat failing `SeatInfoSchema`, one per duplicated `playerId` value; order: rules → player range → expansion → seats → duplicates → `gameId` → `seed`. A non-array `seats` is one problem (`seats must be an array`).
+**Rejected**: one aggregate problem per check type (hides which seats are wrong).
+**Consequences**: VC-211 rows with a single cause give exactly one problem (asserted for 2-seat argentina, 7-seat spain, robot kind, duplicate id, empty gameId/seed, bad sequence); seats `[0,2,1]` give two.

@@ -3,7 +3,8 @@ import { parseCard, type Card } from '@/src/domain/cards';
 import { FRENCH_52, type DeckDefinition } from '@/src/domain/decks';
 import { getPreset } from '@/src/domain/presets';
 import type { PresetId, RuleSet } from '@/src/domain/rules';
-import type { HandState, TrickPlay } from '@/src/domain/types';
+import type { GameState, HandState, SeatInfo, Transition, TrickPlay } from '@/src/domain/types';
+import { createGame } from '@/src/engine/engine';
 
 /** Parses one card id (`'9H'`, `'10S'`, `'3O'`) for `deck` (default french-52). */
 export function card(id: string, deck: DeckDefinition = FRENCH_52): Card {
@@ -62,4 +63,34 @@ export function makeHand(overrides: Partial<HandState> = {}, seatCount = 4): Han
     toAct: 1 % seatCount,
     ...overrides,
   };
+}
+
+/**
+ * `count` valid seats: seat `i` has playerId `p<i>`, name `Player <i>`, and kind `kinds[i]`
+ * (default `'human'`).
+ */
+export function makeSeats(count: number, kinds: SeatInfo['kind'][] = []): SeatInfo[] {
+  return Array.from({ length: count }, (_, i) => ({
+    seat: i,
+    playerId: `p${i}`,
+    name: `Player ${i}`,
+    kind: kinds[i] ?? 'human',
+  }));
+}
+
+/** `createGame` for preset `id` with `players` seats (`makeSeats`), `seed`, gameId `'game-1'`. */
+export function newGame(id: PresetId, players: number, seed = 'seed-1'): Transition {
+  return createGame({ gameId: 'game-1', rules: getPreset(id), seats: makeSeats(players), seed });
+}
+
+/**
+ * A copy of `state` with `hand` replaced by `makeHand(overrides, seats.length)` and `phase` set.
+ * For tests of `legalMoves` on hand-built positions; the result need not pass invariants.
+ */
+export function withHand(
+  state: GameState,
+  overrides: Partial<HandState>,
+  phase: GameState['phase'] = 'bidding',
+): GameState {
+  return { ...structuredClone(state), phase, hand: makeHand(overrides, state.seats.length) };
 }

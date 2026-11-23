@@ -1,6 +1,6 @@
 # CONTEXT — Game Engine (Phase 2)
 
-Last updated by: Iteration 3 (Legal bids, legal plays, trick winner)
+Last updated by: Iteration 4 (Game creation, dealing and legal moves)
 
 ## Current state
 
@@ -9,9 +9,10 @@ Last updated by: Iteration 3 (Legal bids, legal plays, trick winner)
 - `src/engine/rng.ts` is done (spec FR-200 to FR-205): `rngFromSource`, `createXoshiro128ss`, `deriveRng`. `src/engine/.gitkeep` was deleted.
 - `src/engine/sequence.ts` is done (spec FR-207 to FR-210): `maxCardsPerPlayer`, `expandHandSequence`.
 - `src/engine/bidding.ts` (FR-222 `legalBids`), `src/engine/play.ts` (FR-224 `legalPlays`), `src/engine/trick.ts` (FR-225 `trickWinner`) are done.
-- `tests/unit/engine/helpers.ts` exists with builders `card`, `cards`, `trick`, `rulesWith`, `makeHand`.
-- Not yet built: `engine.ts` (4–5), `view.ts` (6), `invariants.ts` (7), docs (8).
-- Tests: `pnpm test` = 15 files, 312 tests (domain 215 + rng 17 + sequence 47 + bidding 8 + play 15 + trick 10 + config/smoke/layer-boundaries).
+- `src/engine/engine.ts` is partly done (spec FR-206, FR-211 to FR-223, FR-241): `ENGINE_VERSION`, `IllegalMoveError`, `InvalidGameSetupError`, `CreateGameInput`, `createGame`, `currentActor`, `legalMoves`, `aiRng`, plus the internal (non-exported) `dealHand`. **`applyMove` does not exist yet** (Iteration 5; no placeholder exported, per plan decision).
+- `tests/unit/engine/helpers.ts` has builders `card`, `cards`, `trick`, `rulesWith`, `makeHand`, `makeSeats`, `newGame`, `withHand`.
+- Not yet built: `applyMove` + transitions (5), `view.ts` (6), `invariants.ts` (7), docs (8).
+- Tests: `pnpm test` = 16 files, 373 tests (domain 215 + rng 17 + sequence 47 + bidding 8 + play 15 + trick 10 + engine-create 61 + config/smoke/layer-boundaries).
 
 ## File map
 
@@ -22,8 +23,10 @@ Last updated by: Iteration 3 (Legal bids, legal plays, trick winner)
 | `src/engine/bidding.ts` | `legalBids` (FR-222, dealer restriction / *sucias*). |
 | `src/engine/play.ts` | `legalPlays` (FR-224 = design §5.4 algorithm). |
 | `src/engine/trick.ts` | `trickWinner` (FR-225). |
+| `src/engine/engine.ts` | Game engine: `createGame` (FR-211 validation, FR-212 state), internal `dealHand` (FR-213–217), `currentActor`, `legalMoves`, `aiRng`, error classes, `ENGINE_VERSION`. Iteration 5 adds `applyMove`. |
+| `tests/unit/engine/engine-create.test.ts` | VC-206, VC-211, VC-212, VC-213 (hand 0), VC-214 (hand 0), VC-215, VC-217 (bidding/playing + hand-built game-over), VC-218 (`legalMoves` rows), VC-219 `bid:` ids, VC-220 `play:` ids, VC-234. |
 | `tests/unit/engine/helpers.ts` | Shared test builders (see Public interfaces). Iterations 4–5 may add to it; 6–7 must not edit it. |
-| `tests/unit/engine/bidding.test.ts` | VC-219 at function level (ids deferred to Iteration 4). |
+| `tests/unit/engine/bidding.test.ts` | VC-219 at function level (ids are in `engine-create.test.ts`). |
 | `tests/unit/engine/play.test.ts` | VC-220 at function level: every spec row, each run under all 16 combos of the 4 play flags consistent with the row's fixed flags. |
 | `tests/unit/engine/trick.test.ts` | VC-221 (french + spanish decks, leader ≠ seat 0). |
 | `tests/unit/engine/sequence.test.ts` | VC-207 to VC-210; the 18 preset hand plans as hand-written literal arrays (`PLANS`, `// prettier-ignore`). |
@@ -94,6 +97,33 @@ All three are pure, never mutate their inputs, and compare ranks with `compareRa
 `trickWinner(plays, state.hand.trumpSuit, state.rules.deck)`. They read `toAct` / `phase` nowhere:
 turn and phase checks are the caller's job.
 
+### `@/src/engine/engine` (Iteration 4 part; `applyMove` comes in Iteration 5)
+
+```ts
+export const ENGINE_VERSION = 1;
+export type IllegalMoveReason = 'game-over' | 'not-your-turn' | 'unknown-move';
+export class IllegalMoveError extends Error {           // name 'IllegalMoveError'
+  readonly reason: IllegalMoveReason; readonly seat: number; readonly moveId: string;
+  constructor(reason: IllegalMoveReason, seat: number, moveId: string);
+  // message: `Illegal move "<moveId>" by seat <seat>: <reason>`
+}
+export class InvalidGameSetupError extends Error {      // name 'InvalidGameSetupError'
+  readonly problems: string[];
+  constructor(problems: string[]);                      // message: `Invalid game setup: ` + problems.join('; ')
+}
+export interface CreateGameInput { gameId: string; rules: RuleSet; seats: SeatInfo[]; seed: string }
+export function createGame(input: CreateGameInput): Transition;
+export function currentActor(state: GameState): number | null;   // null if game-over (or hand null)
+export function legalMoves(state: GameState, seat: number): LegalMove[];
+export function aiRng(state: GameState, seat: number): Rng;      // deriveRng(seed,'ai',seat,aiDecisionCount)
+```
+
+- `createGame` problems (collected in this order, D-004): RuleSetSchema failure (one problem; then player range + expansion skipped) → seat count outside `rules.players` (one; expansion skipped) → `expandHandSequence` `RangeError` message verbatim → per seat: `seats[i].seat !== i`, `SeatInfoSchema` failure → one per duplicated `playerId` → empty `gameId` → empty `seed`.
+- State copies: `structuredClone(input.rules)` and `structuredClone(input.seats)`; `handPlan` from `expandHandSequence` (new array). `game-started` carries its own clones of seats and plan; `hand-dealt` carries a copy of `trumpCard` and never any hand (D-003).
+- Internal `dealHand(state: GameState, handIndex: number, previousDealer: number | null): HandState` (not exported). Reads `seed`, `rules`, `seats.length`, `handPlan[handIndex]`; never mutates `state`. Stream `deriveRng(seed, 'deal', handIndex)`; `previousDealer === null` → dealer = `rng.int(0, N−1)` drawn **before** the shuffle; else dealer = `(previousDealer + 1) % N` (no draw). Shuffles `buildDeck(rules.deck, N)`; card `k` → seat `(dealer + 1 + k) % N`; trump = shuffled[`N·c`] (stock) or shuffled[`N·c − 1`] when whole deck dealt (`trumpCardInDealerHand true`); trumpCard is a copy. Sort: suit index in `rules.deck.suits`, then `compareRanks` high→low. Bids `null`, `tricksWon` 0, `currentTrick {leader: mano, plays: []}`, `toAct` mano, no `lastTrick` key. Iteration 5: next hand = `dealHand(state, handIndex + 1, hand.dealer)` plus the internal `handDealtEvent(handIndex, hand)` helper for the event.
+- `legalMoves`: `RangeError` unless `seat` is an integer in `0…N−1` (internal `assertSeatInRange(state, seat)`, reuse it in `applyMove`) → `[]` if `hand === null` or seat ≠ `currentActor` → bidding: `{id:'bid:<n>', move:{type:'bid',seat,tricks:n}}` from `legalBids` → otherwise (playing): `{id:'play:<cardId>', move:{type:'play',seat,card}}` from `legalPlays`, `card` a **copy** (D-003).
+- Internal `nextSeat(seat, N)` = `(seat + 1) % N`.
+
 ### Test helpers — `tests/unit/engine/helpers.ts` (import as `./helpers`)
 
 ```ts
@@ -105,7 +135,15 @@ makeHand(overrides: Partial<HandState> = {}, seatCount = 4): HandState;
 // defaults: cardsPerPlayer 4, dealer 0, trumpCard 2S, trumpCardInDealerHand false, trumpSuit 'S',
 // hands [[]×N], bids [null×N], tricksWon [0×N], currentTrick { leader: 1, plays: [] }, toAct 1;
 // no lastTrick key.
+makeSeats(count: number, kinds: SeatInfo['kind'][] = []): SeatInfo[];
+// seat i, playerId `p<i>`, name `Player <i>`, kind kinds[i] ?? 'human'.
+newGame(id: PresetId, players: number, seed = 'seed-1'): Transition;
+// createGame({ gameId: 'game-1', rules: getPreset(id), seats: makeSeats(players), seed }).
+withHand(state: GameState, overrides: Partial<HandState>, phase = 'bidding'): GameState;
+// clone of state with hand = makeHand(overrides, seats.length) and phase set (hand-built positions).
 ```
+
+`helpers.ts` now imports `@/src/engine/engine`, so every test that imports `./helpers` loads the engine.
 
 ### Domain (Phase 1, unchanged) — import map, no barrel
 
@@ -156,8 +194,8 @@ pnpm prints an "Unsupported engine" WARN locally (Node 26 vs declared 24) and "I
 
 ## Known gaps
 
-- `engine.ts` (createGame, dealing, legalMoves, applyMove), view, invariants and docs are not built yet.
-- VC-219 `bid:<n>` ids and VC-220 `play:<cardId>` ids are tested through `legalMoves` in Iteration 4.
+- `applyMove` and the automatic transitions (Iteration 5), view (6), invariants (7) and docs (8) are not built yet.
+- VC parts deferred to Iteration 5: VC-213 rotation (every next hand's dealer), VC-214 hands 1–2, VC-216 dealing part, VC-217 at a real game-over, VC-218 `applyMove` rows (bidding and game-over). Deferred to Iteration 6: VC-216 view part, VC-218 `tableViewFor` row.
 - `legalPlays` / `trickWinner` assume cards belong to `deck` (`compareRanks` throws `InvalidCardError` otherwise); they do not validate seats or turn.
 - `int` accepts any `Number.isInteger` bounds, including unsafe integers beyond 2^53 (results there are imprecise); the spec only requires integers. Engine callers use small ranges.
 - `docs/development.md` still says `@noble/hashes` "is added when the engine needs hashing"; Iteration 8 updates the docs.
