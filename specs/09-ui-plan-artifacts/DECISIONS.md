@@ -161,3 +161,21 @@
 **Decision**: `moves.test.tsx` got a `controls()` helper that drops `Planilla` and `Saltar`; its VC-925 now clicks `Saltar` before the next action because a real 200 animates. The new tests use the same filter.
 **Rejected**: hiding `Planilla` while input is possible (the spec shows it at all times).
 **Consequences**: Later tests counting buttons must filter the chrome.
+
+## D-028: Next 16 blocks cross-origin dev requests; `allowedDevOrigins` reads `DEV_ALLOWED_ORIGINS`  (Iteration 7)
+**Context**: P-6 (VC-954, R-031): an iPhone opens `http://<LAN IP>:3000` against `pnpm dev --hostname 0.0.0.0`.
+**Decision**: Tested on Next 16.4.6 (Turbopack) with the machine's LAN IP 192.168.10.200. The page and same-origin `/_next/` assets load (200), but a request carrying `Origin: http://<LAN IP>:3000` with `Sec-Fetch-Site: cross-site` is 403 and the HMR websocket is refused, both logged as "Blocked cross-origin request to Next.js dev resource". With `DEV_ALLOWED_ORIGINS=<LAN IP>` the same request is 200 and nothing is logged. So `next.config.ts` has `allowedDevOrigins: process.env.DEV_ALLOWED_ORIGINS?.split(',').filter(Boolean) ?? []` (hosts, no scheme or port). Dev servers started with no variable behave as before; `next build` ignores it.
+**Rejected**: hard-coding an IP or a wildcard (machine specific, widens dev access).
+**Consequences**: Iteration 8 documents the variable. The test machine's sandbox could not open a socket to its own LAN IP, so the check used `Host`/`Origin` headers against localhost; a real phone is the manual check (VC-954).
+
+## D-029: The full-game test records one run, then asserts four invariants on it  (Iteration 7)
+**Context**: VC-945-VC-949 share one 2-AI game; playing it four times would be slow and flaky.
+**Decision**: `tests/ui/full-game.test.tsx` plays one game in `beforeAll` (create via `NewGamePage`, unmount, mount `GamePage` on the stored id so the kept 201 update is used), then one `it` per VC checks the record. Deps `fetch` is a recording wrapper over the in-process fetch: it keeps each 200/201 update and, before each `POST .../moves`, checks the moveId against the newest update received (VC-946). Before each click the loop compares enabled controls (bid text, card `aria-label`) with the legal moves of that update. Real timers; `Saltar` is clicked whenever shown. Card ids in the DOM are `aria-label`s equal to some deck card name, checked against every `{rank,suit}` found in any received update (queued events are inside it). Console methods are spied for the whole run. Runs in about 3 s.
+**Rejected**: fake timers (needs a clock step per event); one game per VC.
+**Consequences**: Card-name mapping relies on `cardLabel` and the `aria-label` convention (FR-934).
+
+## D-030: Responsive pass is mostly already in place; a static CSS test guards it  (Iteration 7)
+**Context**: Iterations 4-6 wrote mobile-first CSS with 44px minimums from the start.
+**Decision**: Changed only `score-sheet.module.css` (`.scroll` gets `min-width: 0; max-width: 100%`, the panel `overscroll-behavior: contain`). Added `tests/ui/tap-targets.test.ts`: min-width and min-height >= 44px on `.bid`, `.card`, `game-page .button` (Saltar, Reintentar, Planilla), `.close`, game-over `.link`; min-height on `.submit`; wrap rules on hand, bid bar and seats; the score sheet scroll rules; only one breakpoint (`min-width: 768px`). The 375 px fit itself is manual (VC-953).
+**Rejected**: restyling seats as a ring (no evidence it is needed; wrapping already fits 6 seats at 375 px by calculation: 3 seats of 96 px per row).
+**Consequences**: A CSS refactor that renames a class breaks the test on purpose.

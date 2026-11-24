@@ -9,6 +9,7 @@
   background: var(--bg);
   color: var(--text);
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .head {
@@ -35,6 +36,8 @@
 }
 
 .scroll {
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
 }
 

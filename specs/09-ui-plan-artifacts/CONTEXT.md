@@ -1,18 +1,19 @@
 # CONTEXT — UI (Phase 9)
 
-Last updated by: Iteration 6 (event animation, score sheet, game over). Branch `spec/09-ui`.
+Last updated by: Iteration 7 (full-game test, security invariants, responsive pass). Branch `spec/09-ui`.
 
 ## Current state
 
-- Phases 0–8 are done and frozen (`specs/00`–`specs/08-*-frozen.md`). Phase 9 (UI) is in progress: Iterations 1–6 are done.
+- Phases 0–8 are done and frozen (`specs/00`–`specs/08-*-frozen.md`). Phase 9 (UI) is in progress: Iterations 1–7 are done.
 - **Done**: jsdom component-test infrastructure beside the node tests; an in-process API (real Phase 8 handlers) for UI tests; pure modules `slot`, `ids`, `cards`, `copy`, `kept-update`; `app/globals.css`; the static layer-boundary test; the Phase 8 freeze (frozen capsule added, working files removed).
 - **Also done (Iterations 2–3)**: API client with FR-936 status mapping and shape checks; pure version guard / action capture / event display model; shared UI test fixtures.
 - **Also done (Iteration 4)**: `/` (new-game form, continue link) and `/game/[id]` (load paths, table). Nothing is playable: no bid buttons, clickable cards, animation, score sheet, game-over screen or move requests; the kept 201 update is shown at once.
 - **Also done (Iteration 5)**: bid buttons and clickable cards; one captured action per click, idempotent retries at 1/2/4 s then `Reintentar`, every FR-918 outcome, 4 s notices, `finished: true` on game over, slot ownership (FR-938). 200/201 adoption still jumps (no animation).
 - **Also done (Iteration 6)**: the event queue (201 from the empty table, 200 from the shown view), `Saltar`, seat highlight, hand-completed banner, `Planilla` score sheet (running totals, live statuses), game-over screen. 409/load/recovery stay instant.
-- **Not done**: full-game test and responsive pass (7), docs (8).
+- **Also done (Iteration 7)**: `tests/ui/full-game.test.tsx` (VC-945-VC-949, one recorded 2-AI game), `tests/ui/tap-targets.test.ts` (NFR-901/902 static CSS), a small score-sheet CSS fix, P-6 resolved (`allowedDevOrigins` from `DEV_ALLOWED_ORIGINS`, D-028), `MANUAL-CHECKS.md` (VC-950-VC-954 PENDING the human).
+- **Not done**: docs (8); the five manual checks (human).
 - Toolchain: Next 16.4.6, React 19.3.1, TypeScript 6.0.3 strict, Vitest 5.1.1 (Vite 8.3.8), pnpm 10.15.1. Local Node is 26 (the "Unsupported engine" WARN is expected and not fatal).
-- Test totals after Iteration 6: `pnpm test` = 97 files passed + 1 skipped, 1694 tests passed + 30 skipped; `ui` project alone: 19 files, 226 tests.
+- Test totals after Iteration 7: `pnpm test` = 99 files passed + 1 skipped, 1707 tests passed + 30 skipped.
 - `dependencies` are unchanged from `main`. New devDependencies (exact): `jsdom` 31.0.1, `@testing-library/react` 16.3.3, `@testing-library/dom` 10.4.2, `@testing-library/user-event` 14.6.13. `@vitejs/plugin-react` is NOT installed (not needed, see D-001).
 
 ## File map
@@ -55,6 +56,10 @@ Last updated by: Iteration 6 (event animation, score sheet, game over). Branch `
 | `tests/ui/new-game.test.tsx`, `load.test.tsx`, `table.test.tsx` | VC-900–903, 905 (part), 906, 910–913, 940, 944 (render). |
 | `tests/ui/moves.test.tsx`, `slot-ownership.test.tsx` | VC-905 (completion), 907, 920–930, 941 (slot). Run under fake timers. |
 | `tests/ui/support/moves.ts` | `bid`, `play` (legal moves), `errorBody`, `armLoad(api, update, gameId?)` (stores slot, arms next GET), `armMove(api, status, body)`, `flush(ms)`, `moveCalls(api)`. |
+| `tests/ui/full-game.test.tsx` | VC-945-VC-949: records one game (create via `NewGamePage`, play on `GamePage`, `Saltar` each time), asserts per VC (D-029). |
+| `tests/ui/tap-targets.test.ts` | Static CSS check: 44px tap targets, wrapping, score-sheet scroll, single breakpoint (D-030). |
+| `next.config.ts` | `agentRules: false`; `allowedDevOrigins` from `DEV_ALLOWED_ORIGINS` (dev only, D-028). |
+| `specs/09-ui-plan-artifacts/MANUAL-CHECKS.md` | Steps and result table for VC-950-VC-954; all PENDING the human. |
 | `specs/08-http-api-frozen.md` | Phase 8 capsule (added). 08 working files are deleted (readable from git at `7eb81ae`). |
 
 ## Public interfaces
@@ -169,6 +174,9 @@ makeUpdate(o?): PlayerUpdate;  makeScoreboard(o?, seats?): ScoreBoard;  card(ran
 - Queue (D-026): `GameState.queue` = events not finished (head is shown); `tick` / `skip` actions; an effect keyed on `queue` arms one `deps.setTimeout` per head. `shown = queueEmpty ? adopted.view : shownBefore` feeds the score sheet, phase and `GameOver` (FR-937); `shownBefore` is `null` for a 201. Table `toAct` is `null` while the queue plays. `finished: true` stays keyed on the adopted phase (D-024).
 - Tests under fake timers: one `flush(ms)` fires at most one queue tick (renders re-arm the timer after `act`); step the clock per event. Filter `Planilla`/`Saltar` when counting game controls (D-027).
 - Move pipeline (`game-page.tsx`, D-022): `request` (`idle|in-flight|retry-wait|failed`) is the one "disabled" flag; reducer actions `move-start|move-send|move-wait|move-failed|move-settled|notice|notice-clear` besides the Iteration 4 ones. The captured body is in `pendingRef` and every send reuses it. Responses: 200 adopt `'move'`; 409 adopt `'conflict'` + notice; 403/422 and 400/413 `recover(since, message)`; 401/404/410 `deny`. `markFinished` and `clearOwnSlot` re-read the slot first (FR-938).
+- CSS conventions (Iteration 7): tap targets declare `min-width` and `min-height` >= 44px (`.bid`, `.card`, game-page `.button`, `.close`, `.link`); lists of cards, bid buttons and seats use `flex-wrap: wrap`; the score sheet is a fixed full-screen panel (`overflow: auto`) whose table sits in `.scroll` (`overflow-x: auto; max-width: 100%`) so only it scrolls sideways; one breakpoint, `@media (min-width: 768px)`. Keep these or update `tap-targets.test.ts`.
+- Full-game test: real timers, click `Saltar` before reading controls, filter `Planilla`/`Saltar`/`Reintentar` when counting controls.
+- LAN dev access: `DEV_ALLOWED_ORIGINS=<ip>[,<ip>] pnpm dev --hostname 0.0.0.0` (Next 16 blocks cross-origin dev requests otherwise).
 - Prettier: single quotes, 100 columns; `pnpm lint` runs prettier `--check` over the whole repo.
 
 ## Commands
@@ -182,4 +190,4 @@ makeUpdate(o?): PlayerUpdate;  makeScoreboard(o?, seats?): ScoreBoard;  card(ran
 - `ScoreSheet` live row uses the shown view's `handIndex`; its `Total` column on a live row is empty; a `game-over` view's `live` is whatever the server sends.
 - Copy decided in Iteration 4 (D-019): table labels. No bid prompt copy exists (D-023). Score-sheet headings and game-over title: D-025.
 - `RecordedCall.status` is an addition to the plan's `{ method, path, headers, body }` (used by VC-945 "every request was 200/201").
-- No manual or real-browser checks yet (Iteration 7).
+- Manual checks VC-950-VC-954 are written but not run (`MANUAL-CHECKS.md`). Layout at 375 px is verified only by the static CSS test and reasoning until then.
