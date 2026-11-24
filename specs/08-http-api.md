@@ -7,7 +7,7 @@
 
 ## Purpose
 
-`GameService` (Phase 7) can create, show and advance a game, but nothing reaches it over the network. This spec delivers the HTTP API from architecture §7 as Next.js Route Handlers: four routes, `Authorization: Bearer` seat auth, Zod-validated requests with limits, a single mapping from service errors to status codes, `Cache-Control: no-store`, one structured log line per request, and a config-wired service factory. It also proves, by test, that no response leaks another seat's hand, the stock or the seed. It ships a move-latency benchmark script that can run against any storage driver, so the preview Blob measurement (architecture open question 1) is one command once a preview store exists. It completes milestone M2: a game can be played end to end with `curl` against `pnpm dev`. It benefits the UI work in Phase 9, and the human tester, who can play a full game over HTTP.
+`GameService` (Phase 7) can create, show and advance a game, but nothing reaches it over the network. This spec delivers the HTTP API from architecture §7 as Next.js Route Handlers: four routes, `Authorization: Bearer` seat auth, Zod-validated requests with limits, a single mapping from service errors to status codes, `Cache-Control: no-store`, one structured log line per request, and a config-wired service factory. It also proves, by test, that no response leaks another seat's hand, the stock or the seed. It completes the local part of milestone M2: a game can be played end to end with `curl` against `pnpm dev`. The preview Blob measurements of M2, including the move benchmark, move to Phase 5b/11. It benefits the UI work in Phase 9, and the human tester, who can play a full game over HTTP.
 
 ## Scope
 
@@ -26,15 +26,14 @@
   - `service-factory.ts`: config-wired, memoised `GameService`
   - `presets.ts`: preset labels
   - `handlers.ts`: route logic with injectable deps
-- `scripts/bench-moves.ts` and a `bench:moves` package script.
-- API tests in `tests/api/`, run on `MemoryObjectStore`, plus a bench-script smoke test.
+- API tests in `tests/api/`, run on `MemoryObjectStore`.
 - Docs:
   - `docs/architecture.md`: §7 gains the 410 and 413 rows and the request rules; §10 gains the log levels; §11 notes that the preview benchmark is still pending.
   - `docs/development.md`: a new §16 "HTTP API" (Known limitations becomes §17, cross-references updated).
-  - `docs/implementation.md`: the Phase 8 note that the preview run moved to Phase 5b/11.
+  - `docs/implementation.md`: Phase 8 task 7 and the M2 row note that the benchmark moved to Phase 5b/11.
 
 **Out**
-- Deploying to a Vercel preview and recording the preview p95 in architecture §11. This moves to Phase 5b/11 and architecture open question 1 stays open (see BR-806).
+- `scripts/bench-moves.ts`, deploying to a Vercel preview, and recording the preview p95 in architecture §11. The user moved these to Phase 5b/11, so the benchmark is designed next to the preview run that uses it: an in-process run from a laptop would not measure a Vercel function's move request. Architecture open question 1 stays open (see BR-806).
 - `GET /api/cron/cleanup` and retention (Phase 10); UI (Phase 9).
 - Rate limiting, CORS, accounts, multi-human lobby routes (architecture §12).
 - Validating responses at runtime in handlers: the strict response schemas are used by tests only.
@@ -46,7 +45,7 @@
 |---|---|---|
 | Browser / `curl` client | Anyone who can reach the deployment | `POST /api/games`, `GET /api/presets`; with a seat token, `GET /api/games/{id}` and `POST /api/games/{id}/moves` for that seat only |
 | Route handlers | Next.js Route Handlers under `app/api` | The only HTTP entry to `GameService`; one service per function instance via the factory |
-| Developer | Runs `pnpm dev`, `curl`, `pnpm bench:moves` | Local file store under `.data/`; Blob only with `BLOB_READ_WRITE_TOKEN` |
+| Developer | Runs `pnpm dev` and `curl` | Local file store under `.data/` |
 | Tests | Call the handler functions directly | Inject a service over `MemoryObjectStore`, a clock and a log sink |
 
 ## Functional Requirements
@@ -58,10 +57,10 @@
 
 ### Request parsing
 
-- **FR-802 (Must) — JSON bodies.** On the two POST routes, the body is read as text, capped at **16,384 bytes**.
-  - A body over the cap → 413 `payload_too_large`.
-  - A `Content-Type` whose media type is not `application/json` (parameters such as `charset` are allowed) → 400 `invalid_request`, field `body`.
-  - Text that is not valid JSON, or JSON that is not an object (`null`, an array or a primitive) → 400 `invalid_request`, field `body`.
+- **FR-802 (Must) — JSON bodies.** On the two POST routes, the body is checked in this order, and the first failure wins:
+  1. A missing `Content-Type`, or one whose media type (case-insensitive, parameters such as `charset` allowed) is not `application/json` → 400 `invalid_request`, field `body`.
+  2. A body of more than **16,384 raw bytes** (counted on the received bytes before decoding) → 413 `payload_too_large`. The cap leaves ample headroom over the largest valid body (a few hundred bytes) and stops oversized input before `JSON.parse`.
+  3. Bytes that are not valid UTF-8 JSON, or JSON that is not an object (`null`, an array or a primitive) → 400 `invalid_request`, field `body`.
 - **FR-803 (Must) — Strict request schemas.** Request bodies are validated with strict Zod objects. Any unknown field, `seed` included, gives 400 `invalid_request` naming that field.
   - `POST /api/games`: `{ humanName: string, aiCount: number, rulesPreset?: string }`.
     - `humanName`: 1–40 characters after `trim()`.
@@ -72,7 +71,7 @@
     - `moveId`: 1–32 characters.
     - `clientRequestId`: 1–128 characters.
 
-  The field named in the message is the first Zod issue's top-level path segment. These limits equal the service's own (spec 07 FR-701, FR-713). The service checks them again and still owns the cross-field check (`aiCount + 1` within the preset's player range), which reaches the client as `InvalidRequest` → 400.
+  The field named in the message comes from the first Zod issue: for an `unrecognized_keys` issue it is `issue.keys[0]`, otherwise it is the issue's top-level path segment. These limits equal the service's own (spec 07 FR-701, FR-713). The service checks them again and still owns the cross-field check (`aiCount + 1` within the preset's player range), which reaches the client as `InvalidRequest` → 400.
 - **FR-804 (Must) — `?since`.** On `GET /api/games/{id}`, the query parameter `since` is optional.
   - When present, it must appear once and match `^(0|[1-9][0-9]{0,7})$` with a value ≤ `MAX_COMMIT_VERSION`. Otherwise → 400 `invalid_request`, field `since`. This includes an empty value, `-1`, `1.5`, `abc`, a leading zero and a repeated parameter.
   - After the service returns, a `since` greater than the returned `update.version` → 400 `invalid_request`, field `since`.
@@ -120,61 +119,49 @@
 | `gamerules` | `GameRules` |
 | `mexico-bazas` | `Mexico (Bazas)` |
 
-  Each `description` is a single sentence of 1–200 characters that names the deck and the hand-sequence shape (design §4.3). It makes no storage call.
+  Each `description` is a single sentence of 1–200 characters summarising the preset (design §4.3). The route makes no storage call.
 
 ### Service factory and handlers
 
 - **FR-812 (Must)** — `getService()` in `app/api/_lib/service-factory.ts` builds `getConfig()` → `createObjectStore(config)` → `new GameStateManager(store)` → `new GameService({ state, defaultPresetId: config.defaultRulesPreset })` on its first successful call and returns the same instance on later calls in the same module instance. A failure (e.g. `ConfigError`, missing Blob credentials) is thrown to the caller and not cached, so the next call tries again. The handler maps it to 500 `internal` (FR-807) and logs it (FR-814).
-- **FR-813 (Must)** — The route logic lives in `app/api/_lib/handlers.ts` as functions `(request, context, deps)`, where `deps = { getService, getConfig, now, log }`. `now` returns milliseconds for durations and `log` is a sink taking a level and a JSON-serialisable object. Each `route.ts` exports only the Next.js method names (`GET`/`POST`) and binds them to the default deps (the real factory, `getConfig`, `performance.now`, a console sink). Tests call the handler functions with injected deps.
+- **FR-813 (Must)** — The route logic lives in `app/api/_lib/handlers.ts` as functions `(request, context, deps)` for the two `[id]` routes and `(request, deps)` for the two routes without path params, where `deps = { getService, getConfig, now, log }`. `now` returns milliseconds for durations and `log` is a sink taking a level and a JSON-serialisable object. Each `route.ts` exports only the Next.js method names (`GET`/`POST`) and binds them to the default deps (the real factory, `getConfig`, `performance.now`, a console sink). Tests call the handler functions with injected deps.
 
 ### Logging
 
-- **FR-814 (Must) — Request line.** Every request emits exactly one request line with the fields `{ route, gameId, seat, fromVersion, toVersion, aiMoves, status, durationMs, errorCode }`. It is written with `console.log` as one JSON line at level `info`. Fields:
+- **FR-814 (Must) — Request line.** Subject to FR-816, every request emits exactly one request line with the fields `{ route, gameId, seat, fromVersion, toVersion, aiMoves, status, durationMs, errorCode }`. It is written with `console.log` as one JSON line at level `info`. Fields:
   - `route`: the route pattern, e.g. `POST /api/games/[id]/moves`.
   - `gameId`: the path id or created id, or `null`.
-  - `seat`: the responding seat (`0` for create), or `null` when unauthenticated or unknown.
+  - `seat`: the seat whose update the response carries (`0` for a 201; the seat of a 200 or 409 update), otherwise `null` (including 403, 410 and 422).
   - `fromVersion`: the request `version` or `since`, or `null`.
   - `toVersion`: the response update's version (including the 409 update), or `null`.
   - `aiMoves`: the number of `bid-made` and `card-played` events in the response's `events` whose `seat` ≠ the responding seat, or `null` without an update.
   - `status`: the HTTP status.
-  - `durationMs`: an integer ≥ 0, measured with `deps.now`.
+  - `durationMs`: `Math.round` of the elapsed `deps.now` difference, an integer ≥ 0.
   - `errorCode`: the error `code`, or `null`.
 - **FR-815 (Must) — Error line.** A 500 additionally emits one line at level `error` (`console.error`) with `{ route, gameId, errorName, errorMessage, stack }` taken from the thrown value.
 - **FR-816 (Must) — Level gating.** `config.logLevel` gates both lines: the request line is emitted iff the level is `debug` or `info`; the error line always is (its level is `error`). When `getConfig()` itself throws, both lines are emitted, defaulting to `info`.
-
-### Benchmark
-
-- **FR-817 (Must)** — `pnpm bench:moves` runs `tsx scripts/bench-moves.ts`, which builds a `GameService` in-process over `createObjectStore(getConfig())` (so `STORAGE_DRIVER`/`BLOB_READ_WRITE_TOKEN` choose the store). Options: `--samples N` (default 50, integer 1–10,000) and `--ai N` (default 3, 2–5). An invalid option exits with code 2 and a usage message on stderr.
-- **FR-818 (Must)** — For each sample it creates a game and times `submitMove` (first legal move, `clientRequestId` unique per call) in three cases:
-  - **cold:** the first `submitMove` after a new `ObjectStore`, `GameStateManager` and `GameService` are built for that sample;
-  - **warm:** a second `submitMove` on the same instances;
-  - **stale-hint:** a third `submitMove`, made after `head.json` for that game is overwritten with a version 2 below the tip (or 0 when the tip is below 2), using `headKey` and `putJson(..., { mode: 'overwrite' })` with the `HeadSchema` shape.
-
-  A sample whose game is over before all three moves is replaced by a new game.
-- **FR-819 (Must)** — It prints one JSON object to stdout: `{ driver, samples, cases: { cold, warm, staleHint } }`, each case `{ n, p50Ms, p95Ms, maxMs }`. Percentiles use the nearest-rank method, and all numbers are rounded to 0.1 ms. It exits 0. Errors go to stderr with exit code 1, and no seat token or state is printed.
 
 ### Docs
 
 - **FR-820 (Must)** — Update the docs as follows:
   - `docs/architecture.md` §7: add the 410 `game_unsupported` and 413 `payload_too_large` rows, the 201 for create, the strict-body, size-cap and check-order rules, and `GET /api/presets`'s response shape.
   - `docs/architecture.md` §10: add the log levels (FR-816) and the error line.
-  - `docs/architecture.md` §11: a "Pending" note that the preview benchmark is to be run with `pnpm bench:moves`.
-  - `docs/development.md` §16 "HTTP API" (Known limitations renumbered to §17): routes, request rules, the error table, the handler/deps test pattern, the factory, logging, a worked `curl` session against `pnpm dev`, and how to run `pnpm bench:moves` against file or Blob.
-  - `docs/implementation.md` Phase 8: note that the preview deploy and §11 record moved to Phase 5b/11.
+  - `docs/architecture.md` §11: a "Pending" note that the preview move benchmark has not run yet (Phase 5b/11).
+  - `docs/development.md` §16 "HTTP API" (Known limitations renumbered to §17): routes, request rules, the error table, the handler/deps test pattern, the factory, logging, and a worked `curl` session against `pnpm dev` (with `-H 'Content-Type: application/json'`).
+  - `docs/implementation.md`: Phase 8 task 7 and its preview-benchmark done-when item, and the M2 row in §2, note that the benchmark script, preview deploy and §11 record moved to Phase 5b/11.
 
 ## Business Rules
 
-- **BR-801 — No leaks.** No response body contains the game seed, a seat-token hash, any card in another seat's current hand, or any undealt stock card. The one exception is the dealer's shown trump card (`trumpCard` when `trumpCardInDealerHand`). No body contains a key named `seed`. Cards that were played (`events`, `currentTrick`, `lastTrick`) are allowed. The seat token appears only in the 201 body of `POST /api/games`. *Rationale:* architecture §8, design §5.5. *Exceptions:* the trump card above.
+- **BR-801 — No leaks.** No response body contains the game seed, a seat-token hash, any card in another seat's current hand, or any undealt stock card. The one exception is each hand's public trump card (`trumpCard`, in the view and in `hand-dealt` events), whether it is the turned-up stock card or the dealer's last card (`trumpCardInDealerHand`). No body contains a key named `seed`. Cards already revealed (`card-played` events, `currentTrick`, `lastTrick`, earlier hands' `hand-dealt.trumpCard`) are allowed, even when the same `{suit, rank}` is in someone's hand or the stock in a later deal. The seat token appears only in the 201 body of `POST /api/games`. *Rationale:* architecture §8, design §5.5. *Exceptions:* the public trump card above.
 - **BR-802 — Server-only errors stay on the server.** Non-service errors are logged (FR-815) and answered with the fixed 500 body. They are never serialized into a response. *Rationale:* `AiLoopLimitError.state` holds every hand and the seed (spec 07). *Exceptions:* none.
 - **BR-803 — Never log secrets.** No log line contains a seat token, the `Authorization` header, a seat-token hash, a seed, a hand or a request/response body. The error line's `errorMessage`/`stack` come from errors whose messages are secret-free by specs 05–07; `AiLoopLimitError.state` is not logged. *Rationale:* architecture §10. *Exceptions:* none.
 - **BR-804 — One mapping.** `toErrorResponse` is the only place that turns an error into a status code; handlers never set an error status themselves. *Rationale:* architecture §10. *Exceptions:* none.
-- **BR-805 — Handlers are thin.** Handlers parse, call one service method (or none, for presets), and serialize. They do not touch storage, the engine or the state manager directly (the factory and the bench script excepted). *Rationale:* AD-7, one owner of game logic. *Exceptions:* `service-factory.ts`; `scripts/bench-moves.ts`, which writes `head.json` to build the stale-hint case.
-- **BR-806 — The benchmark has not closed OQ 1.** Until a preview run is recorded, the docs must not claim that the 500 ms p95 target is met. *Rationale:* the user's decision to defer the preview run. *Exceptions:* none.
+- **BR-805 — Handlers are thin.** Handlers parse, call one service method (or none, for presets), and serialize. They do not import from `src/state`, `src/storage` or `src/engine`. *Rationale:* AD-7, one owner of game logic. *Exceptions:* `service-factory.ts`, which wires the store and the state manager.
+- **BR-806 — OQ 1 stays open.** Until a preview benchmark is recorded (Phase 5b/11), the docs must not claim that the 500 ms p95 target is met. *Rationale:* the user deferred the benchmark and the preview run. *Exceptions:* none.
 
 ## Non-Functional Requirements
 
-- **NFR-801 — Overhead.** On `MemoryObjectStore`, the API layer adds < 5 ms p95 over a direct `service.submitMove` call. This is measured over 200 moves in one API test.
-- **NFR-802 — Test time.** All `tests/api/**` together run in < 20 s in the CI "Test" step.
+- **NFR-802 — Test time.** `pnpm vitest run tests/api` reports a total `Duration` < 20 s on a CI runner. (NFR-801, an API-overhead timing check, was dropped: it is negligible next to the Blob-bound 500 ms target and flaky as a CI assertion.)
 - **NFR-803 — Gates.** `pnpm typecheck && pnpm lint && pnpm test && pnpm build` pass. No new runtime dependency (`dependencies` stay `@noble/hashes, @vercel/blob, next, react, react-dom, zod`).
 
 ## Data & Interfaces
@@ -230,10 +217,10 @@ All API VCs call the handler functions with `deps.getService` returning a `GameS
 - **VC-801:** every non-2xx body in the suite parses with `ErrorResponseSchema`, and its `message` equals the FR-807 text for its code; a 500 caused by `new Error('secret-xyz')` → `message` is `Internal error` and the body contains neither `secret-xyz` nor `stack`. *(FR-801, BR-802)*
 
 ### Parsing
-- **VC-802:** POST create with a body of 16,385 bytes → 413 `payload_too_large`; with exactly 16,384 bytes of valid JSON (long whitespace padding) → not 413. *(FR-802)*
-- **VC-803:** POST create with `Content-Type: text/plain` → 400 `Invalid request: body`; with `application/json; charset=utf-8` and a valid body → 201. *(FR-802)*
+- **VC-802:** POST create with a body of 16,385 bytes → 413 `payload_too_large`; with exactly 16,384 bytes of valid JSON (long whitespace padding) → not 413; with 8,193 two-byte UTF-8 characters (16,386 bytes, 8,193 code units) inside a JSON string → 413. *(FR-802)*
+- **VC-803:** POST create with `Content-Type: text/plain` → 400 `Invalid request: body`; with no `Content-Type` → 400 `Invalid request: body`; with `Content-Type: text/plain` and a 20,000-byte body → 400 (type wins over size); with `Application/JSON; charset=utf-8` and a valid body → 201. *(FR-802)*
 - **VC-804:** POST create with bodies `{`, `null`, `[]`, `"x"`, `42` → each 400 `Invalid request: body`. *(FR-802)*
-- **VC-805:** POST create with `{ humanName: 'A', aiCount: 3, seed: 'x' }` → 400 naming `seed`; with an extra `foo` field → 400 naming `foo`; POST move with an extra field → 400. *(FR-803)*
+- **VC-805:** POST create with `{ humanName: 'A', aiCount: 3, seed: 'x' }` → 400 with message `Invalid request: seed`; with an extra `foo` field → `Invalid request: foo`; POST move with an extra `bar` field → `Invalid request: bar`. *(FR-803)*
 - **VC-806:** POST create boundaries → `humanName` `''`, `'   '`, 41 chars → 400 `humanName`; 40 chars (after trim) → 201; `aiCount` 1, 6, 2.5, `'3'` → 400 `aiCount`; 2 and 5 → 201; `rulesPreset: 'nope'` → 400 `rulesPreset`; each of the four `PRESET_IDS` with a fitting `aiCount` → 201. *(FR-803, FR-808)*
 - **VC-807:** POST create with a valid body and a `getService` returning a wrapper whose `createGame` throws `new InvalidRequest('aiCount')` (the service's cross-field check) → 400 `Invalid request: aiCount`. *(FR-803, FR-807)*
 - **VC-808:** POST move boundaries → `version` −1, 1.5, `MAX_COMMIT_VERSION` → 400 `version`; `moveId` `''` and 33 chars → 400 `moveId`; `clientRequestId` `''` and 129 chars → 400 `clientRequestId`; `moveId` 32 chars and `clientRequestId` 128 chars → not 400. *(FR-803)*
@@ -259,7 +246,7 @@ All API VCs call the handler functions with `deps.getService` returning a `GameS
 - **VC-826:** route files export only `GET`/`POST` (checked by importing each module and listing its keys), and `pnpm build` succeeds. *(FR-813)*
 
 ### Logging
-- **VC-827:** each scripted request in VC-815–VC-823 produces exactly one `info` line with all nine FR-814 keys; for a POST move whose response has 4 AI `bid-made`/`card-played` events → `aiMoves: 4`, `fromVersion` = request version, `toVersion` = response version; for a 401 → `seat: null`, `toVersion: null`, `errorCode: 'unauthorized'`. *(FR-814)*
+- **VC-827:** each scripted request in VC-815–VC-823 produces exactly one `info` line with all nine FR-814 keys; for a POST move whose response has 4 AI `bid-made`/`card-played` events → `aiMoves: 4`, `fromVersion` = request version, `toVersion` = response version; for a 401 → `seat: null`, `toVersion: null`, `errorCode: 'unauthorized'`; for a 422 → `seat: null`, `errorCode: 'illegal_move'`; for a 409 → `seat` = the update's seat and `toVersion` = the update's version; `durationMs` is an integer in every line. *(FR-814)*
 - **VC-828:** with `logLevel` `warn` → a 200 emits no line and a 500 emits exactly one `error` line; with `debug` → a 200 emits one `info` line. *(FR-816)*
 - **VC-829:** across the whole API suite, no captured log line (serialized) contains any issued seat token, the string `Bearer`, any `seatTokenHashes` entry, any game's seed, or the key `hands`. *(BR-803)*
 - **VC-830:** a test service wrapper throws `AiLoopLimitError` with a real state → 500 body contains no card of any hand and no seed; the `error` line contains no seed. *(BR-802, BR-803)*
@@ -268,14 +255,18 @@ All API VCs call the handler functions with `deps.getService` returning a `GameS
 - **VC-831: No-leak scripted game**
   - Scenario: play full games over the handlers to `game-over` for `argentina-fidepo` with 4 seats (a full-deck deal: 4 × 13), and for `spain-ludoteka` with 3 seats. Every response is collected, including the 201, every GET with and without `since`, a provoked 409 and a provoked 422.
   - Input/State: at each response, the server's current state read directly from the store (`loadLatest`).
-  - Expected Result: for each serialized body, no card held at that moment in another seat's hand appears as a `{suit, rank}` object anywhere in it (the `trumpCard` when `trumpCardInDealerHand` excepted), no undealt stock card appears, no key `seed`, `seatTokenHashes` or `aiDecisionCount` exists, and the seat token string appears only in the 201 body.
+  - Expected Result: for each body that carries an update (the 201's `update`, a 200, the 409's `update`):
+    - (a) in `view`, excluding `currentTrick`, `lastTrick` and `trumpCard`, no card of another seat's current hand and no card of the current stock appears as a `{suit, rank}` object, and `view.yourHand` deep-equals the responding seat's current hand;
+    - (b) `view.trumpCard` equals the current hand's trump card;
+    - (c) in `events`, card objects appear only at `card-played.card` and `hand-dealt.trumpCard`.
+
+    The current stock is `buildDeck(rules.deck, seatCount)` minus every card dealt in the current hand (the current hands plus the cards played so far in this hand). For every body: no key `seed`, `seatTokenHashes` or `aiDecisionCount` exists at any depth, no value is an array of card arrays (the raw `hand.hands` shape), and the seat token string appears only in the 201 body.
   - Failure Mode Covered: a view, event or error that serializes raw state.
   *(BR-801)*
 
-### Benchmark and NFRs
-- **VC-832:** `bench-moves` smoke test (spawned with `STORAGE_DRIVER=memory`, `--samples 3 --ai 2`) → exit 0; stdout is one JSON object with `driver: 'memory'`, `samples: 3`, and `cold`, `warm`, `staleHint` each with `n: 3` and numbers `p50Ms ≤ p95Ms ≤ maxMs`; stdout contains no seat token. `--samples 0` → exit 2 with usage on stderr. *(FR-817–FR-819)*
-- **VC-833:** stale-hint case → a unit test of the bench's case runner over a recording `MemoryObjectStore` wrapper observes an overwrite `put` of `head.json` with `version` = tip − 2 (or 0) before the third `submitMove`, and that `submitMove` resolves with `version` = tip + 1. *(FR-818)*
-- **VC-834:** NFR check → the 200-move API test reports API-layer p95 overhead < 5 ms vs direct service calls; CI "Test" step time for `tests/api` < 20 s; `pnpm typecheck && pnpm lint && pnpm test && pnpm build` pass; `package.json` `dependencies` unchanged. *(NFR-801–NFR-803)*
+### Structure and NFRs
+- **VC-832:** a static test reads `app/api/_lib/handlers.ts` and the four `route.ts` files → none contains a numeric HTTP status ≥ 400 or a `status: 4xx/5xx` literal (only `errors.ts` does); none imports from `src/state`, `src/storage` or `src/engine` (`service-factory.ts` excluded). *(BR-804, BR-805)*
+- **VC-834:** NFR check → `pnpm vitest run tests/api` reports `Duration` < 20 s on a CI runner; `pnpm typecheck && pnpm lint && pnpm test && pnpm build` pass; `package.json` `dependencies` unchanged. *(NFR-802, NFR-803)*
 
 ### Manual and docs
 - **VC-835: Manual curl session**
@@ -283,7 +274,7 @@ All API VCs call the handler functions with `deps.getService` returning a `GameS
   - Expected Result: every call returns the documented status; `.data/games/<id>/commits/` holds one file per version; the last GET shows `phase: 'game-over'` and `finalRanking`.
   - Failure Mode Covered: Next.js wiring that only fails under the real server (params, body reading, headers).
   *(FR-808–FR-811, FR-813)*
-- **VC-836:** docs → architecture §7 contains the 410 and 413 rows and the presets shape; §10 the log levels; §11 a pending-benchmark note and open question 1 still open; development.md has §16 "HTTP API" and §17 "Known limitations" with no stale `§16` cross-reference; implementation.md Phase 8 notes the deferral. *(FR-820, BR-806)*
+- **VC-836:** docs → architecture §7 contains the 410 and 413 rows and the presets shape; §10 the log levels; §11 a pending-benchmark note and open question 1 still open; development.md has §16 "HTTP API" and §17 "Known limitations" with no stale `§16` cross-reference; implementation.md Phase 8 and the M2 row note the deferral, and no doc states that the 500 ms p95 target is met. *(FR-820, BR-806)*
 
 ## Open Questions
 
@@ -296,4 +287,3 @@ None.
 - `params` in Next.js 16 Route Handlers is a `Promise`, so handlers `await ctx.params`.
 - The request line uses `console.log` and the error line `console.error`, as architecture §10 prescribes; there is no logging library.
 - `deck` in the presets response is the deck id (`french-52` / `spanish-40`), enough for the Phase 9 new-game form.
-- The stale-hint case in the benchmark writes `head.json` directly; this is a benchmark-only exception to BR-805 and never runs in the app.
