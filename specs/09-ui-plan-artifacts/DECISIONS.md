@@ -143,3 +143,21 @@
 **Decision**: `markFinished(deps, id)` (beside `clearOwnSlot`) re-reads the stored slot and writes `{ ...stored, finished: true }` only when its `gameId` equals `id`; it also marks a matching in-memory slot. An effect keyed on `adopted?.view.phase === 'game-over'` calls it, so a game that loads already finished is marked too. Iteration 6 must keep this keyed on the adopted view, not the shown one.
 **Rejected**: writing in the move response handler (misses the load path).
 **Consequences**: `denied`/401 paths share `deny(status)` = `clearOwnSlot` + `denied`.
+
+## D-025: Copy added for the score sheet and game over  (Iteration 6)
+**Context**: FR-927 and FR-926 give no text for column headings or a game-over title; P-9 wants every string in `COPY`.
+**Decision**: Added `handNumber: '#'`, `points: 'Puntos'`, `total: 'Total'`, `gameOverTitle: 'Fin de la partida'`. Headings reuse `seatCards` (`Cartas`), `seatBid` (`Pedido`), `seatTricks` (`Bazas`). The banner reuses `COPY.handCompleted` and prints `<name>: Pedido <b> · Bazas <t>` per seat. The ranking shows place, name and total as plain numbers (no label).
+**Rejected**: a `Posición` heading or `puntos` suffix on totals (more invented copy).
+**Consequences**: Iteration 8 documents these as minimal labels; the spec still gives no text for them.
+
+## D-026: The queue is the not-yet-finished events; one timer per head  (Iteration 6)
+**Context**: P-5 describes a `setTimeout` chain. FR-920 applies an event at its start and holds it for its delay, and `queue` empty must mean "drained".
+**Decision**: `queue` holds the events not finished, head included. `adopt` of a `create` or `move` update with at least one event sets `queue = update.events`, `display = applyEvent(start, events[0])`, `shownBefore` = `null` (create) or the view shown before (the adopted view, or the one a running queue began from). An effect keyed on `queue` sets one `deps.setTimeout(tick, eventDelayMs(queue[0]))`; `tick` drops the head and applies the next event; the last tick sets `queue = []`, `display = null`, `shownBefore = adopted.view`. `skip` does the same at once. A 201/200 with no events jumps. The page renders `shown = queueEmpty ? adopted.view : shownBefore` for the score sheet, phase and `GameOver`.
+**Rejected**: a `setTimeout` chain inside an async function (no clean cancel on skip or unmount).
+**Consequences**: A kept 201 update is adopted with source `'create'`. Tests: one `flush(ms)` fires at most one tick (React renders and re-arms the timer after the `act` ends), so step the clock event by event.
+
+## D-027: Page chrome buttons are not game controls in tests  (Iteration 6)
+**Context**: FR-927 and FR-923 add `Planilla` (always) and `Saltar` (queue) buttons; Iteration 5 tests counted all buttons as bid/card controls.
+**Decision**: `moves.test.tsx` got a `controls()` helper that drops `Planilla` and `Saltar`; its VC-925 now clicks `Saltar` before the next action because a real 200 animates. The new tests use the same filter.
+**Rejected**: hiding `Planilla` while input is possible (the spec shows it at all times).
+**Consequences**: Later tests counting buttons must filter the chrome.

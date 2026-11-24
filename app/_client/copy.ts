@@ -58,4 +58,9 @@ export const COPY = {
     'made-so-far': 'Cumplida',
     busted: 'Pasada',
   },
+  // Copy the spec gives no text for (Iteration 6, D-025): score-sheet headings, game-over title.
+  handNumber: '#',
+  points: 'Puntos',
+  total: 'Total',
+  gameOverTitle: 'Fin de la partida',
 } as const;

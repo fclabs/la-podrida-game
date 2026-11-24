@@ -7,13 +7,15 @@ import { getUpdate, submitMove } from './api';
 import { BidBar } from './bid-bar';
 import { COPY } from './copy';
 import { type ClientDeps, useClientDeps, WithClientDeps } from './deps';
-import { viewToDisplay, type DisplayModel } from './display';
-import { type UpdateSource, captureAction, shouldAdopt } from './game-state';
+import { applyEvent, emptyTable, eventDelayMs, viewToDisplay, type DisplayModel } from './display';
+import { type UpdateSource, captureAction, isAnimated, shouldAdopt } from './game-state';
+import { GameOver } from './game-over';
 import { Hand } from './hand';
 import styles from './game-page.module.css';
 import { takeKeptUpdate } from './kept-update';
 import { getMemorySlot, setMemorySlot } from './memory-slot';
 import { Notice } from './notice';
+import { ScoreSheet } from './score-sheet';
 import { type GameSlot, clearSlot, readSlot, writeSlot } from './slot';
 import { Table } from './table';
 import type { PlayerView } from '@/src/domain/types';
@@ -22,7 +24,11 @@ import type { PlayerView } from '@/src/domain/types';
 export type LoadStatus =
   'init' | 'loading' | 'ready' | 'no-access' | 'invalid' | 'gone' | 'unsupported' | 'failed';
 
-/** The P-5 reducer state. `queue` and `display` are wired in Iteration 6; `request`/`notice` here. */
+/**
+ * The P-5 reducer state. `queue` holds the events not yet finished: its head is the event being
+ * shown (applied to `display` when it started, held for `eventDelayMs`). `shownBefore` is the view
+ * shown before the adoption (`null` for a 201, which starts from the empty table).
+ */
 export interface GameState {
   load: LoadStatus;
   adopted: PlayerUpdate | null;
@@ -47,7 +53,10 @@ export type GameAction =
   | { type: 'move-failed' }
   | { type: 'move-settled' } // request back to idle
   | { type: 'notice'; message: string }
-  | { type: 'notice-clear' };
+  | { type: 'notice-clear' }
+  // Queue playback (FR-920, FR-923): the head's delay ended / `Saltar`.
+  | { type: 'tick' }
+  | { type: 'skip' };
 
 type MoveBody = ReturnType<typeof captureAction>;
 
@@ -61,7 +70,7 @@ export const initialGameState: GameState = {
   notice: null,
 };
 
-/** FR-910/FR-911: only the non-animated adoption exists so far (animation arrives in Iteration 6). */
+/** FR-910/FR-911: 201 and 200 adoptions queue their events; every other source jumps. */
 export function gameReducer(state: GameState, action: GameAction): GameState {
   switch (action.type) {
     case 'load-start':
@@ -77,17 +86,43 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
     }
     case 'adopt': {
       if (!shouldAdopt(state.adopted, action.update)) return state;
-      // Iteration 6: consult `isAnimated(action.source)` here; for 'create' and 'move' queue the
-      // events instead of jumping. Until then every source jumps (200/201 included).
-      return {
+      const { update, source } = action;
+      const jump = {
         ...state,
-        load: 'ready',
-        adopted: action.update,
-        shownBefore: action.update.view,
+        load: 'ready' as const,
+        adopted: update,
+        shownBefore: update.view,
         queue: [],
         display: null,
       };
+      const first = update.events[0];
+      if (!isAnimated(source) || first === undefined) return jump;
+      // The view shown before the adoption: the adopted view, or the one a running queue began from.
+      const before = state.queue.length > 0 ? state.shownBefore : (state.adopted?.view ?? null);
+      const start = source === 'create' || before === null ? null : viewToDisplay(before);
+      const model = start ?? emptyTable(update.view);
+      return {
+        ...state,
+        load: 'ready',
+        adopted: update,
+        shownBefore: source === 'create' ? null : before,
+        queue: update.events,
+        display: applyEvent(model, first, update.view),
+      };
     }
+    case 'tick': {
+      if (state.queue.length === 0 || state.adopted === null) return state;
+      const rest = state.queue.slice(1);
+      const next = rest[0];
+      if (next === undefined) {
+        return { ...state, queue: [], display: null, shownBefore: state.adopted.view };
+      }
+      const base = state.display ?? viewToDisplay(state.adopted.view);
+      return { ...state, queue: rest, display: applyEvent(base, next, state.adopted.view) };
+    }
+    case 'skip':
+      if (state.queue.length === 0) return state;
+      return { ...state, queue: [], display: null, shownBefore: state.adopted?.view ?? null };
     case 'move-start':
       return { ...state, request: 'in-flight', notice: null };
     case 'move-send':
@@ -154,6 +189,7 @@ function Game({ id }: { id: string }) {
   const deps = useClientDeps();
   const [state, dispatch] = useReducer(gameReducer, initialGameState);
   const [attempt, setAttempt] = useState(0);
+  const [sheetOpen, setSheetOpen] = useState(false);
   const slotRef = useRef<GameSlot | null>(null);
   // P-4: take the kept 201 update once per instance; Strict Mode's second effect run reuses it.
   const keptRef = useRef<{ id: string; update: PlayerUpdate | null } | undefined>(undefined);
@@ -183,6 +219,15 @@ function Game({ id }: { id: string }) {
     const handle = deps.setTimeout(() => dispatch({ type: 'notice-clear' }), NOTICE_MS);
     return () => deps.clearTimeout(handle as never);
   }, [deps, notice]);
+
+  // FR-920: the head of the queue is held for its delay, then the next event starts.
+  const { queue } = state;
+  useEffect(() => {
+    const head = queue[0];
+    if (head === undefined) return;
+    const handle = deps.setTimeout(() => dispatch({ type: 'tick' }), eventDelayMs(head));
+    return () => deps.clearTimeout(handle as never);
+  }, [deps, queue]);
 
   // FR-912: game over in the adopted view marks the slot finished (FR-938 ownership inside).
   const gameOver = state.adopted?.view.phase === 'game-over';
@@ -242,7 +287,6 @@ function Game({ id }: { id: string }) {
     if (result.kind === 'ok') {
       busyRef.current = false;
       dispatch({ type: 'move-settled' });
-      // Iteration 6: a 200 animates (`isAnimated('move')`); until then it jumps.
       dispatch({ type: 'adopt', update: result.body, source: 'move' });
     } else if (result.kind === 'conflict') {
       busyRef.current = false;
@@ -295,8 +339,8 @@ function Game({ id }: { id: string }) {
     }
     const kept = keptRef.current.update;
     if (kept !== null && attempt === 0) {
-      // Iteration 4: adopted at once; the opening animation arrives in Iteration 6.
-      dispatch({ type: 'adopt', update: kept, source: 'load' });
+      // FR-902: the kept 201 update animates its events from the empty table.
+      dispatch({ type: 'adopt', update: kept, source: 'create' });
       return;
     }
 
@@ -360,11 +404,37 @@ function Game({ id }: { id: string }) {
   const view = state.adopted.view;
   const model = state.display ?? viewToDisplay(view);
   const queueEmpty = state.queue.length === 0;
+  // FR-937: while events play, the score sheet, phase and game-over screen use the view shown
+  // before the adoption (`null`: the empty table of a 201).
+  const shown = queueEmpty ? view : state.shownBefore;
   const deck = slotRef.current?.deck;
   const legalMoves = state.adopted.legalMoves;
   const requestBusy = state.request !== 'idle';
   return (
     <main className={styles.page}>
+      <div className={styles.bar}>
+        <button type="button" className={styles.button} onClick={() => setSheetOpen(true)}>
+          {COPY.scoreSheet}
+        </button>
+        {!queueEmpty && (
+          <button
+            type="button"
+            className={styles.button}
+            onClick={() => dispatch({ type: 'skip' })}
+          >
+            {COPY.skip}
+          </button>
+        )}
+      </div>
+      {sheetOpen && (
+        <ScoreSheet
+          scoreboard={shown?.scoreboard ?? null}
+          handPlan={model.handPlan}
+          handIndex={shown?.handIndex ?? model.handIndex}
+          seats={model.seats}
+          onClose={() => setSheetOpen(false)}
+        />
+      )}
       <Table
         model={model}
         toAct={queueEmpty ? view.toAct : null}
@@ -380,6 +450,9 @@ function Game({ id }: { id: string }) {
           />
         }
       />
+      {shown?.phase === 'game-over' && shown.finalRanking !== undefined && (
+        <GameOver ranking={shown.finalRanking} seats={model.seats} />
+      )}
       {queueEmpty && legalMoves.length > 0 && (
         <BidBar legalMoves={legalMoves} disabled={requestBusy} onBid={act} />
       )}

@@ -1,5 +1,6 @@
 import type { PlayerView } from '@/src/domain/types';
 import type { ReactNode } from 'react';
+import { Banner } from './banner';
 import { CardView } from './card-view';
 import { COPY } from './copy';
 import type { DisplayModel } from './display';
@@ -44,11 +45,14 @@ export function Table({ model, toAct, deck, hand }: TableProps) {
         </h2>
       )}
 
+      {model.banner !== null && <Banner banner={model.banner} seats={model.seats} />}
+
       <ul className={styles.seats}>
         {model.seats.map((s) => (
           <li
             key={s.seat}
             data-seat={s.seat}
+            data-highlight={model.highlightSeat === s.seat ? 'true' : undefined}
             className={`${styles.seat} ${model.highlightSeat === s.seat ? styles.highlight : ''}`}
           >
             <span className={styles.name}>

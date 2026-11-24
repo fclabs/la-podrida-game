@@ -1,17 +1,18 @@
 # CONTEXT — UI (Phase 9)
 
-Last updated by: Iteration 5 (bidding, playing, retries, move responses). Branch `spec/09-ui`.
+Last updated by: Iteration 6 (event animation, score sheet, game over). Branch `spec/09-ui`.
 
 ## Current state
 
-- Phases 0–8 are done and frozen (`specs/00`–`specs/08-*-frozen.md`). Phase 9 (UI) is in progress: Iterations 1–5 are done.
+- Phases 0–8 are done and frozen (`specs/00`–`specs/08-*-frozen.md`). Phase 9 (UI) is in progress: Iterations 1–6 are done.
 - **Done**: jsdom component-test infrastructure beside the node tests; an in-process API (real Phase 8 handlers) for UI tests; pure modules `slot`, `ids`, `cards`, `copy`, `kept-update`; `app/globals.css`; the static layer-boundary test; the Phase 8 freeze (frozen capsule added, working files removed).
 - **Also done (Iterations 2–3)**: API client with FR-936 status mapping and shape checks; pure version guard / action capture / event display model; shared UI test fixtures.
 - **Also done (Iteration 4)**: `/` (new-game form, continue link) and `/game/[id]` (load paths, table). Nothing is playable: no bid buttons, clickable cards, animation, score sheet, game-over screen or move requests; the kept 201 update is shown at once.
 - **Also done (Iteration 5)**: bid buttons and clickable cards; one captured action per click, idempotent retries at 1/2/4 s then `Reintentar`, every FR-918 outcome, 4 s notices, `finished: true` on game over, slot ownership (FR-938). 200/201 adoption still jumps (no animation).
-- **Not done**: animation, score sheet, game-over screen (6), full-game test and responsive pass (7), docs (8).
+- **Also done (Iteration 6)**: the event queue (201 from the empty table, 200 from the shown view), `Saltar`, seat highlight, hand-completed banner, `Planilla` score sheet (running totals, live statuses), game-over screen. 409/load/recovery stay instant.
+- **Not done**: full-game test and responsive pass (7), docs (8).
 - Toolchain: Next 16.4.6, React 19.3.1, TypeScript 6.0.3 strict, Vitest 5.1.1 (Vite 8.3.8), pnpm 10.15.1. Local Node is 26 (the "Unsupported engine" WARN is expected and not fatal).
-- Test totals after Iteration 5: `pnpm test` = 94 files passed + 1 skipped, 1682 tests passed + 30 skipped; `ui` project alone: 16 files, 214 tests.
+- Test totals after Iteration 6: `pnpm test` = 97 files passed + 1 skipped, 1694 tests passed + 30 skipped; `ui` project alone: 19 files, 226 tests.
 - `dependencies` are unchanged from `main`. New devDependencies (exact): `jsdom` 31.0.1, `@testing-library/react` 16.3.3, `@testing-library/dom` 10.4.2, `@testing-library/user-event` 14.6.13. `@vitejs/plugin-react` is NOT installed (not needed, see D-001).
 
 ## File map
@@ -46,6 +47,8 @@ Last updated by: Iteration 5 (bidding, playing, retries, move responses). Branch
 | `app/_client/game-page.tsx` (+ `.module.css`) | `GamePage`, `gameReducer`, `initialGameState`, types `GameState`, `GameAction`, `LoadStatus` (D-016); private `resolveSlot`, `clearOwnSlot`. |
 | `app/_client/table.tsx` (+ `.module.css`) | `Table` (FR-925); optional `hand` node replaces the plain hand list (D-021). |
 | `app/_client/bid-bar.tsx`, `hand.tsx`, `notice.tsx` (+ `.module.css`) | `BidBar` (FR-914), `Hand` (FR-913/915), `Notice` (FR-919). |
+| `app/_client/banner.tsx`, `score-sheet.tsx`, `game-over.tsx` (+ `.module.css`) | `Banner` (FR-921, rendered by `Table` when `model.banner`), `ScoreSheet` (FR-927/928), `GameOver` (FR-926). |
+| `tests/ui/animation.test.tsx`, `score-sheet.test.tsx`, `game-over.test.tsx` | VC-901 (anim), 923 (queue), 927 (409), 932–935, 941 (screen), 942, 943. |
 | `app/_client/card-view.tsx` (+ `.module.css`) | `CardView` (FR-933/934). |
 | `app/_client/memory-slot.ts` | FR-931 in-memory slot (D-017). |
 | `tests/ui/support/render.tsx` | `renderWithDeps`, `makeDeps`, `createStoredGame`, `resetClientState`. |
@@ -97,6 +100,11 @@ getMemorySlot(): GameSlot | null;  setMemorySlot(slot: GameSlot | null): void;
 <Table model: DisplayModel toAct: number | null deck: string | undefined hand?: ReactNode />
 <BidBar legalMoves disabled onBid(moveId) />  <Hand cards deck legalMoves interactive disabled onPlay(moveId) />  <Notice message />
 <CardView card deck onClick? disabled? dimmed? />   // <button> when onClick, else <span role="img">, aria-label = card name
+<Banner banner seats />
+<ScoreSheet scoreboard: ScoreBoard | null handPlan: number[] handIndex: number seats: {seat,name}[] onClose />  // role=dialog, rows tbody tr[data-row][data-state=done|live|empty], totals tfoot tr
+<GameOver ranking: NonNullable<PlayerView['finalRanking']> seats: {seat,name}[] />  // ol li[data-seat], link `Nueva partida`
+// Table seats carry data-highlight="true" on the acting seat (FR-924).
+// COPY also has (Iteration 6, D-025): handNumber, points, total, gameOverTitle.
 // COPY also has: title, loading, dealerMarker, turnMarker, seatCards, seatBid, seatTricks, trumpLabel,
 // currentTrickLabel, lastTrickLabel, lastTrickWinner(name), yourHandLabel, seatFallback(seat) (D-019)
 
@@ -158,6 +166,8 @@ makeUpdate(o?): PlayerUpdate;  makeScoreboard(o?, seats?): ScoreBoard;  card(ran
 - Display code never mutates models; each event returns a new model. Queue start: `emptyTable(adopted.view)` for a `create` update, `viewToDisplay(shownBefore)` for `move`; when the queue empties render `viewToDisplay(adopted.view)`.
 - Component tests: wrap in `ClientDepsProvider` through `renderWithDeps`; never mock `next/navigation`. Call `resetClientState()` in `beforeEach` (kept update and memory slot are module variables). Under `vi.useFakeTimers()` use `fireEvent` and `act(async () => vi.advanceTimersByTimeAsync(ms))`, not `userEvent` (D-020). The fake deps' timers call the global `setTimeout` at call time.
 - Page rules: slot read only in effects; the page uses the stored slot if its `gameId` equals the route id, else the in-memory slot; slot changes only when the stored `gameId` equals the route id, re-read first (FR-938). The load effect dedupes by `"<id>:<attempt>"` (Strict Mode, D-018).
+- Queue (D-026): `GameState.queue` = events not finished (head is shown); `tick` / `skip` actions; an effect keyed on `queue` arms one `deps.setTimeout` per head. `shown = queueEmpty ? adopted.view : shownBefore` feeds the score sheet, phase and `GameOver` (FR-937); `shownBefore` is `null` for a 201. Table `toAct` is `null` while the queue plays. `finished: true` stays keyed on the adopted phase (D-024).
+- Tests under fake timers: one `flush(ms)` fires at most one queue tick (renders re-arm the timer after `act`); step the clock per event. Filter `Planilla`/`Saltar` when counting game controls (D-027).
 - Move pipeline (`game-page.tsx`, D-022): `request` (`idle|in-flight|retry-wait|failed`) is the one "disabled" flag; reducer actions `move-start|move-send|move-wait|move-failed|move-settled|notice|notice-clear` besides the Iteration 4 ones. The captured body is in `pendingRef` and every send reuses it. Responses: 200 adopt `'move'`; 409 adopt `'conflict'` + notice; 403/422 and 400/413 `recover(since, message)`; 401/404/410 `deny`. `markFinished` and `clearOwnSlot` re-read the slot first (FR-938).
 - Prettier: single quotes, 100 columns; `pnpm lint` runs prettier `--check` over the whole repo.
 
@@ -169,7 +179,7 @@ makeUpdate(o?): PlayerUpdate;  makeScoreboard(o?, seats?): ScoreBoard;  card(ran
 ## Known gaps
 
 - The display model has no turn marker or legal moves (page takes them from the adopted update when the queue is empty, FR-937); `game-over` responses are not foldable to the final view by design.
-- Animation is not wired: the kept 201 update is adopted at once (source `'load'`) and a 200 move response jumps (source `'move'`); `queue` and `display` are unused; no `Saltar`. The `adopt` case of `gameReducer` and the `'move'` dispatch in `send` carry comments marking where `isAnimated(source)` must be consulted (Iteration 6).
-- Copy decided in Iteration 4 (D-019): table labels. No bid prompt copy exists (D-023). Still open: score-sheet column headings, game-over place labels (Iterations 5–6 decide or stop).
+- `ScoreSheet` live row uses the shown view's `handIndex`; its `Total` column on a live row is empty; a `game-over` view's `live` is whatever the server sends.
+- Copy decided in Iteration 4 (D-019): table labels. No bid prompt copy exists (D-023). Score-sheet headings and game-over title: D-025.
 - `RecordedCall.status` is an addition to the plan's `{ method, path, headers, body }` (used by VC-945 "every request was 200/201").
 - No manual or real-browser checks yet (Iteration 7).

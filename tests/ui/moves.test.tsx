@@ -38,7 +38,12 @@ async function open(update = biddingUpdate(), api = makeInProcessApi()) {
   return { ...result, api };
 }
 
-const bidButtons = () => screen.queryAllByRole('button').map((b) => b.textContent);
+// The page chrome (`Planilla`, `Saltar`) is not a game control; the tests below count controls only.
+const controls = () =>
+  screen
+    .queryAllByRole('button')
+    .filter((b) => b.textContent !== COPY.scoreSheet && b.textContent !== COPY.skip);
+const bidButtons = () => controls().map((b) => b.textContent);
 const click = (el: HTMLElement) => fireEvent.click(el);
 
 describe('bidding and playing controls (VC-921, VC-922, VC-923)', () => {
@@ -54,7 +59,7 @@ describe('bidding and playing controls (VC-921, VC-922, VC-923)', () => {
 
   it('VC-922: legal cards are enabled buttons, the others are dimmed and send nothing', async () => {
     const { api } = await open(playingUpdate());
-    const buttons = screen.getAllByRole('button');
+    const buttons = controls();
     expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
       '2 de picas',
       'Rey de diamantes',
@@ -68,7 +73,7 @@ describe('bidding and playing controls (VC-921, VC-922, VC-923)', () => {
 
   it('VC-923: no buttons when legalMoves is empty (hand dimmed, not clickable)', async () => {
     await open(makeUpdate({ legalMoves: [] }));
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
+    expect(controls()).toHaveLength(0);
     expect(screen.getAllByRole('img', { name: /de/ }).length).toBeGreaterThan(0);
   });
 
@@ -77,7 +82,7 @@ describe('bidding and playing controls (VC-921, VC-922, VC-923)', () => {
     api.failNext('hang', { method: 'POST' });
     click(screen.getByRole('button', { name: '2' }));
     await flush();
-    const buttons = screen.getAllByRole('button') as HTMLButtonElement[];
+    const buttons = controls() as HTMLButtonElement[];
     expect(buttons).toHaveLength(3);
     expect(buttons.every((b) => b.disabled)).toBe(true);
     click(buttons[0] as HTMLButtonElement);
@@ -121,7 +126,7 @@ describe('retries (VC-925, VC-926, FR-917)', () => {
     renderWithDeps(<GamePage id={game.gameId} />, { api });
     await flush();
     const version = game.update.version;
-    const legal = screen.getAllByRole('button');
+    const legal = controls();
     expect(legal.length).toBeGreaterThan(0);
     api.failNext('reject-after', { method: 'POST' });
     click(legal[0] as HTMLElement);
@@ -140,7 +145,10 @@ describe('retries (VC-925, VC-926, FR-917)', () => {
     expect(tip.version).toBe(version + 1);
 
     // The UI adopted v + 1: its next action is captured at that version.
-    const next = screen.getAllByRole('button');
+    // The 200's events animate first (FR-911); skip them to reach the next legal action.
+    click(screen.getByRole('button', { name: COPY.skip }));
+    await flush();
+    const next = controls();
     expect(next.length).toBeGreaterThan(0);
     api.failNext({ status: 500, body: {} }, { method: 'POST' });
     click(next[0] as HTMLElement);
@@ -371,7 +379,7 @@ describe('in-memory slot (VC-905 completion, FR-931)', () => {
     });
     renderWithDeps(<GamePage id={game.gameId} />, { api });
     await flush();
-    const buttons = screen.getAllByRole('button');
+    const buttons = controls();
     click(buttons[0] as HTMLElement);
     await flush();
     const [move] = moveCalls(api);

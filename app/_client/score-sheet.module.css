@@ -1,0 +1,52 @@
+.panel {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  background: var(--bg);
+  color: var(--text);
+  overflow: auto;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.title {
+  margin: 0;
+}
+
+.close {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.scroll {
+  overflow-x: auto;
+}
+
+.table {
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.table th,
+.table td {
+  min-width: 2.2ch;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  text-align: center;
+}
