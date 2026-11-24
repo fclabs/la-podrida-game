@@ -1,10 +1,31 @@
-// Request and error logging (spec FR-814–FR-816, BR-803; plan P-7). VC-827 (create part), VC-828.
+// Request and error logging (spec FR-814–FR-816, BR-803; plan P-7). VC-827, VC-828, D-013.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createGameHandler, presetsHandler } from '@/app/api/_lib/handlers';
+import {
+  createGameHandler,
+  getGameHandler,
+  presetsHandler,
+  submitMoveHandler,
+} from '@/app/api/_lib/handlers';
 import { consoleLog, withRequestLog } from '@/app/api/_lib/log';
-import { CreateGameResponseSchema } from '@/app/api/_lib/schemas';
+import {
+  CreateGameResponseSchema,
+  ErrorResponseSchema,
+  PlayerUpdateResponseSchema,
+} from '@/app/api/_lib/schemas';
 import { ConfigError } from '@/src/config';
-import { getReq, makeApi, postJson, readJson, type Api } from './support/api-fixtures';
+import type { PlayerUpdate } from '@/src/domain/types';
+import { firstLegalMoveId } from '../unit/service/support/service-fixtures';
+import {
+  bearer,
+  createGameVia,
+  ctx,
+  getReq,
+  makeApi,
+  postJson,
+  readJson,
+  type Api,
+  type GameIds,
+} from './support/api-fixtures';
 
 const PATH = '/api/games';
 const VALID = { humanName: 'Ana', aiCount: 3 };
@@ -259,5 +280,246 @@ describe('consoleLog', () => {
     consoleLog('error', { b: 2 });
     expect(log).toHaveBeenCalledExactlyOnceWith('{"a":1}');
     expect(error).toHaveBeenCalledExactlyOnceWith('{"b":2}');
+  });
+});
+
+const MOVE_ROUTE = 'POST /api/games/[id]/moves';
+const GET_ROUTE = 'GET /api/games/[id]';
+
+function aiMovesIn(update: PlayerUpdate): number {
+  return update.events.filter(
+    (e) => (e.type === 'bid-made' || e.type === 'card-played') && e.seat !== update.view.you,
+  ).length;
+}
+
+async function moveVia(
+  api: Api,
+  ids: GameIds,
+  body: unknown,
+  headers: Record<string, string> | undefined = bearer(ids.seatToken),
+): Promise<{ res: Response; body: unknown }> {
+  const res = await submitMoveHandler(
+    postJson(`/api/games/${ids.gameId}/moves`, body, { headers }),
+    ctx(ids.gameId),
+    api.deps,
+  );
+  return { res, body: await readJson(res) };
+}
+
+/** The single info line of the last request (asserts exactly one was added). */
+function onlyNewLine(api: Api, before: number): Record<string, unknown> {
+  const added = api.logs.slice(before);
+  expect(added).toHaveLength(1);
+  expect(added[0].level).toBe('info');
+  expect(Object.keys(added[0].line).sort()).toEqual(REQUEST_KEYS);
+  expect(Number.isInteger(added[0].line.durationMs)).toBe(true);
+  return added[0].line;
+}
+
+describe('VC-827 (rest): GET and move lines', () => {
+  it('a 200 move logs fromVersion, toVersion and the AI bid/play count', async () => {
+    const api = makeApi();
+    let ids = await createGameVia(api);
+    let sawAiMoves = false;
+    // Several moves, so at least one response carries AI bids/plays.
+    for (let i = 0; i < 6; i++) {
+      const before = api.logs.length;
+      const body = {
+        version: ids.update.version,
+        moveId: firstLegalMoveId(ids.update),
+        clientRequestId: `log-${i}`,
+      };
+      const { res, body: resBody } = await moveVia(api, ids, body);
+      expect(res.status).toBe(200);
+      const update = PlayerUpdateResponseSchema.parse(resBody);
+      const k = aiMovesIn(update);
+      if (k > 0) sawAiMoves = true;
+      expect(onlyNewLine(api, before)).toEqual({
+        route: MOVE_ROUTE,
+        gameId: ids.gameId,
+        seat: 0,
+        fromVersion: body.version,
+        toVersion: body.version + 1,
+        aiMoves: k,
+        status: 200,
+        durationMs: 1,
+        errorCode: null,
+      });
+      ids = { ...ids, update };
+    }
+    expect(sawAiMoves).toBe(true);
+  });
+
+  it('a 200 GET logs fromVersion = since (or null) and aiMoves over the missed events', async () => {
+    const api = makeApi();
+    const ids = await createGameVia(api);
+    const body = { version: 0, moveId: firstLegalMoveId(ids.update), clientRequestId: 'g-1' };
+    await moveVia(api, ids, body);
+
+    let before = api.logs.length;
+    const plain = await getGameHandler(
+      getReq(`/api/games/${ids.gameId}`, bearer(ids.seatToken)),
+      ctx(ids.gameId),
+      api.deps,
+    );
+    expect(plain.status).toBe(200);
+    expect(onlyNewLine(api, before)).toMatchObject({
+      route: GET_ROUTE,
+      gameId: ids.gameId,
+      seat: 0,
+      fromVersion: null,
+      toVersion: 1,
+      aiMoves: 0,
+      status: 200,
+      errorCode: null,
+    });
+
+    before = api.logs.length;
+    const since = await getGameHandler(
+      getReq(`/api/games/${ids.gameId}?since=0`, bearer(ids.seatToken)),
+      ctx(ids.gameId),
+      api.deps,
+    );
+    const update = PlayerUpdateResponseSchema.parse(await readJson(since));
+    expect(onlyNewLine(api, before)).toMatchObject({
+      fromVersion: 0,
+      toVersion: 1,
+      aiMoves: aiMovesIn(update),
+      seat: 0,
+    });
+  });
+
+  it('a 401 logs seat null, toVersion null, errorCode unauthorized', async () => {
+    const api = makeApi();
+    const ids = await createGameVia(api);
+    const before = api.logs.length;
+    const body = { version: 0, moveId: firstLegalMoveId(ids.update), clientRequestId: 'u-1' };
+    const { res } = await moveVia(api, ids, body, {});
+    expect(res.status).toBe(401);
+    expect(onlyNewLine(api, before)).toEqual({
+      route: MOVE_ROUTE,
+      gameId: ids.gameId,
+      seat: null,
+      fromVersion: null,
+      toVersion: null,
+      aiMoves: null,
+      status: 401,
+      durationMs: 1,
+      errorCode: 'unauthorized',
+    });
+  });
+
+  it('a 422 logs seat null, errorCode illegal_move, the request version', async () => {
+    const api = makeApi();
+    const ids = await createGameVia(api);
+    const before = api.logs.length;
+    const { res } = await moveVia(api, ids, {
+      version: 0,
+      moveId: 'play:ZZ',
+      clientRequestId: 'i-1',
+    });
+    expect(res.status).toBe(422);
+    expect(onlyNewLine(api, before)).toMatchObject({
+      route: MOVE_ROUTE,
+      gameId: ids.gameId,
+      seat: null,
+      fromVersion: 0,
+      toVersion: null,
+      aiMoves: null,
+      status: 422,
+      errorCode: 'illegal_move',
+    });
+  });
+
+  it('a 409 logs the update seat and version', async () => {
+    const api = makeApi();
+    const ids = await createGameVia(api);
+    const moveId = firstLegalMoveId(ids.update);
+    await moveVia(api, ids, { version: 0, moveId, clientRequestId: 'v-1' });
+    const before = api.logs.length;
+    const { res, body } = await moveVia(api, ids, { version: 0, moveId, clientRequestId: 'v-2' });
+    expect(res.status).toBe(409);
+    const update = ErrorResponseSchema.parse(body).update;
+    if (update === undefined) throw new Error('409 without update');
+    expect(onlyNewLine(api, before)).toEqual({
+      route: MOVE_ROUTE,
+      gameId: ids.gameId,
+      seat: update.view.you,
+      fromVersion: 0,
+      toVersion: update.version,
+      aiMoves: aiMovesIn(update),
+      status: 409,
+      durationMs: 1,
+      errorCode: 'version_conflict',
+    });
+    expect(update.version).toBe(1);
+  });
+
+  it('a 400 since past the tip logs fromVersion = since and no update', async () => {
+    const api = makeApi();
+    const ids = await createGameVia(api);
+    const before = api.logs.length;
+    const res = await getGameHandler(
+      getReq(`/api/games/${ids.gameId}?since=5`, bearer(ids.seatToken)),
+      ctx(ids.gameId),
+      api.deps,
+    );
+    expect(res.status).toBe(400);
+    expect(onlyNewLine(api, before)).toMatchObject({
+      route: GET_ROUTE,
+      gameId: ids.gameId,
+      seat: null,
+      fromVersion: 5,
+      toVersion: null,
+      aiMoves: null,
+      errorCode: 'invalid_request',
+    });
+  });
+});
+
+describe('D-013: the path id is logged only once it has the game id format', () => {
+  it('a malformed id → 404 line with gameId null on both routes', async () => {
+    const api = makeApi();
+    const raw = `BAD-${'x'.repeat(5000)}`;
+    await getGameHandler(getReq('/api/games/x'), ctx(raw), api.deps);
+    await submitMoveHandler(
+      postJson('/api/games/x/moves', { version: 0, moveId: 'm', clientRequestId: 'c' }),
+      ctx(raw),
+      api.deps,
+    );
+    const lines = linesAt(api, 'info');
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(line).toMatchObject({ gameId: null, status: 404, errorCode: 'game_not_found' });
+    }
+    expect(JSON.stringify(api.logs)).not.toContain('BAD-');
+  });
+
+  it('a valid-format unknown id → its 401 line carries the id', async () => {
+    const api = makeApi();
+    const id = 'a'.repeat(26);
+    await getGameHandler(getReq(`/api/games/${id}`), ctx(id), api.deps);
+    expect(linesAt(api, 'info')[0]).toMatchObject({ gameId: id, status: 401 });
+  });
+});
+
+describe('BR-803: GET and move logs carry no token', () => {
+  it('no seat token and no Bearer in any line', async () => {
+    const api = makeApi();
+    const ids = await createGameVia(api);
+    await moveVia(api, ids, {
+      version: 0,
+      moveId: firstLegalMoveId(ids.update),
+      clientRequestId: 's-1',
+    });
+    await getGameHandler(
+      getReq(`/api/games/${ids.gameId}?since=0`, bearer(ids.seatToken)),
+      ctx(ids.gameId),
+      api.deps,
+    );
+    const logged = JSON.stringify(api.logs);
+    expect(logged).not.toContain(ids.seatToken);
+    expect(logged).not.toContain('Bearer');
+    expect(logged).not.toContain('hands');
   });
 });

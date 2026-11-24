@@ -2,15 +2,15 @@
 // a real `GameService` over a `RecordingStore` around a fresh `MemoryObjectStore`.
 import { expect } from 'vitest';
 import type { HandlerDeps } from '@/app/api/_lib/handlers';
-import { createGameHandler } from '@/app/api/_lib/handlers';
+import { createGameHandler, submitMoveHandler } from '@/app/api/_lib/handlers';
 import type { LogLevel } from '@/app/api/_lib/log';
-import { CreateGameResponseSchema } from '@/app/api/_lib/schemas';
+import { CreateGameResponseSchema, PlayerUpdateResponseSchema } from '@/app/api/_lib/schemas';
 import { type Config, loadConfig } from '@/src/config';
 import type { PresetId } from '@/src/domain/rules';
 import type { PlayerUpdate } from '@/src/domain/types';
 import type { GameService } from '@/src/service/game-service';
 import { MemoryObjectStore } from '@/src/storage/memory-store';
-import { makeService } from '../../unit/service/support/service-fixtures';
+import { firstLegalMoveId, makeService } from '../../unit/service/support/service-fixtures';
 import { RecordingStore } from '../../unit/state/support/store-wrappers';
 
 /** The origin of every test request. */
@@ -138,4 +138,46 @@ export function wrapService(service: GameService, overrides: Partial<ServiceMeth
     ...overrides,
   };
   return wrapper as unknown as GameService;
+}
+
+/** `{ authorization: 'Bearer <token>' }`. */
+export function bearer(token: string): Record<string, string> {
+  return { authorization: `Bearer ${token}` };
+}
+
+/** The ids `playToEndVia` needs (the `createGameVia` result fits). */
+export interface GameIds {
+  gameId: string;
+  seatToken: string;
+  update: PlayerUpdate;
+}
+
+/**
+ * Plays a game to `game-over` through `submitMoveHandler`: the human always submits its first
+ * legal move at the latest version, with a fresh `clientRequestId` per call (`via-<n>`). Asserts
+ * each response is a 200 parsing with `PlayerUpdateResponseSchema` and returns them in order (the
+ * last one is the game-over update).
+ */
+export async function playToEndVia(api: Api, ids: GameIds): Promise<PlayerUpdate[]> {
+  const responses: PlayerUpdate[] = [];
+  let update = ids.update;
+  while (update.view.phase !== 'game-over') {
+    const res = await submitMoveHandler(
+      postJson(
+        `/api/games/${ids.gameId}/moves`,
+        {
+          version: update.version,
+          moveId: firstLegalMoveId(update),
+          clientRequestId: `via-${responses.length + 1}`,
+        },
+        { headers: bearer(ids.seatToken) },
+      ),
+      ctx(ids.gameId),
+      api.deps,
+    );
+    expect(res.status).toBe(200);
+    update = PlayerUpdateResponseSchema.parse(await res.json());
+    responses.push(update);
+  }
+  return responses;
 }

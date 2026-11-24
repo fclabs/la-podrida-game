@@ -71,3 +71,21 @@
 - **Decision**: `tests/api/support/api-fixtures.ts` per P-11. `makeApi` passes `defaultPreset` both to `makeService` (`defaultPresetId`) and to `loadConfig` (`DEFAULT_RULES_PRESET`); its `deps` are plain mutable properties so tests swap `getService`/`getConfig`/`now`. `postJson` always sends bytes; `contentType` defaults to `application/json` and `null` sends none. `wrapService` builds a delegating object and casts it `as unknown as GameService` (the class has `#private` members, so no structural object is assignable).
 - **Rejected**: `Object.create(service)` overrides (prototype methods would hit `#private` on the wrong receiver).
 - **Consequences**: `createGameVia` asserts 201 and parses with `CreateGameResponseSchema`; Iteration 3/4 tests reuse it.
+
+## D-013: Log the path id only after the id format check  (Iteration 3)
+- **Context**: FR-814 says `gameId` is "the path id … or `null`"; the Iteration 2 record left open whether a malformed path id is logged. The path segment is untrusted and unbounded.
+- **Decision** (user): the `[id]` handlers set `meta.gameId = id` only after `assertGameIdFormat(id)` passes. A malformed id answers 404 with `gameId: null` in the request line. A valid-format id is logged even when the request then fails (401, 404 from the service, 400 …).
+- **Rejected**: setting `meta.gameId` first (arbitrary-length, attacker-chosen text in the logs); truncating the raw id.
+- **Consequences**: tested in `logging.test.ts` (`D-013` describe: a 5,000-char `BAD-…` id on both routes → `gameId: null`, the text never logged; a valid-format unknown id's 401 carries the id).
+
+## D-014: FR-804 post-call `since` check without a status literal  (Iteration 3)
+- **Context**: the plan's Iteration 3 Scope writes `throw new RequestError(400, 'invalid_request', 'since')` in `handlers.ts`, but spec VC-832 and P-1 forbid any numeric status ≥ 400 in `handlers.ts` (Iteration 4's static scan).
+- **Decision**: `getGameHandler` runs `parseBody(sinceAtMost(update.version), { since })`, where `sinceAtMost(v) = z.strictObject({ since: z.int().max(v) })`. `parseBody` throws `RequestError(400, 'invalid_request', 'since')` — the same error, built in `schemas.ts`. It still uses only the returned update (P-5). Comments in `handlers.ts` also avoid 4xx/5xx numbers.
+- **Rejected**: the literal `RequestError(400, …)` (fails VC-832); a new helper in `schemas.ts`/`errors.ts` (outside Iteration 3's Touches).
+- **Consequences**: `handlers.ts` imports `z` from `zod`. Behaviour is identical (VC-810 tip + 1 → `Invalid request: since`).
+
+## D-015: `[id]` handler shape, route context and test helpers (P-6, P-7, P-8, P-11)  (Iteration 3)
+- **Context**: FR-806 check order, FR-813 route files, Iteration 3 hands-off (`playToEndVia`).
+- **Decision**: `getGameHandler(req, ctx, deps)` / `submitMoveHandler(req, ctx, deps)` with `ctx: GameRouteContext = { params: Promise<{ id: string }> }`, each inside `withRequestLog`: `await ctx.params` → `assertGameIdFormat` → `meta.gameId` → `parseBearer` → `parseSince` / `readJsonBody`+`parseBody(SubmitMoveBodySchema)` → `meta.fromVersion` → `deps.getService()` call → `{ status: 200, body: update, update }`. Route files type `ctx` inline (`{ params: Promise<{ id: string }> }`), two imports + one export. `api-fixtures.ts` gains `bearer(token)`, `GameIds` and `playToEndVia(api, ids)`.
+- **Rejected**: importing `GameRouteContext` into the route files (keeps them at exactly two imports, the P-8 shape).
+- **Consequences**: `deps.getService()` is not called at all when a pre-check fails (check-order tests count it). Iteration 4 drives full games with `playToEndVia`.
