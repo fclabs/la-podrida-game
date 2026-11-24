@@ -47,3 +47,27 @@
 - **Decision**: `schemas.ts` defines a strict `PlayerViewSchema` (all `TableView` + `PlayerView` fields), reusing `CardSchema`, `TrickPlaySchema`, `GameEventSchema` (domain) and `ScoreBoardSchema` (state); `LegalMove`/`Move` are local strict schemas. `type _Check = Expect<Equal<z.infer<typeof PlayerUpdateResponseSchema>, PlayerUpdate>>` fails typecheck on drift (verified by adding a field: TS2344). `CreateGameResponseSchema` pins `gameId` to `GAME_ID_PATTERN` and `seatToken` to 43 base64url chars; `ErrorResponseSchema.error.code` is `z.enum(ERROR_CODES)`; `PresetsResponseSchema` caps descriptions at 200.
 - **Rejected**: runtime response validation in handlers (spec Scope Out).
 - **Consequences**: tests parse every 2xx/409 body with these; a domain type change forces a schema update.
+
+## D-009: Request logging wrapper with a mutable meta (P-7)  (Iteration 2)
+- **Context**: FR-814–FR-816, BR-803, ledger R-024. P-7 has `fn` return `{ status, body, gameId?, fromVersion?, update? }` or throw; a throw would lose the path id and request version that the `[id]` routes know before failing (e.g. a 409 needs `fromVersion`).
+- **Decision**: `withRequestLog(route, deps, fn)` passes `fn` a mutable `RequestLogMeta { gameId?, fromVersion? }`; fields `fn` returns override it. A throw goes through `toErrorResponse`; the logged update is the result's `update` or the 409 body's `update`. `seat = update?.view.you ?? null`; `aiMoves` counts `bid-made`/`card-played` with `seat !==` the logged seat; `durationMs = Math.round(end − start)`. Level from `deps.getConfig().logLevel` (a throw → `info`); request line iff `debug`/`info`; on a thrown 500 the error line `{ route, gameId, errorName, errorMessage (≤ 500 chars), stack }` is always emitted. `consoleLog` writes `JSON.stringify(line)` to `console.log`/`console.error`.
+- **Rejected**: attaching ids to thrown errors (mutates service errors); logging any error property beyond name/message/stack (`AiLoopLimitError.state`).
+- **Consequences**: Iteration 3 handlers set `meta.gameId` first thing and `meta.fromVersion` once `version`/`since` is parsed.
+
+## D-010: Memoised service factory and default deps (P-8)  (Iteration 2)
+- **Context**: FR-812, FR-813, BR-805 exception.
+- **Decision**: `service-factory.ts` keeps `let cached: GameService | undefined`; `getService()` builds `getConfig()` → `createObjectStore` → `GameStateManager` → `GameService({ state, defaultPresetId })` and assigns only on success. `default-deps.ts` exports `defaultDeps = { getService, getConfig, now: () => performance.now(), log: consoleLog }`. Each `route.ts` is two imports + one `export const POST|GET = (req: Request) => handler(req, defaultDeps)`.
+- **Rejected**: building the service at module load (a bad env would break the import and `next build`).
+- **Consequences**: the factory test isolates module state with `vi.resetModules()`, stubs every config env var to `''`, and imports factory, `GameService` and `ConfigError` dynamically. `next build` marks both routes dynamic (`ƒ`).
+
+## D-011: Presets handler body (P-9)  (Iteration 2)
+- **Context**: FR-811 — no service and no storage call.
+- **Decision**: `presetsHandler` returns `{ defaultPresetId: deps.getConfig().defaultRulesPreset, presets: PRESET_IDS.map(id => ({ id, ...PRESET_LABELS[id], players: { ...getPreset(id).players }, deck: getPreset(id).deck.id })) }` with 200, inside `withRequestLog('GET /api/presets', …)`.
+- **Rejected**: a static, build-time body (the default preset is runtime config).
+- **Consequences**: a throwing `getConfig` makes presets a 500 with both log lines (VC-828 variant tested).
+
+## D-012: API test fixtures (P-11)  (Iteration 2)
+- **Context**: P-11; ledger R-027 (sending no `Content-Type`).
+- **Decision**: `tests/api/support/api-fixtures.ts` per P-11. `makeApi` passes `defaultPreset` both to `makeService` (`defaultPresetId`) and to `loadConfig` (`DEFAULT_RULES_PRESET`); its `deps` are plain mutable properties so tests swap `getService`/`getConfig`/`now`. `postJson` always sends bytes; `contentType` defaults to `application/json` and `null` sends none. `wrapService` builds a delegating object and casts it `as unknown as GameService` (the class has `#private` members, so no structural object is assignable).
+- **Rejected**: `Object.create(service)` overrides (prototype methods would hit `#private` on the wrong receiver).
+- **Consequences**: `createGameVia` asserts 201 and parses with `CreateGameResponseSchema`; Iteration 3/4 tests reuse it.
