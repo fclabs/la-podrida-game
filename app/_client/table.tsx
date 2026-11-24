@@ -1,4 +1,5 @@
 import type { PlayerView } from '@/src/domain/types';
+import type { ReactNode } from 'react';
 import { CardView } from './card-view';
 import { COPY } from './copy';
 import type { DisplayModel } from './display';
@@ -11,10 +12,12 @@ interface TableProps {
   /** The seat to act, from the adopted view; `null` while events play (FR-937). */
   toAct: number | null;
   deck: string | undefined;
+  /** Replaces the plain hand list (the page passes the interactive `Hand`, FR-913/FR-915). */
+  hand?: ReactNode;
 }
 
 /** The table (FR-925): seats, trump, tricks, hand line and the human's hand. */
-export function Table({ model, toAct, deck }: TableProps) {
+export function Table({ model, toAct, deck, hand }: TableProps) {
   const nameOf = (seat: number): string =>
     model.seats.find((s) => s.seat === seat)?.name ?? COPY.seatFallback(seat);
 
@@ -92,13 +95,15 @@ export function Table({ model, toAct, deck }: TableProps) {
 
       <div className={styles.hand}>
         <h3>{COPY.yourHandLabel}</h3>
-        <ul className={styles.cards}>
-          {model.yourHand.map((c, i) => (
-            <li key={`${c.rank}${c.suit}-${i}`}>
-              <CardView card={c} deck={deck} />
-            </li>
-          ))}
-        </ul>
+        {hand ?? (
+          <ul className={styles.cards}>
+            {model.yourHand.map((c, i) => (
+              <li key={`${c.rank}${c.suit}-${i}`}>
+                <CardView card={c} deck={deck} />
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </section>
   );

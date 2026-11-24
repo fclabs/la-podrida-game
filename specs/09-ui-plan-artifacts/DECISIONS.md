@@ -119,3 +119,27 @@
 **Decision**: Tests that run under `vi.useFakeTimers()` set values and click with `fireEvent` inside `act`, advancing time with `await act(async () => { await vi.advanceTimersByTimeAsync(ms) })`. Tests without fake timers keep `userEvent`.
 **Rejected**: `shouldAdvanceTime`/real timers (cannot assert exact 20 s).
 **Consequences**: Iterations 5-6 do the same for 1/2/4 s retries and the 600/1200 ms animation steps; do not call `userEvent` while fake timers are on.
+
+## D-021: `Table` takes an optional `hand` node  (Iteration 5)
+**Context**: FR-913/FR-915 need the hand drawn with clickable cards, but `Table` (Iteration 4) draws the hand itself; rendering a second `Hand` beside it would duplicate every card name.
+**Decision**: `Table` gets an optional `hand?: ReactNode` that replaces its plain card list; the page passes `<Hand/>`. Without it the plain list is unchanged (table tests untouched). `table.tsx` is not in Iteration 5's Touches; this is the smallest change that avoids duplication.
+**Rejected**: giving `Table` the legal moves and a click handler (couples it to the pipeline); hiding the table's hand with CSS.
+**Consequences**: Iteration 6 keeps passing `Hand` and sets `interactive={false}` while the queue plays.
+
+## D-022: Move pipeline lives in `Game` with refs and six reducer actions  (Iteration 5)
+**Context**: FR-916/917/918 need one captured body reused verbatim, a back-off chain, and several outcomes.
+**Decision**: Reducer actions `move-start` (in-flight, notice cleared), `move-send` (in-flight again), `move-wait` (`retry-wait`), `move-failed` (`failed`: shows `moveFailed` + `Reintentar`), `move-settled` (`idle`), `notice{message}`, `notice-clear`. `act(moveId)` guards with `busyRef`, calls `captureAction(adopted, moveId, deps.newId)` once, stores it in `pendingRef`, and `send(body, retry)` loops through 1/2/4 s using `deps.setTimeout` (timer kept in `timerRef`, cleared on unmount; `mountedRef` stops late continuations). `Reintentar` calls `send(body, 3)` (one send, no auto retries). 403/422/400/413 call `recover(body.version, message)`: GET `?since=`, adopt as `'recovery'`, then `notice`; a failed recovery sets `load: 'failed'` and keeps `recoveryRef` so `Reintentar` repeats that GET, not the plain load. Notices clear via an effect on `state.notice` (4 s timer).
+**Rejected**: a state machine library; storing the body in reducer state (a ref is enough, it never renders).
+**Consequences**: `request` is the single source for "disabled" (`!== 'idle'`); Iteration 6 reads it for nothing else.
+
+## D-023: Hand dimming and no bid-prompt copy  (Iteration 5)
+**Context**: FR-915 dims non-legal cards; VC-923 dims all cards when `legalMoves` is empty; the spec gives no text for a bid prompt.
+**Decision**: `Hand` dims a card when `interactive` and (some legal play exists, or no legal move exists); during bidding the cards stay plain; while `interactive` is false (queue) they are plain. `BidBar` has no heading (a `role="group"` without a name). No new `COPY` keys.
+**Rejected**: a `Tu apuesta` prompt (would be invented copy).
+**Consequences**: none for later iterations except that no copy was added this iteration.
+
+## D-024: `finished: true` is written by an effect on the adopted phase  (Iteration 5)
+**Context**: FR-912 says "when the adopted view has phase game-over"; FR-938 requires re-reading and ownership.
+**Decision**: `markFinished(deps, id)` (beside `clearOwnSlot`) re-reads the stored slot and writes `{ ...stored, finished: true }` only when its `gameId` equals `id`; it also marks a matching in-memory slot. An effect keyed on `adopted?.view.phase === 'game-over'` calls it, so a game that loads already finished is marked too. Iteration 6 must keep this keyed on the adopted view, not the shown one.
+**Rejected**: writing in the move response handler (misses the load path).
+**Consequences**: `denied`/401 paths share `deny(status)` = `clearOwnSlot` + `denied`.
