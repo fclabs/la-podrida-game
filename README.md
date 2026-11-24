@@ -2,7 +2,7 @@
 
 La Podrida is a trick-taking card game, the Hispanic version of _Oh Hell!_, in which each player must predict exactly how many tricks they will take. This project lets you play it in the browser: one human against 2–5 AI players. The backend is authoritative: it holds the game state, computes each player's legal moves and accepts the player's choice, while the browser only renders the view it gets and sends back the chosen move. Every state change is persisted, so a game can be resumed, audited and replayed.
 
-The repository currently holds the project foundation (Next.js app, test runner, lint-enforced architecture rules, validated configuration and CI), the game core (rules engine, scoring, AI players and simulator), persistence and the game service that ties them together. The HTTP API and the browser UI are built on top of it in later phases.
+The repository currently holds the project foundation (Next.js app, test runner, lint-enforced architecture rules, validated configuration and CI), the game core (rules engine, scoring, AI players and simulator), persistence, the game service that ties them together, and the HTTP API in front of it. A full game can already be played over HTTP with `curl` against `pnpm dev` (see [HTTP API](docs/development.md#16-http-api) in the development guide). The browser UI is built on top of it in a later phase.
 
 ## Prerequisites
 
@@ -41,7 +41,7 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm test:sim && pnpm build
 
 ## Documentation
 
-- [Development guide](docs/development.md): project layout, architecture import rules, tests, configuration, CI and conventions.
+- [Development guide](docs/development.md): project layout, architecture import rules, tests, configuration, CI, conventions, and the HTTP API with a worked `curl` session.
 - [Game rules](docs/game_rules.md): how La Podrida is played and its regional variants.
 - [System design](docs/design.md): what the system does: components, domain model and game logic.
 - [Architecture](docs/architecture.md): how it is built and run: stack, module boundaries, storage, API, security.

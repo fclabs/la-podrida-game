@@ -107,3 +107,15 @@
 - **Decision**: `structure.test.ts` fails on any `\b[45]\d\d\b` token, on `status:`/`status =` 4xx/5xx literals and on `jsonResponse(`/`Response(` 4xx/5xx calls; imports are found in static `import`/`export … from`, side-effect imports, `import()` and `require()`, resolved (`@/` alias or relative) against the repo root and rejected under `src/state|storage|engine`. Both scanners have positive controls. Mutation check: appending `export const _teapot = { status: 418 };` to `handlers.ts` fails the test; reverted.
 - **Rejected**: a status-position-only regex (a constant like `const S = 404` would slip through).
 - **Consequences**: no 4xx/5xx number may appear in those five files, even in comments.
+
+## D-019: Fix stale API mentions outside the listed doc sections  (Iteration 5)
+- **Context**: the Scope lists architecture §7/§10/§11, development §16/§17 and seven implementation.md places. Other lines still described the API as unbuilt or undecided: development §2 ("added later"), §15.7 ("not decided; proposed 410", "intended mapping"), §15.8, §15.11, §17 ("getConfig() has no caller", "No API or UI yet"); architecture §11 CI line; implementation §4 row and decision 9 ("Phases 5b, 8"); README's status sentence.
+- **Decision**: correct each of them in place (same files, no new sections). implementation.md struck-through text keeps the original Phase 8 wording visible next to the "Moved to Phase 5b/11" note. README gains one link to development §16.
+- **Rejected**: leaving them (the docs would contradict §16 and §7); rewriting whole sections (noise in review).
+- **Consequences**: no doc says the API is missing, and every place that scheduled the benchmark in Phase 8 now says 5b/11.
+
+## D-020: The manual session is run twice: scripted with probes, and literally as documented  (Iteration 5)
+- **Context**: VC-835 asks for "the documented curl session" to game over, scripted in a loop posting `legalMoves[0].id`, and for checks that every call returns its documented status.
+- **Decision**: (1) a scripted session that also probes 401, 400 `since`, 409, 422, 404, 413, missing `Content-Type`, `seed`, and the two headers; (2) the `sh` blocks of development §16.10 extracted verbatim from the doc (only `.data/` swapped for the scratch store) and run against a fresh server and store. Both reached `game-over` with 201 commit files.
+- **Rejected**: only the scripted variant (would not prove the doc's own commands work).
+- **Consequences**: the record carries both transcripts, tokens redacted; `.data/` was never created.

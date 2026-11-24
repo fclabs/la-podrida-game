@@ -29,7 +29,7 @@ This guide explains how the repository is organised, which rules the tooling enf
 
 ```
 app/                    Next.js App Router: pages, layouts, components (UI)
-  api/                  HTTP route handlers (added later)
+  api/                  HTTP route handlers; shared code in api/_lib/ (§16)
 src/
   domain/               Types, rules presets, pure helpers            ┐
   engine/               Game Engine: state transitions, legal moves   │ core: pure, no I/O
@@ -49,7 +49,7 @@ tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
 
-`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12), `src/storage` (§13), `src/state` (§14) and `src/service` (`GameService`, `replayGame` and the two pure helpers `buildPlayerView` and `runAiLoop`, §12 and §15) are built. The HTTP route handlers in `app/api/` are not. The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
+`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12), `src/storage` (§13), `src/state` (§14) and `src/service` (`GameService`, `replayGame` and the two pure helpers `buildPlayerView` and `runAiLoop`, §12 and §15) are built, and so is the HTTP API in `app/api/` (§16). The UI is not: `/` is a placeholder page. The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
 
 **Import alias.** `@/` maps to the **project root**, so imports read `@/src/engine/...` or `@/app/...`. It works in TypeScript, Next.js, Vitest and `tsx`.
 
@@ -104,7 +104,7 @@ Tests are Vitest files named `*.test.ts`, placed in the folder that matches what
 |---|---|---|
 | `tests/unit/` | Pure logic: domain helpers, engine and score functions, config, lint-rule fixtures. | `pnpm test` |
 | `tests/contract/` | Contracts that several implementations must satisfy (e.g. one suite run against every storage driver, §13.6). The Vercel Blob run is skipped unless `BLOB_READ_WRITE_TOKEN` is set. | `pnpm test` |
-| `tests/api/` | Route handlers, called directly. | `pnpm test` |
+| `tests/api/` | Route handlers, called directly (§16.8). | `pnpm test` |
 | `tests/sim/` | Long-running simulations (many full games). | `pnpm test:sim` only |
 
 Test files anywhere else (for example next to the code in `src/`) are **never run**. The simulation suite, its `SIM_SEEDS` setting and its helpers are described in §12.5.
@@ -1615,14 +1615,14 @@ const catchUp = await service.getUpdate(gameId, seatToken, 0); // version 1, the
 
 ### 15.7 Errors
 
-Each service error extends `Error`, sets `name` to its class name and exposes only the fields below. The HTTP status is the mapping intended for the API (one mapping function in the route layer, [`architecture.md`](./architecture.md) §7 and §10):
+Each service error extends `Error`, sets `name` to its class name and exposes only the fields below. The HTTP column is what the API answers (one mapping function in the route layer, §16.3; [`architecture.md`](./architecture.md) §7 and §10):
 
-| Error (fields) | When | Intended HTTP | What the client does |
+| Error (fields) | When | HTTP | What the client does |
 |---|---|---|---|
 | `InvalidRequest` (`reason`: `humanName`, `aiCount`, `rulesPreset`, `sinceVersion`, `version`, `moveId` or `clientRequestId`) | An argument fails its check (§15.3–§15.6), before any I/O. | 400 `invalid_request` | Fix the request. With the API's own schema checks in front, this means a client bug. |
 | `Unauthorized` | The token is empty or matches no seat of the game. | 401 `unauthorized` | The stored token is wrong or lost: the game cannot be resumed from this browser; offer a new game. |
 | `GameNotFound` (`gameId`, the caller's input clipped to 64 characters) | Malformed id, or `meta.json` / commit 0 missing (never created, or deleted by retention). | 404 `game_not_found` | Forget the stored id and token; offer a new game. |
-| `GameUnsupported` (`gameId`, `engineVersion`) | The game was stored by another `ENGINE_VERSION` (after an engine upgrade). | not decided; proposed 410 | The game cannot continue; offer a new game. |
+| `GameUnsupported` (`gameId`, `engineVersion`) | The game was stored by another `ENGINE_VERSION` (after an engine upgrade). | 410 `game_unsupported` | The game cannot continue; offer a new game. |
 | `NotYourTurn` (`seat`) | Valid seat, but another seat must act. | 403 `not_your_turn` | Fetch the current update and wait. |
 | `IllegalMove` (`moveId`, `reason`: `game-over` \| `unknown-move`) | The move is not legal in the current state. | 422 `illegal_move` | Fetch the current update and choose from its `legalMoves`. |
 | `VersionConflict` (`update`) | Stale or future `version`, or a lost race, and the committed move is not this request. | 409 `version_conflict`, with `update` in the body | Play `update.events`, show `update.view`, and let the player choose again at `update.version`. Do not resend the old request. |
@@ -1630,7 +1630,7 @@ Each service error extends `Error`, sets `name` to its class name and exposes on
 
 Messages are fixed text plus at most those fields: `Invalid request: moveId`, `Unauthorized`, `Game not found: <id>`, `Game <id> was created with engine version <n>, which this server does not support`, `Not your turn (seat 0)`, `Illegal move "bid:99": unknown-move`, `Version conflict: the game is at version 7`.
 
-A sketch of the intended mapping (the API owns the real one):
+A sketch of the mapping; the real one is `toErrorResponse` in `app/api/_lib/errors.ts` (§16.3), which also maps the state layer's "not found" errors to 404 and the API's own request errors:
 
 ```ts
 import {
@@ -1663,7 +1663,7 @@ The game's hidden information is the **seed**, the **seat token** and its stored
 - The seven service errors carry only the fields in §15.7. `GameNotFound` and `IllegalMove` echo the caller's own input, clipped to 64 and 32 characters.
 - The seat token appears only in `createGame`'s result.
 
-**Any other error is server-only.** `AiLoopLimitError.state` is the full `GameState` (every hand and the seed); engine, state and storage errors may name keys or internal values. The API must log them and answer `500 internal`, never put them, their message or their fields in a response. Request logs never include a seat token or a hand ([`architecture.md`](./architecture.md) §10).
+**Any other error is server-only.** `AiLoopLimitError.state` is the full `GameState` (every hand and the seed); engine, state and storage errors may name keys or internal values. The API logs them and answers `500 internal`, never putting them, their message or their fields in a response. Request logs never include a seat token or a hand ([`architecture.md`](./architecture.md) §10; §16.6).
 
 ### 15.9 Replay
 
@@ -1780,7 +1780,7 @@ The mock works because `game-service.ts` imports `runAiLoop` from `./ai-loop`, w
 ### 15.11 Gotchas and limitations
 
 - **One human per game from `createGame`, and only the `random` AI.** Authentication and the retry check already handle several human seats (tests build such games with `storeHandmadeGame`), so multi-user games ([`architecture.md`](./architecture.md) §12) need no change here.
-- **The API validates first.** The service's input checks (§15.3–§15.6) are a second line of defence: the API still checks request shapes with its own schemas, reads the token from the `Authorization` header, and rejects any `seed` field.
+- **The API validates first.** The service's input checks (§15.3–§15.6) are a second line of defence: the API checks request shapes with its own strict schemas, reads the token from the `Authorization` header, and rejects any `seed` field (§16.2).
 - **A configured default preset that does not exist is a server error**, not `InvalidRequest`: `getPreset`'s `UnknownPresetError` propagates, because the caller did not choose it. (The configuration schema only allows known presets, §5.) A `rulesPreset` that is present but not a string is `InvalidRequest` without a registry lookup.
 - **Name and id lengths count UTF-16 code units**, so an emoji counts as two characters toward the 40-character `humanName` limit.
 - **External deletes in the middle of a request.** Only retention deletes, and only year-old games. If it happens anyway, the retry-check read in step 1 and the race re-read in step 5 propagate the state error (`CommitNotFoundError` or `GameNotFoundError`, so a 500), except that the race path's `loadLatest` answers `GameNotFound`.
@@ -1790,15 +1790,297 @@ The mock works because `game-service.ts` imports `runAiLoop` from `./ai-loop`, w
 - **`final.json` is written once, by the request that committed the last move.** If that write fails it stays missing (a matched retry does not write it); readers fall back to the terminal commit ([`design.md`](./design.md) §6.3).
 - **An `ENGINE_VERSION` bump abandons games in progress.** They answer `GameUnsupported` until retention deletes them ([`architecture.md`](./architecture.md) §6.4).
 - **`getUpdate` with an old `sinceVersion` reads one commit per missed version** (2 store calls each, 8 at a time). A client that has been away for a whole game should reload without `sinceVersion` instead.
-- **No rate limiting** and no request logging in the service; both belong to the API.
+- **No rate limiting** and no request logging in the service. The API logs every request (§16.6); there is no rate limiting anywhere yet.
 
 ---
 
-## 16. Known limitations
+## 16. HTTP API
 
-- **Configuration is not validated at server startup yet.** `getConfig()` has no caller; it is wired in by its first user, the factory that builds `GameService` for the route handlers (§15.2; Phase 8 in [`implementation.md`](./implementation.md)). Until then a misconfigured deployment would still start.
+`app/api` is the HTTP entry to `GameService` (§15): four Next.js Route Handlers that read a request, call one service method and write JSON. The contract (routes, request rules, status codes, error bodies) is in [`architecture.md`](./architecture.md) §7 and the log lines in §10; this section is about calling, testing and changing the code.
+
+Three rules shape it:
+
+- **Handlers are thin.** A handler parses the request, calls one service method (none for presets) and serializes the result. Game rules, authentication against stored hashes, retries and conflicts all live in the service. Handlers and route files import nothing from `src/state`, `src/storage` or `src/engine`; the one exception is the service factory, which has to wire the store. A static test (`tests/api/structure.test.ts`) fails the build if that changes.
+- **One error mapping.** `toErrorResponse` in `errors.ts` is the only code that turns an error into a status. Handlers throw (`RequestError` for their own checks, or let a service error propagate) and never write an error status. The same structure test rejects **any** number from 400 to 599 in `handlers.ts` and the four `route.ts` files, comments included, so a status cannot slip in as a constant.
+- **Everything the handler touches comes in through `deps`.** The service, the configuration, the clock and the log sink are injected, so tests call the handler functions directly, with no server and no network.
+
+### 16.1 Routes
+
+| Method & path | Auth | Request body | Success |
+|---|---|---|---|
+| `POST /api/games` | – | `{ humanName, aiCount, rulesPreset? }` | 201 `{ gameId, seat, seatToken, update }` |
+| `GET /api/games/{id}[?since=v]` | `Authorization: Bearer <seatToken>` | – | 200 `PlayerUpdate` |
+| `POST /api/games/{id}/moves` | `Authorization: Bearer <seatToken>` | `{ version, moveId, clientRequestId }` | 200 `PlayerUpdate` |
+| `GET /api/presets` | – | – | 200 `{ defaultPresetId, presets: [{ id, name, description, players: { min, max }, deck }] }` |
+
+`seatToken` is returned once, in the 201, and must be kept by the client: it is never shown again and cannot be recovered (only its hash is stored). The human is always seat 0.
+
+How a client uses them:
+
+- **Start:** `GET /api/presets` for the new-game form, then `POST /api/games`. Render `update.view`, play `update.events` (the AIs may already have bid), and offer `update.legalMoves`.
+- **Move:** send `{ version: <the version shown>, moveId: <one of legalMoves[].id>, clientRequestId: <new per action> }`. The response's `events` are the human's move followed by every AI move up to the human's next turn. On a network failure, resend the **same** body: the same `clientRequestId` answers 200 with the original response and never applies the move twice.
+- **409:** the body's `update` is the current state with the events since the sent `version`. Adopt it and let the player choose again; do not resend the old request.
+- **Reload:** `GET /api/games/{id}` (no `since`) gives the current view with `events: []`. To catch up from version `v`, use `?since=v`. Do not poll with `?since=0`: it re-reads every commit of the game.
+- **Game over:** `view.phase` is `game-over`, `view.finalRanking` is present, `legalMoves` is `[]`, `view.trumpCard` is `null` and `view.yourHand` is `[]`. Any further move answers 422.
+
+### 16.2 Request rules and errors
+
+Checks run in this order and the first failure wins; nothing reaches the service or storage until all of them pass.
+
+| Step | Routes | Rule | Failure |
+|---|---|---|---|
+| 1 | `{id}` routes | id is 26 characters of lowercase base32 (`^[a-z2-7]{26}$`) | 404 `game_not_found` |
+| 2 | `{id}` routes | `Authorization` matches `^Bearer ([A-Za-z0-9_-]{1,256})$` (scheme case-insensitive, one space) | 401 `unauthorized` |
+| 3a | POSTs | `Content-Type` media type is `application/json` (any case, parameters allowed) | 400 `Invalid request: body` |
+| 3b | POSTs | body ≤ 16,384 raw bytes | 413 `payload_too_large` |
+| 3c | POSTs | valid UTF-8 JSON whose value is an object | 400 `Invalid request: body` |
+| 3d | POSTs | strict schema: no unknown field, limits below | 400 `Invalid request: <field>` |
+| 3 | `GET /api/games/{id}` | `since` absent, or once, canonical decimal, ≤ `MAX_COMMIT_VERSION` | 400 `Invalid request: since` |
+| after the call | `GET /api/games/{id}` | `since` ≤ the returned version | 400 `Invalid request: since` |
+
+Body limits: `humanName` 1–40 characters after `trim()` (the untrimmed string goes to the service, which trims it); `aiCount` an integer 2–5; `rulesPreset` one of the four preset ids; `version` an integer from 0 to `MAX_COMMIT_VERSION − 1`; `moveId` 1–32 characters; `clientRequestId` 1–128 characters. They are the service's own limits; the service checks them again (§15.3–§15.6).
+
+Why the rules look the way they do:
+
+- **Strict schemas reject unknown fields** so a client can never send a `seed` (or a typo) that the server silently ignores. When a body has several problems, the field named is the first one Zod reports.
+- **The size cap counts bytes, not `Content-Length` or characters**: the header can lie, and a multi-byte UTF-8 string has fewer characters than bytes. Invalid UTF-8 is rejected, never replaced with `U+FFFD`.
+- **`since` must be canonical** (`0`, `7`, never `07`, `1e3`, ` 7` or `since=1&since=2`), so one version has exactly one spelling and a repeated parameter is not silently resolved.
+- **The id check comes before auth**, so a malformed id answers 404 with no storage read; **auth comes before the body**, so an anonymous caller learns nothing about body validation.
+
+Errors, and what a client should do:
+
+| Status | `code` | Client action |
+|---|---|---|
+| 400 | `invalid_request` | Client bug: fix the request. |
+| 401 | `unauthorized` | The stored token is wrong or lost; the game cannot be resumed from here. Offer a new game. |
+| 403 | `not_your_turn` | Fetch the current update and wait. |
+| 404 | `game_not_found` | Forget the stored id and token; offer a new game. Also returned for a game partly deleted by retention. |
+| 409 | `version_conflict` | Adopt `update` from the body (§16.1). |
+| 410 | `game_unsupported` | The game was stored by an older engine version and cannot continue; offer a new game. |
+| 413 | `payload_too_large` | Client bug. |
+| 422 | `illegal_move` | Fetch the current update and choose from its `legalMoves`. |
+| 500 | `internal` | Retry later. Resending a move with the same `clientRequestId` is always safe. |
+
+The body is `{ error: { code, message } }` (plus `update` on 409) with the fixed messages listed in [`architecture.md`](./architecture.md) §7. Every response has `Content-Type: application/json` and `Cache-Control: no-store`.
+
+### 16.3 Module map
+
+Shared code lives in `app/api/_lib/` (Next.js does not route folders starting with `_`). There is no barrel file.
+
+| Module | Exports | What it does |
+|---|---|---|
+| `errors.ts` | `ERROR_CODES`, `ERROR_MESSAGES`, `RequestError`, `toErrorResponse`, type `ErrorBody` | The one error → status mapping. `RequestError(status, code, field?)` is what the HTTP checks throw. Matching is by `instanceof`, never by `name` (any error can set a name). |
+| `http.ts` | `jsonResponse(status, body)` | Builds every response with the two headers. `Response.json` is not used because it does not set `Cache-Control`. |
+| `body.ts` | `MAX_BODY_BYTES`, `readJsonBody(request)` | Steps 3a–3c. |
+| `auth.ts` | `parseBearer(headers)`, `assertGameIdFormat(id)` | Steps 1 and 2. |
+| `schemas.ts` | `CreateGameBodySchema`, `SubmitMoveBodySchema`, `parseBody`, `parseSince`; `PlayerUpdateResponseSchema`, `CreateGameResponseSchema`, `ErrorResponseSchema`, `PresetsResponseSchema` | Request schemas and parsers (step 3d, `since`), and strict response schemas (§16.7). |
+| `presets.ts` | `PRESET_LABELS` | Name and one-sentence description per preset. It is a `Record` over `PresetId`, so adding a preset fails typecheck until it has a label. |
+| `log.ts` | `withRequestLog`, `consoleLog`, types `LogSink`, `LogLevel`, `RouteResult`, `RequestLogMeta` | Runs a handler body, maps a throw, writes the log lines (§16.6). |
+| `service-factory.ts` | `getService()` | The config-wired, memoised `GameService` (§16.5). |
+| `default-deps.ts` | `defaultDeps` | The production `HandlerDeps`. |
+| `handlers.ts` | `HandlerDeps`, `GameRouteContext`, `createGameHandler`, `getGameHandler`, `submitMoveHandler`, `presetsHandler` | The route logic. |
+
+`errors.ts` and `schemas.ts` may import from `src/state` (the "not found" errors, `MAX_COMMIT_VERSION`, `ScoreBoardSchema`); `handlers.ts` and the route files may not, which is why the post-call `since` check is written as a schema (`parseBody` with `since` at most the returned version) instead of a status in the handler.
+
+### 16.4 Handlers, deps and route files
+
+```ts
+interface HandlerDeps {
+  getService: () => GameService;   // production: the memoised factory
+  getConfig: () => Config;         // production: getConfig()
+  now: () => number;               // milliseconds, for durationMs; production: performance.now()
+  log: (level: 'info' | 'error', line: Record<string, unknown>) => void; // production: console
+}
+createGameHandler(req: Request, deps: HandlerDeps): Promise<Response>
+presetsHandler(req: Request, deps: HandlerDeps): Promise<Response>
+getGameHandler(req: Request, ctx: { params: Promise<{ id: string }> }, deps: HandlerDeps): Promise<Response>
+submitMoveHandler(req: Request, ctx: { params: Promise<{ id: string }> }, deps: HandlerDeps): Promise<Response>
+```
+
+Each handler body runs inside `withRequestLog(route, deps, async (meta) => …)`. It returns `{ status, body, update? }` or throws; the wrapper maps a throw with `toErrorResponse`, writes the log lines and builds the response with `jsonResponse`. The `{id}` handlers set `meta.gameId` once the id format passes and `meta.fromVersion` once `version` or `since` is parsed, so a request that fails later still logs them. `deps.getService()` is called only after every check has passed.
+
+Each `route.ts` is two imports and one export binding a handler to `defaultDeps`:
+
+```ts
+// app/api/games/[id]/route.ts
+import { defaultDeps } from '@/app/api/_lib/default-deps';
+import { getGameHandler } from '@/app/api/_lib/handlers';
+
+export const GET = (req: Request, ctx: { params: Promise<{ id: string }> }) =>
+  getGameHandler(req, ctx, defaultDeps);
+```
+
+Route files export only `GET`/`POST`: Next.js treats other exports as route configuration, and tests check the export keys. In Next.js 16 `params` is a `Promise`, so handlers `await ctx.params`; `next typegen` (part of `pnpm typecheck`) checks the route signatures. `pnpm build` lists all four routes as dynamic (`ƒ`).
+
+**Adding a route:** write the handler in `handlers.ts` inside `withRequestLog` with its route pattern string, throw `RequestError` for its own checks, add strict request and response schemas in `schemas.ts`, add a two-line `route.ts`, and add it to the file list in `tests/api/structure.test.ts`. If it needs a new error, add the code to `ERROR_CODES`/`ERROR_MESSAGES` and the mapping to `toErrorResponse`.
+
+### 16.5 Service factory and environment
+
+`getService()` builds `getConfig()` → `createObjectStore(config)` → `new GameStateManager(store)` → `new GameService({ state, defaultPresetId: config.defaultRulesPreset })` on its first successful call and returns the same instance afterwards (one per function instance). It is built lazily, on the first request, not at module load: a bad environment at import time would break `next build` and every route, including presets. A failure (a `ConfigError`, or `STORAGE_DRIVER=blob` without credentials) is thrown to the handler, answered 500 and logged, and **not cached**, so the next request tries again after the environment is fixed.
+
+The API reads the variables of §5. The ones that matter here: `STORAGE_DRIVER` and `FILE_STORE_DIR` (where games go; `pnpm dev` writes to `.data/` by default), `DEFAULT_RULES_PRESET` (used when `rulesPreset` is absent, and reported as `defaultPresetId`) and `LOG_LEVEL`.
+
+### 16.6 Logging
+
+Every request writes one `info` line through `deps.log`; a 500 also writes one `error` line. The fields, the level gating and what is never logged are in [`architecture.md`](./architecture.md) §10. A request line from `pnpm dev`:
+
+```json
+{"route":"POST /api/games/[id]/moves","gameId":"y25ib7awa7366qtges4nxynumm","seat":0,"fromVersion":0,"toVersion":200,"aiMoves":600,"status":409,"durationMs":29,"errorCode":"version_conflict"}
+```
+
+Points that are easy to break:
+
+- `seat`, `toVersion` and `aiMoves` describe the update in the response: they are set on 200, 201 and 409 and `null` otherwise (403, 410 and 422 carry no update).
+- A path id is logged only after it passes the format check; a malformed one is logged as `null`, so attacker-chosen text of any length never reaches the logs.
+- The error line takes only `name`, `message` (clipped to 500 characters) and `stack` from the thrown value. Do not add other properties: `AiLoopLimitError.state` is the full game state, every hand and the seed included.
+- Never log a request or response body, a header or the token.
+
+### 16.7 Response schemas
+
+`schemas.ts` holds strict Zod schemas for every response body: `PlayerUpdateResponseSchema`, `CreateGameResponseSchema`, `ErrorResponseSchema` (with the optional `update` of a 409) and `PresetsResponseSchema`. Every object level is strict, so a field added to the view by accident (`seed`, `hands`, `stock`) fails the tests. A compile-time check asserts that `z.infer<typeof PlayerUpdateResponseSchema>` equals the domain `PlayerUpdate`, so `pnpm typecheck` fails if the two drift apart.
+
+They are a **test-time contract**: handlers never parse their own responses, so a schema mismatch is a failing test, not a production 500, and costs nothing per request. Every API test parses the bodies it receives with them.
+
+### 16.8 Writing an API test
+
+API tests live in `tests/api/` and run with `pnpm test`. They call the handler functions with deps from `makeApi` and never start a server or touch a real store.
+
+```ts
+import { expect, it } from 'vitest';
+import { getGameHandler, submitMoveHandler } from '@/app/api/_lib/handlers';
+import { PlayerUpdateResponseSchema } from '@/app/api/_lib/schemas';
+import { bearer, createGameVia, ctx, getReq, makeApi, postJson, readJson } from './support/api-fixtures';
+
+it('plays one move and catches up with since', async () => {
+  const api = makeApi(); // GameService over a RecordingStore(MemoryObjectStore), fake clock, captured logs
+  const { gameId, seatToken, update } = await createGameVia(api); // asserts the 201 and its schema
+
+  const res = await submitMoveHandler(
+    postJson(
+      `/api/games/${gameId}/moves`,
+      { version: update.version, moveId: update.legalMoves[0].id, clientRequestId: 'c-1' },
+      { headers: bearer(seatToken) },
+    ),
+    ctx(gameId),
+    api.deps,
+  );
+  expect(res.status).toBe(200);
+  const after = PlayerUpdateResponseSchema.parse(await readJson(res));
+
+  const get = await getGameHandler(getReq(`/api/games/${gameId}?since=0`, bearer(seatToken)), ctx(gameId), api.deps);
+  expect((await readJson<{ version: number }>(get)).version).toBe(after.version);
+  expect(api.logs.filter((l) => l.level === 'info')).toHaveLength(3); // create, move, get
+});
+```
+
+Helpers in `tests/api/support/api-fixtures.ts`:
+
+- `makeApi({ store?, service?, logLevel?, defaultPreset? })` → `{ deps, store, service, logs }`. `deps` fields are plain properties: reassign `api.deps.getService` or `api.deps.getConfig` to inject a failure. The fake clock advances 1 ms per call, so a request line has `durationMs: 1`.
+- `postJson(path, body, { headers?, rawBody?, contentType? })` always sends bytes; `contentType: null` sends no `Content-Type` at all (a string body would get `text/plain` from `Request`). `getReq(path, headers?)`, `ctx(id)`, `readJson(res)`, `bearer(token)`.
+- `createGameVia(api, body?)`, `playToEndVia(api, ids)` (plays the first legal move to game over and returns every update).
+- `wrapService(service, { submitMove: () => Promise.reject(new NotYourTurn(0)) })` delegates to the real service except for the overridden method. `GameService` has private fields, so the wrapper is cast; do not use `Object.create(service)`.
+- `api.store` is a `RecordingStore` (§14.11): `api.store.reset()` after setup, then `callsOf()` proves a rejected request made no storage call.
+
+How to reach each status: 403 needs a `wrapService` override (the service only answers it for games with several humans); 409 is a stale `version` with a new `clientRequestId`; 410 is `meta.json` rewritten with `engineVersion: ENGINE_VERSION + 1`; 404 for a partly deleted game is a `store.delete` of `meta.json` or a commit; 500 is a `getService` that throws.
+
+### 16.9 The no-leak check
+
+`tests/api/no-leak.test.ts` plays two full games over the handlers to game over — `argentina-fidepo` with 4 seats (whose first hand deals the whole deck) and `spain-ludoteka` with 3 — and checks every body: the 201, every move response, a GET with and without `?since=0` after every move, a provoked 409 and a provoked 422 (about 1,200 bodies). The oracle, `assertNoLeak` in `tests/api/support/leak-oracle.ts`, reads the real state from the store and checks:
+
+- `view` contains no card of another seat's current hand and no card of the stock (the deck minus every card dealt in the current hand), outside the public fields below; `view.yourHand` equals the seat's hand and `view.trumpCard` the hand's trump card.
+- `events` carry cards only in `card-played.card` and `hand-dealt.trumpCard`; `legalMoves` only cards in the player's own hand.
+- No body has a `seed`, `seatTokenHashes` or `aiDecisionCount` key, the seed or a token hash as a value, or an array of card arrays (the shape of the stored hands); the seat token appears only in the 201.
+
+**Allowed on purpose**, so do not "fix" them:
+
+- `view.trumpCard` is public. It is the turned-up stock card, or, when a hand deals the whole deck (`trumpCardInDealerHand: true`, e.g. 4 × 13 French or 3 × 12 Spanish cards), the dealer's last card, which then stays in the dealer's hand.
+- `currentTrick`, `lastTrick`, `card-played.card` and `hand-dealt.trumpCard` are cards everyone has seen.
+- A `?since=` GET replays earlier hands' events, so a card shown in an earlier hand can appear while the same card is now in another seat's hand or the stock. The oracle compares against the current hand only.
+
+The check must run right after the response it checks: it compares the body with the store's tip. Its own tests feed it 14 tampered bodies, one per kind of leak, that it must reject.
+
+### 16.10 A `curl` session against `pnpm dev`
+
+Start the server (games go to `.data/` by default; set `FILE_STORE_DIR` to keep a session elsewhere):
+
+```sh
+pnpm dev     # or: FILE_STORE_DIR=/tmp/podrida pnpm dev
+```
+
+In another shell (`jq` is optional; without it, copy the values by hand):
+
+```sh
+API=http://localhost:3000/api
+
+curl -s $API/presets | jq '.defaultPresetId, [.presets[].id]'
+
+curl -s -X POST $API/games -H 'Content-Type: application/json' \
+  -d '{"humanName":"Ana","aiCount":3}' > game.json        # 201
+GAME=$(jq -r .gameId game.json); TOKEN=$(jq -r .seatToken game.json)
+jq '.update | {version, phase: .view.phase, moves: [.legalMoves[].id]}' game.json
+
+curl -s $API/games/$GAME -H "Authorization: Bearer $TOKEN" > cur.json   # 200, events []
+jq '{version, phase: .view.phase, hand: .view.yourHand}' cur.json
+
+curl -s -X POST $API/games/$GAME/moves -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{\"version\":$(jq .version cur.json),\"moveId\":\"$(jq -r '.legalMoves[0].id' cur.json)\",\"clientRequestId\":\"move-1\"}" \
+  > cur.json                                                              # 200, version + 1
+jq '{version, events: [.events[].type], phase: .view.phase}' cur.json
+
+curl -s "$API/games/$GAME?since=0" -H "Authorization: Bearer $TOKEN" | jq '.events | length'
+```
+
+To play to the end, always choosing the first legal move:
+
+```sh
+N=1
+while [ "$(jq -r .view.phase cur.json)" != game-over ]; do
+  N=$((N+1))
+  curl -s -X POST $API/games/$GAME/moves -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"version\":$(jq .version cur.json),\"moveId\":\"$(jq -r '.legalMoves[0].id' cur.json)\",\"clientRequestId\":\"move-$N\"}" \
+    > cur.json
+done
+V=$(jq .version cur.json)
+curl -s "$API/games/$GAME?since=$((V-1))" -H "Authorization: Bearer $TOKEN" | jq '.view | {phase, finalRanking}'
+ls .data/games/$GAME/commits | wc -l   # V + 1 files: 00000000.json … the tip
+```
+
+A 4-seat `argentina-fidepo` game takes about 200 human moves and a few seconds this way. Each commit is a file under `games/<id>/commits/`, plus `meta.json`, `head.json` and, at the end, `scores/final.json` (§13.5, §14.2). Every POST needs `-H 'Content-Type: application/json'`: without it `curl -d` sends `application/x-www-form-urlencoded` and the API answers 400 `Invalid request: body`. The server prints one JSON request line per call.
+
+### 16.11 API tests
+
+| File | Protects |
+|---|---|
+| `errors.test.ts` | Every row of the mapping, the fixed messages, and that a 500 body carries nothing from the thrown error. |
+| `body.test.ts`, `auth.test.ts`, `schemas.test.ts` | The request rules at unit level: size cap at 16,384/16,385 bytes and with multi-byte text, media types, invalid UTF-8, bearer syntax, every field limit, unknown fields, `since` syntax; the response schemas reject extra fields; preset labels. |
+| `create.test.ts`, `get-update.test.ts`, `submit-move.test.ts`, `presets.test.ts` | Each route end to end through its handler: statuses, bodies, `since`, idempotent retry, 403/409/410/422, partly deleted games → 404, route export keys. |
+| `check-order.test.ts` | The check order, with no store call and no `getService` call when a check fails. |
+| `factory.test.ts` | A failed `getService()` is not cached; later calls return the same instance. |
+| `logging.test.ts` | Request-line fields for every route and outcome, level gating, the error line, malformed ids logged as `null`. |
+| `headers.test.ts` | One real response for each of the 11 statuses has both headers; every error body parses with `ErrorResponseSchema`. |
+| `secrets.test.ts` | No token, `Bearer`, hash, seed, hand or card in any log line over a full game; a 500 from `AiLoopLimitError` leaks nothing. |
+| `structure.test.ts` | No 4xx/5xx number and no `src/state`/`storage`/`engine` import in `handlers.ts` and the route files. |
+| `no-leak.test.ts` | §16.9. The two full games take most of the folder's ≈ 8 s, each with an explicit 60 s timeout. |
+
+### 16.12 Gotchas and limitations
+
+- **`?since=0` costs one storage read per commit** (§15.5). A 200-move game read that way after every move is quadratic; that is why the no-leak games dominate the API test time. Clients should poll with `since=<last version seen>`.
+- **Configuration is validated on the first request**, not at server startup (§16.5).
+- **`application/json` only.** `+json` media types such as `application/merge-patch+json` are rejected.
+- **Lengths count UTF-16 code units** (`humanName`, `moveId`, `clientRequestId`); the 16,384 cap counts bytes.
+- **No rate limiting, CORS or accounts** ([`architecture.md`](./architecture.md) §12); `GET /api/cron/cleanup` does not exist yet.
+- **No move-latency measurement yet.** Timings from `pnpm dev` (the `durationMs` field) use the file store and say nothing about Vercel Blob; the preview benchmark is pending ([`architecture.md`](./architecture.md) §11).
+
+---
+
+## 17. Known limitations
+
+- **Configuration is validated on the first API request, not at server startup.** The service factory calls `getConfig()` lazily (§16.5), so a misconfigured deployment starts, and its first request answers 500 with a `ConfigError` error line in the logs. Building at module load would break `next build` instead.
 - **Blob credentials are checked by `createObjectStore`, not by `loadConfig`** (§13.3), so a `blob` configuration without them is reported when the store is first built, not at startup.
 - **The Vercel Blob driver has not run against a real store yet**; it is tested against a mocked SDK, and the behaviours it assumes are listed in §13.7.
 - **The layer rule does not check dynamic `import()` or `require()`.** Use static `import` statements.
-- **No API or UI yet:** the game core (`src/domain` §9, `src/engine` §10, `src/score` §11, `src/players` §12), the storage layer (`src/storage`, §13), the Game State Manager (`src/state`, §14) and `GameService` (`src/service`, §15) exist, but no route handler calls the service yet, and `/` is a placeholder page. A game can be created, played and saved only from code or tests, and all-AI games played with `pnpm simulate`.
-- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12, **service limitations** in §15.11.
+- **No UI yet:** the game core (`src/domain` §9, `src/engine` §10, `src/score` §11, `src/players` §12), the storage layer (`src/storage`, §13), the Game State Manager (`src/state`, §14), `GameService` (`src/service`, §15) and the HTTP API (`app/api`, §16) exist, but `/` is a placeholder page. A game can be played over HTTP (§16.10) or from code and tests, and all-AI games with `pnpm simulate`.
+- **No move-latency measurement on Vercel Blob yet** ([`architecture.md`](./architecture.md) §11).
+- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12, **service limitations** in §15.11, **HTTP API limitations** in §16.12.

@@ -1,17 +1,16 @@
 # CONTEXT — HTTP API (Phase 8)
 
-Last updated by: Iteration 4 (no-leak, secrets, structure and header tests). Branch `spec/08-http-api`.
+Last updated by: Iteration 5 (documentation and manual curl session) — final. Branch `spec/08-http-api`.
 
 ## Current state
 
-- Phases 0–7 are complete (domain, engine, score, players, storage, game state, game service). Phase 8 is in progress.
-- **Iteration 1 done**: the pure HTTP building blocks in `app/api/_lib/` (`errors`, `http`, `body`, `auth`, `schemas`, `presets`) and their unit tests.
-- **Iteration 2 done**: `log.ts` (request/error logging), `service-factory.ts`, `default-deps.ts`, `handlers.ts` (`HandlerDeps`, `createGameHandler`, `presetsHandler`), the routes `POST /api/games` and `GET /api/presets`, and `tests/api/support/api-fixtures.ts`. `tests/api/`: 8 files, 197 tests, ≈ 0.35 s. `pnpm build` is a gate and lists `ƒ /api/games` and `ƒ /api/presets` (both dynamic).
-- **Iteration 3 done**: `getGameHandler`, `submitMoveHandler` in `handlers.ts`; the routes `GET /api/games/[id]` and `POST /api/games/[id]/moves`. **All four routes are live.** `pnpm build` lists `ƒ /api/games`, `ƒ /api/games/[id]`, `ƒ /api/games/[id]/moves`, `ƒ /api/presets`. `tests/api/`: 11 files, 274 tests, ≈ 0.65 s.
-- **Iteration 4 done** (tests only, no `app/api/**` change): `tests/api/support/leak-oracle.ts` (`assertNoLeak`, P-12) and `tests/api/{no-leak,secrets,structure,headers}.test.ts`. **The API is complete and proven**: BR-801–BR-805, FR-800/FR-801 over all 11 statuses. `tests/api/`: 15 files, 329 tests, Duration ≈ 8.2 s (≈ 7.7 s of it is the two VC-831 games).
-- **Not built yet**: docs only (Iteration 5).
-- Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict` (target ES2022, no `noUncheckedIndexedAccess`), pnpm 10.15.1, Node 24 declared (a newer local Node prints an "Unsupported engine" WARN, not fatal), Vitest 5.1.1, ESLint 10 flat config + Prettier 3 (single quotes, width 100, trailing commas), zod 4.6.7. `package.json`/lockfile unchanged.
-- Full `pnpm test`: 78 passed + 1 skipped files, 1468 passed + 30 skipped tests (≈ 8.6 s).
+- **Phase 8 is complete.** Phases 0–8 are done (domain, engine, score, players, storage, game state, game service, HTTP API). Next: Phase 9 (UI); the preview move benchmark moved to Phase 5b/11.
+- **Shipped**: four Next.js 16 Route Handlers — `POST /api/games` (201), `GET /api/games/[id]` (200, `?since`), `POST /api/games/[id]/moves` (200), `GET /api/presets` (200) — over shared code in `app/api/_lib/`. Bearer seat auth, strict Zod request schemas, a 16,384-byte body cap, one error mapper (9 codes, 11 statuses incl. 200/201), `application/json` + `no-store` on every response, one JSON request line per request plus an error line on 500, a lazy memoised config-wired `GameService`.
+- **Proven by tests** (`tests/api/`, 15 files, 329 tests, Duration ≈ 8.2 s): request rules, check order with 0 store calls, every status, logging, no secrets in logs, structure (no 4xx/5xx literals, no `src/state|storage|engine` import in handlers/routes), and a no-leak oracle over ≈ 1,200 bodies of two full games.
+- **Proven by hand**: the `curl` session of `docs/development.md` §16.10 played a 4-seat game to `game-over` against `pnpm dev` with the file store (201 commit files, `finalRanking` present), both as a scripted session with error probes and as the literal documented snippets (Iteration 5 record).
+- **Documented**: `docs/architecture.md` §7 (routes, presets shape, request rules, check order, 9-row error table, 404 for state errors, polling advice), §10 (request/error lines, `LOG_LEVEL` gating, never-logged list), §11 (API-tests row, "Pending: preview measurements" note; open question 1 still open); `docs/development.md` §16 "HTTP API" (16.1–16.12) and §17 "Known limitations"; `docs/implementation.md` benchmark deferral at every Phase 8 mention; `README.md` status line.
+- Toolchain: Next.js 16.4.6, TypeScript 6.0.3 `strict`, pnpm 10.15.1, Node 24 declared (newer local Node: "Unsupported engine" WARN, not fatal), Vitest 5.1.1, ESLint 10 + Prettier 3, zod 4.6.7. `package.json`/lockfile unchanged by Phase 8.
+- Full `pnpm test`: 78 passed + 1 skipped files, 1468 passed + 30 skipped tests (≈ 8.9 s). `pnpm build` lists the four API routes as dynamic (`ƒ`).
 
 ## File map
 
@@ -49,6 +48,9 @@ Last updated by: Iteration 4 (no-leak, secrets, structure and header tests). Bra
 | `tests/api/structure.test.ts` | VC-832: `handlers.ts` + the four `route.ts` have no 4xx/5xx number token, `status:`/`status =` literal or `jsonResponse(4xx` call; no import (static, dynamic, re-export, `require`, aliased or relative) of `src/state|storage|engine`; positive controls for both scanners; `errors.ts` holds the statuses; `service-factory.ts` is the exception (D-018). |
 | `tests/api/headers.test.ts` | VC-800 (one real response per status 200, 201, 400, 401, 403, 404, 409, 410, 413, 422, 500, plus presets 200: both headers) and VC-801 (each error body parses with `ErrorResponseSchema`, exact message, `: body` for the 400, only `error` key — `error`+`update` for 409 — no `stack`/`secret-xyz`). |
 | `tests/api/.gitkeep` | Pre-existing placeholder (left in place). |
+| `docs/architecture.md` | §7 HTTP API contract, §10 logging, §11 API tests + pending preview measurements. |
+| `docs/development.md` | §16 HTTP API (routes, client flow, request rules + errors, `_lib` map, handlers/deps, factory, logging, response schemas, writing a test, no-leak check, curl session, test table, gotchas); §17 Known limitations. |
+| `docs/implementation.md` | Phase 8 task 7 / done-when, M2 row, §1, §4, decisions 8–9, risk table, Phase 11 step 3: benchmark moved to Phase 5b/11. |
 
 ## Public interfaces
 
@@ -180,10 +182,14 @@ All with `env -u BLOB_READ_WRITE_TOKEN -u BLOB_STORE_ID -u VERCEL_OIDC_TOKEN` pr
 | `pnpm vitest run tests/api` | API tests (Iteration 4: 15 files, 329 tests, Duration ≈ 8.2 s; NFR-802 budget 20 s). |
 | `pnpm exec prettier --write app/api tests/api` | Format before lint. |
 | `git diff main -- package.json pnpm-lock.yaml src` | Must be empty (NFR-803, scope). |
+| `env -u … STORAGE_DRIVER=file FILE_STORE_DIR=<scratch dir> pnpm dev` + development.md §16.10 | Manual curl session (VC-835) without touching `.data/`; stop the server afterwards (port 3000). |
 
 ## Known gaps
 
-- Docs (Iteration 5): `docs/architecture.md` §7/§10/§11, `docs/development.md` §16 (+ §17 renumber), `docs/implementation.md` deferral notes.
+- **Preview move benchmark not run** (moved to Phase 5b/11): architecture open question 1 is open; no doc may claim the 500 ms p95 target is met.
+- **Configuration is validated on the first request**, not at startup (lazy factory, D-010); a bad env answers 500 + `ConfigError` error line.
+- `GET ?since=0` re-reads every commit (the service loads each commit after `since`), O(tip) reads; clients must poll with `since=<last version>` (documented in architecture §7 and development §16.1/§16.12).
 - `ErrorBody.update` is typed `PlayerUpdate`; the spec's `toErrorResponse` signature says `body: unknown` — `ErrorBody` is a narrower, compatible type.
 - A service `InvalidRequest('sinceVersion')` would surface as `Invalid request: sinceVersion`; in practice `parseSince` rejects bad values first.
-- `GET ?since=0` re-reads every commit (service `eventsSince`), so it costs O(tip) reads; a ~200-move game read that way after every move dominates `tests/api` time (D-017). Not an API change; worth a line in the docs.
+- `app/api/_lib/schemas.ts` imports `@/src/state/*` (for `MAX_COMMIT_VERSION`, `ScoreBoardSchema`, `GAME_ID_PATTERN`): importing it as a value from UI code would pull server modules into the client bundle. Phase 9 should use `import type` (domain `PlayerUpdate`, or `z.infer` types) on the client.
+- Not built (other phases): `GET /api/cron/cleanup` (Phase 10), UI (Phase 9), rate limiting/CORS (architecture §12).

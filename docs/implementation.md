@@ -14,7 +14,7 @@ This plan breaks the MVP into phases that each end in something runnable and tes
 - **Tests carry the design.** Worked examples in the docs (scoring examples, the *montar* example, hand counts 29/22/17/14) become tests in the phase that implements them.
 - **One preset ships, four are tested.** `argentina-fidepo` is the only preset exposed in the MVP UI. `spain-ludoteka`, `gamerules` and `mexico-bazas` are defined and covered by engine/score/simulation tests (design §4.2).
 - **No speculative features.** Non-goals in design §1.2 stay out (special hands, bid changes, revokes, push, accounts).
-- **Measure cloud risks early.** Blob exclusivity and consistency are checked right after the storage layer exists (Phase 5b), and latency right after the API exists (Phase 8), not only at launch.
+- **Measure cloud risks early.** Blob exclusivity and consistency are checked right after the storage layer exists (Phase 5b), not only at launch. Move latency needs a deployed API on a preview: its benchmark was planned for Phase 8 and moved to the preview work of Phase 5b/11, where it is designed next to the preview run that uses it.
 
 ---
 
@@ -23,7 +23,7 @@ This plan breaks the MVP into phases that each end in something runnable and tes
 | Milestone | Phases | What you can do at the end |
 |---|---|---|
 | **M1 — Engine proven** | 0–4 | Run `pnpm simulate` to play thousands of seeded all-AI games for every preset × player count; invariants, determinism and replay all pass, with the run recorded. |
-| **M2 — Backend works locally** | 5–8 (incl. 5b) | Create a game and play it through the HTTP API with `curl`, persisted to `.data/`, with concurrency and idempotency covered by tests; Blob exclusivity, consistency and move latency measured on preview. |
+| **M2 — Backend works locally** | 5–8 (incl. 5b) | Create a game and play it through the HTTP API with `curl`, persisted to `.data/`, with concurrency and idempotency covered by tests; Blob exclusivity and consistency measured on preview (Phase 5b). The preview move-latency benchmark moved to Phase 5b/11, so M2 does not include it. |
 | **M3 — Playable locally** | 9–10 | Play a full game in the browser against AIs on `pnpm dev`; resume after reload; retention job works against the memory and file stores. |
 | **M4 — Launched** | 11 | Production deployment on Vercel with private Blob stores, preview checks re-run and recorded, latency target met. |
 
@@ -234,13 +234,13 @@ Runs as soon as Phase 5 is done, in parallel with later phases. It does not bloc
 4. One error-mapping function from service errors to the status/code table; `Cache-Control: no-store` on all responses.
 5. Structured JSON request log line (architecture §10); never log tokens or hands.
 6. A shared service factory that wires config → store → state manager → service, created once per function instance.
-7. Deploy to preview and add `scripts/bench-moves.ts`: measure the move path for cold, warm and stale-hint cases.
+7. ~~Deploy to preview and add `scripts/bench-moves.ts`: measure the move path for cold, warm and stale-hint cases.~~ **Moved to Phase 5b/11:** the benchmark script, the preview deploy and the `architecture.md` §11 record. An in-process run from a laptop would not measure a Vercel function's move request, so the benchmark is designed next to the preview run that uses it. The Blob exclusivity and consistency checks stay in Phase 5b.
 
 **Done when**
 - API tests (handlers called directly with `MemoryObjectStore`) cover every error code, missing/malformed `Authorization`, idempotent retry, `?since` ahead of the current version or not a number → 400, and a partially deleted game → 404.
 - **No-leak test:** for every response in a scripted game (including a full-deck deal and a 409 body), no card currently held in another seat's hand (except the dealer's shown trump card) and no undealt stock card appears anywhere in the serialized body, and no `seed` field exists. Played cards in `events`, `currentTrick` and `lastTrick` are allowed.
 - A manual `curl` session against `pnpm dev` plays a game persisted to `.data/`.
-- The preview benchmark is recorded in `architecture.md` §11 (sample count and p95 against 500 ms). This closes architecture open question 1, or triggers the latency mitigations in §6.
+- ~~The preview benchmark is recorded in `architecture.md` §11 (sample count and p95 against 500 ms).~~ **Moved to Phase 5b/11** (task 7). Until it is recorded, architecture open question 1 stays open and the latency target counts as unverified.
 
 ---
 
@@ -280,7 +280,7 @@ Runs as soon as Phase 5 is done, in parallel with later phases. It does not bloc
 **Tasks**
 1. Finish the Vercel project setup (begun in Phase 5b): GitHub preview deployments per PR, production from `main`.
 2. Create the **private production** Blob store and connect it to production (OIDC auth). Set `CRON_SECRET` for preview and production.
-3. Re-run the Phase 5b Blob checks and the Phase 8 move benchmark on the final build, and record them in `architecture.md` §11.
+3. Re-run the Phase 5b Blob checks and run the move benchmark (moved here from Phase 8: `scripts/bench-moves.ts`, cold, warm and stale-hint move requests, unless it already ran with Phase 5b) on the final build, and record them in `architecture.md` §11. This closes architecture open question 1, or triggers the latency failure rule below.
 4. Smoke test on preview: create, play to the end, reload/resume, 409 handling with two tabs.
 5. Promote to production; verify the cron runs (Vercel logs).
 
@@ -302,7 +302,7 @@ Runs as soon as Phase 5 is done, in parallel with later phases. It does not bloc
 | Storage contract tests | 5 (Blob run in 5b) |
 | State manager + concurrency tests | 6, 7 |
 | API tests (auth, errors, no leaks, idempotency) | 8, 10 |
-| Preview Blob checks | 5b (exclusivity, consistency), 8 (latency), re-run in 11 |
+| Preview Blob checks | 5b (exclusivity, consistency), 5b/11 (move latency, moved from 8), re-run in 11 |
 
 ---
 
@@ -317,8 +317,8 @@ Runs as soon as Phase 5 is done, in parallel with later phases. It does not bloc
 | 5 | Hash for RNG stream derivation | Phase 2 | Pure-TS SHA-256 (`@noble/hashes`) to keep the core free of Node built-ins. |
 | 6 | Seat order for the human | Phase 7 | Human always at seat 0; the first dealer is random, so the human's position relative to the dealer still varies. |
 | 7 | How to express the `gamerules` start count | Phase 1 | `{ min: [10, 'max'] }` segment bound; design §4.3 updated. |
-| 8 | `ifMatch` on `head.json` writes (architecture §6.3.3, optional) | Phase 6 | Plain overwrite. A backwards-moving hint only costs extra probes or a 409, never correctness; revisit if Phase 8 benchmarks show many stale-hint paths. |
-| 9 | Blob latency and exclusivity (architecture OQ 1) | Phases 5b, 8 | Measure; failure rules in Phase 11. |
+| 8 | `ifMatch` on `head.json` writes (architecture §6.3.3, optional) | Phase 6 | Plain overwrite. A backwards-moving hint only costs extra probes or a 409, never correctness; revisit if the preview move benchmark (moved from Phase 8 to Phase 5b/11) shows many stale-hint paths. |
+| 9 | Blob latency and exclusivity (architecture OQ 1) | Phases 5b, 11 | Measure (exclusivity in 5b; the move benchmark moved from Phase 8 to 5b/11); failure rules in Phase 11. |
 
 ---
 
@@ -327,7 +327,7 @@ Runs as soon as Phase 5 is done, in parallel with later phases. It does not bloc
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Blob create-only `put` not strictly exclusive under concurrency | Lost updates | Checked in Phase 5b, long before launch. If it fails, launch is blocked and architecture §6.3 is revised with a design that keeps versioned commits (Phase 11 failure rules). |
-| Consistent Blob reads too slow for 500 ms p95 | Sluggish moves | Benchmarked on preview at the end of Phase 8; mitigations in Phase 11 failure rules. |
+| Consistent Blob reads too slow for 500 ms p95 | Sluggish moves | Benchmarked on preview in Phase 5b/11 (moved from the end of Phase 8; not measured yet); mitigations in Phase 11 failure rules. |
 | Rule bugs in rarely-hit play-flag combinations | Wrong legal moves | Exhaustive unit cases from design §5.4, pinned hand-plan fixtures, and simulation across all presets with per-move invariants. |
 | Hidden information leaking through a new view field | Cheating | Single `buildPlayerView`; strict response schemas; no-leak test over every response. |
 | Replay drifting from live play | Unreplayable games | Engine owns `aiDecisionCount`; `ENGINE_VERSION` in `meta.json`; replay tests for simulated and persisted games. |
