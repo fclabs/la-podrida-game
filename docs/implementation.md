@@ -247,7 +247,7 @@ Runs as soon as Phase 5 is done, in parallel with later phases. It does not bloc
 ### Phase 9 — UI (→ M3, part 1)
 
 **Tasks**
-1. `/` new-game form: name, number of AIs (2–5). Preset fixed to the default for now (decision 1).
+1. `/` new-game form: name, number of AIs (2–5). Preset fixed to the default (decision 1, decided).
 2. `/game/[id]` table: seats around the table with name, card count, bid, tricks; trump card; current and last trick; the player's hand.
 3. Bidding: one button per legal `bid:n` move. Playing: legal cards highlighted and clickable, the rest dimmed.
 4. Client state:
@@ -310,7 +310,7 @@ Runs as soon as Phase 5 is done, in parallel with later phases. It does not bloc
 
 | # | Question | Needed by | Proposed default |
 |---|---|---|---|
-| 1 | Preset choice in the MVP UI (design OQ 1) | Phase 9 | Default preset only; the API already accepts `rulesPreset`. |
+| 1 | Preset choice in the MVP UI (design OQ 1) | Phase 9 | **Decided in Phase 9:** default preset only. The UI offers no preset choice; it sends `rulesPreset: defaultPresetId` from `GET /api/presets` when creating a game (the API itself accepts any preset). |
 | 2 | Spanish 8/9-card extension (design OQ 2) | Not MVP | Skip; `spain-ludoteka` supports 3–6 players. |
 | 3 | "Pocha" bonus and suit multipliers (design OQ 3) | Not MVP | Skip. |
 | 4 | Target-score endings / one-card tie-break hands (design OQ 4) | Not MVP | Skip; `fewest-misses` then `shared`. |

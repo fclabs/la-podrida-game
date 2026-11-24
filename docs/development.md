@@ -14,7 +14,7 @@ This guide explains how the repository is organised, which rules the tooling enf
 | pnpm | 10 (exact version in `package.json` `packageManager`) | Always install with `pnpm install --frozen-lockfile`; it must never change `pnpm-lock.yaml`. |
 | Next.js | 16 (App Router) | React 19. |
 | TypeScript | 6.0 | `strict`, no emit. Pinned below 7, see §8. |
-| Vitest | 5 | With Vite 8 as its peer. |
+| Vitest | 5 | With Vite 8 as its peer. UI tests run in jsdom with Testing Library (§17.8). |
 | ESLint | 10 (flat config) | Plus `typescript-eslint`, the Next.js plugin and a local layer-boundary rule. |
 | Prettier | 3 | Checked by `pnpm lint`. |
 | Zod | 4 | Runtime dependency, used for configuration, the domain schemas (§9) and the persisted game documents (§14). |
@@ -30,6 +30,8 @@ This guide explains how the repository is organised, which rules the tooling enf
 ```
 app/                    Next.js App Router: pages, layouts, components (UI)
   api/                  HTTP route handlers; shared code in api/_lib/ (§16)
+  _client/              Browser UI: pages' components, API client, state (§17)
+  game/[id]/            The game page route (§17)
 src/
   domain/               Types, rules presets, pure helpers            ┐
   engine/               Game Engine: state transitions, legal moves   │ core: pure, no I/O
@@ -43,13 +45,14 @@ tests/
   unit/                 Pure logic, lint-rule fixtures, config
   contract/             Cross-module contracts (e.g. every ObjectStore driver)
   api/                  Route handlers
+  ui/                   Browser UI in jsdom: modules, components, full game (§17.8)
   sim/                  Long-running simulations (run by `pnpm test:sim` only)
 scripts/simulate.ts     Command-line simulator (`pnpm simulate`)
 tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
 
-`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12), `src/storage` (§13), `src/state` (§14) and `src/service` (`GameService`, `replayGame` and the two pure helpers `buildPlayerView` and `runAiLoop`, §12 and §15) are built, and so is the HTTP API in `app/api/` (§16). The UI is not: `/` is a placeholder page. The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
+`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12), `src/storage` (§13), `src/state` (§14) and `src/service` (`GameService`, `replayGame` and the two pure helpers `buildPlayerView` and `runAiLoop`, §12 and §15) are built, and so is the HTTP API in `app/api/` (§16). So is the browser UI in `app/_client/` (§17): the new-game page at `/` and the game page at `/game/[id]`. The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
 
 **Import alias.** `@/` maps to the **project root**, so imports read `@/src/engine/...` or `@/app/...`. It works in TypeScript, Next.js, Vitest and `tsx`.
 
@@ -98,13 +101,14 @@ Full matrix (✓ allowed, ✗ lint error, "own" = same folder):
 
 ## 4. Tests
 
-Tests are Vitest files named `*.test.ts`, placed in the folder that matches what they test:
+Tests are Vitest files named `*.test.ts` (`*.test.tsx` under `tests/ui/`), placed in the folder that matches what they test:
 
 | Folder | Put here | Run by |
 |---|---|---|
 | `tests/unit/` | Pure logic: domain helpers, engine and score functions, config, lint-rule fixtures. | `pnpm test` |
 | `tests/contract/` | Contracts that several implementations must satisfy (e.g. one suite run against every storage driver, §13.6). The Vercel Blob run is skipped unless `BLOB_READ_WRITE_TOKEN` is set. | `pnpm test` |
 | `tests/api/` | Route handlers, called directly (§16.8). | `pnpm test` |
+| `tests/ui/` | The browser UI in jsdom: pure client modules and React components with Testing Library, against an in-process API (§17.8). | `pnpm test` (`pnpm vitest run --project ui` for only these) |
 | `tests/sim/` | Long-running simulations (many full games). | `pnpm test:sim` only |
 
 Test files anywhere else (for example next to the code in `src/`) are **never run**. The simulation suite, its `SIM_SEEDS` setting and its helpers are described in §12.5.
@@ -125,7 +129,7 @@ describe('loadConfig', () => {
 
 Run a single file with `pnpm vitest run tests/unit/example.test.ts`.
 
-**Two Vitest configs.** `vitest.config.ts` (used by `pnpm test`) includes `tests/{unit,contract,api}`; `vitest.sim.config.ts` (used by `pnpm test:sim`) includes only `tests/sim` and allows an empty folder. They are two standalone files because merging configs concatenates the `include` lists (sim would also run everything else) and importing one config from the other is not supported cleanly by Vite's config loader. **Keep the `resolve.alias` and `environment` settings of both files in sync.**
+**Two Vitest configs.** `vitest.config.ts` (used by `pnpm test`) defines two projects that share the `@` alias: `node` (`tests/{unit,contract,api}`, Node environment) and `ui` (`tests/ui`, jsdom, with `tests/ui/setup.ts` cleaning up Testing Library and `localStorage` after each test); `vitest.sim.config.ts` (used by `pnpm test:sim`) includes only `tests/sim` and allows an empty folder. They are two standalone files because merging configs concatenates the `include` lists (sim would also run everything else) and importing one config from the other is not supported cleanly by Vite's config loader. **Keep the `resolve.alias` and `environment` settings of both files in sync.**
 
 **Layer-rule fixture tests.** `tests/unit/layer-boundaries.test.ts` runs ESLint's `lintText` on inline source strings with a virtual file path (e.g. `src/engine/x.ts`) and asserts whether a `layer-boundaries/imports` error is reported. There are no fixture files on disk, so neither `pnpm lint` nor `pnpm typecheck` sees them. Add a row `[label, virtualPath, code, expectError]` to the `rows` table for each new case.
 
@@ -2075,12 +2079,193 @@ A 4-seat `argentina-fidepo` game takes about 200 human moves and a few seconds t
 
 ---
 
-## 17. Known limitations
+## 17. UI
+
+The browser UI is two pages, both client components. `/` is the new-game form (plus a link to continue the remembered game). `/game/[id]` is the table: bidding, playing, the replay of events, the score sheet and the final ranking. All text is Spanish (`<html lang="es">`), and the UI has no CSS framework and no runtime dependency of its own.
+
+**The server is the only rules authority.** The UI never decides what is legal, whose turn it is, who won a trick, the scores or the ranking. It shows `legalMoves`, `toAct`, `trick-won.seat`, `scoreboard` and `finalRanking` exactly as the API sent them. The only arithmetic it does is display bookkeeping while replaying events (§17.5) and the running totals on the score sheet (sums of points the server already gave). It uses the HTTP API of §16 and nothing else; there is no polling or push, because the AI moves arrive inside the response to the human's own move.
+
+### 17.1 Pages and modules
+
+| File | What it is |
+|---|---|
+| `app/page.tsx` | Renders `NewGamePage`. |
+| `app/game/[id]/page.tsx` | Server component: awaits `params` (a `Promise` in Next 16) and renders `<GamePage key={id} id={id} />`. It reads nothing else. |
+| `app/layout.tsx`, `app/globals.css` | `<html lang="es">`; colour tokens, base font and `box-sizing` (§17.7). |
+| `app/_client/` | Everything below. Next ignores `_`-prefixed folders for routing. |
+
+Pure modules in `app/_client/` (no React; `fetch`, storage, the id source and timers are passed in, so tests call them directly):
+
+| Module | Role |
+|---|---|
+| `slot.ts`, `memory-slot.ts` | The stored-game slot and its in-memory fallback (§17.2). |
+| `ids.ts` | `newClientRequestId`: `crypto.randomUUID()` when it exists, otherwise a version-4 UUID built from `crypto.getRandomValues` (works outside secure contexts such as `http://<LAN IP>:3000`). |
+| `api.ts`, `api-types.ts`, `shape.ts` | One function per call (`getPresets`, `createGame`, `getUpdate`, `submitMove`), the local types of the presets, create and error bodies, and the response shape checks (§17.3). |
+| `game-state.ts` | `shouldAdopt` (version guard), `captureAction`, `isAnimated`. |
+| `display.ts` | The display model and `applyEvent` / `eventDelayMs` (§17.5). |
+| `cards.ts` | `cardLabel(card, deck)`: rank, suit, accessible name and colour for `french-52` and `spanish-40`. |
+| `kept-update.ts` | Hands the 201 update from the new-game page to the game page (§17.2). |
+| `copy.ts` | Every Spanish string, as one `COPY` constant. |
+
+React components: `new-game-page.tsx`, `game-page.tsx` (the state machine: loading, adoption, moves, queue), `table.tsx`, `hand.tsx`, `bid-bar.tsx`, `card-view.tsx`, `banner.tsx`, `score-sheet.tsx`, `game-over.tsx`, `notice.tsx`, each with a `*.module.css` next to it. `deps.tsx` provides `ClientDeps` through a React context: `fetch`, `setTimeout`/`clearTimeout`, `storage()`, `newId` and `navigate`. In the browser the default deps use the globals and `next/navigation`'s router; tests wrap renders in `ClientDepsProvider` with fakes, so nothing mocks `next/navigation`.
+
+**Layer rule.** UI code may use only `import type` from `@/src/domain/types` (`PlayerUpdate`, `PlayerView`, `GameEvent`, `LegalMove`, `ScoreBoard`) and never imports anything from `app/api`, so the presets, create and error bodies are typed locally in `api-types.ts`. `Card` is not exported by `types.ts`; `cards.ts` and `display.ts` derive it as `PlayerView['yourHand'][number]`. Lint enforces the `src` part (§3); `tests/ui/boundaries.test.ts` scans `app/**` and enforces the `app/api` part.
+
+### 17.2 The stored-game slot
+
+One `localStorage` key, `la-podrida:game`, holds JSON `{ gameId, seatToken, deck, finished }` (strings, string, string, boolean). The browser remembers one game; creating a new game replaces it.
+
+- **Reading** returns "no slot" when the key is missing, the JSON does not parse or a field has the wrong type. Every read and write is in `try/catch`; a failure is "no slot" on read and ignored on write. Storage is touched only in effects and event handlers, never during render, so the server HTML and the first client render match and no hydration warning appears.
+- **In-memory fallback.** If the write after creating a game fails (private mode, blocked storage), the new-game page keeps the slot in `memory-slot.ts` and the game stays playable in that tab. After a reload there is no slot and the game page shows the no-access message. The continue link on `/` reads storage only.
+- **Ownership.** A game page changes the slot only when the stored slot's `gameId` equals the page's route `id`, and it re-reads the slot just before changing it. This covers clearing it (401, 404 or 410) and setting `finished: true` when the adopted view reaches `game-over`. A tab showing an old game therefore never damages the slot of a newer game created in another tab; only creating a game replaces a slot that belongs to another game.
+- **Kept update.** After a 201 the new-game page stores the update in `kept-update.ts`, tagged with its `gameId`, and navigates to `/game/<id>`. The game page takes it once per instance (cached in a ref, because Strict Mode runs effects twice) only when the `gameId` matches, and then plays its events from the empty table. Any other mount (reload, hard navigation, a different id) loads with `GET /api/games/<id>` instead.
+
+Loading `/game/[id]`:
+
+| Situation | What happens |
+|---|---|
+| No slot, or the slot belongs to another game | `No tenés acceso a esta partida.` and a `Nueva partida` link; no API call. |
+| Matching slot, matching kept update | Adopt it and animate its events; no GET. |
+| Matching slot, no kept update | `GET /api/games/<id>` with the bearer token (no `since`); the view appears at once. |
+| Load answers 401, 404 or 410 | The slot is cleared (if owned) and a message with a `Nueva partida` link is shown: access no longer valid, game no longer exists, or the game cannot be continued with this version. |
+| Load fails in transport or with 5xx | The slot is kept; `No se pudo cargar la partida.` and `Reintentar`. A load is deduplicated per attempt, so Strict Mode does not send two GETs. |
+
+### 17.3 Calls, timeouts and transport failures
+
+`api.ts` functions never throw: they return `ok`, `conflict` (a 409 on a move, with its `update`), `error` (a 4xx handled for that call; decide by `status`, `code` may be empty) or `transport`. Every call is aborted after 20 s, and the request is also raced against the abort so a hung `fetch` or `json()` still settles. All requests use `cache: 'no-store'`; the seat token travels only in the `Authorization` header, is never put in a URL or a log, and is never rendered.
+
+An outcome is a **transport failure** when `fetch` rejects, the 20 s abort fires, the status is 500 or more, a 2xx body fails the shape check, a 409 has no valid `update`, or the status is not one that call handles. The shape checks are deliberately shallow (a `PlayerUpdate` has a numeric `version` and the expected arrays and objects; deeper fields are trusted). A presets body without an entry for `defaultPresetId` also fails, so a new game cannot be created from it.
+
+**New game.** `GET /api/presets`, then `POST /api/games` with `{ humanName: <trimmed name>, aiCount, rulesPreset: defaultPresetId }`. The preset is always the server's default (the UI offers no preset choice); its `deck` is stored in the slot. Any failure leaves the user on `/` with `No se pudo crear la partida. Probá de nuevo.` (a 400 shows `Revisá los datos de la partida.`); nothing is retried and nothing is stored.
+
+### 17.4 Updates, versions and moves
+
+**Adoption and the version guard.** The page keeps the latest *adopted* `PlayerUpdate`. A received update is adopted only if none is adopted yet or its `version` is greater than the adopted one; otherwise it is ignored (its events are not queued). The adopted version never decreases, which matters because retried requests can answer out of order.
+
+**What animates and what jumps.** Only a 201 (create) and a 200 move response queue their `events` for replay. Every other adoption (page load, 409, recovery GET) empties the queue and shows the adopted view immediately. Controls and legal moves always come from the adopted update; the table shows either the display model (while events play) or the adopted view.
+
+**One action, one request body.** On a bid or card click the page captures `{ version: <adopted version>, moveId: <the legal move's id>, clientRequestId: <new id> }` exactly once, then sends it. A new `clientRequestId` is generated only for a new click. Bid buttons (one per legal bid, ascending, so the dealer's forbidden value has no button) and clickable cards (only cards that are the `card` of a legal play; the rest are dimmed; hand order is the server's) are shown only when no events are playing and `legalMoves` is non-empty, and are enabled only while no request is in flight or waiting to retry.
+
+**Why a retry is safe.** The server deduplicates by `clientRequestId` (§15): a repeated request with the same id answers 200 with the original response and never applies the move twice. After a transport failure the page therefore resends the *identical* body after 1 s, 2 s and 4 s. If all three fail it shows `No se pudo enviar la jugada.` and `Reintentar`; each click sends the same body once more, with the same 20 s timeout.
+
+**Move responses.**
+
+| Response | What the UI does |
+|---|---|
+| 200 | Adopt it and animate its events. |
+| 409 | Adopt the body's `update` (no animation) and show `La partida avanzó; se actualizó la mesa.` |
+| 403, 422 | `GET /api/games/<id>?since=<version sent>`, adopt the result (no animation), show `Esa jugada ya no es válida.` |
+| 400, 413 | Same recovery as above, with `Error inesperado.` |
+| 401, 404, 410 | Clear the slot (if owned) and show the corresponding message, as when loading. |
+| Transport failure | Retry at 1, 2, 4 s, then `Reintentar`. |
+
+If the recovery GET itself fails in transport or with 5xx, the page shows the load-failure message and `Reintentar` repeats that GET (not the plain load); a 401, 404 or 410 on it is handled as above. A notice disappears after 4 s or when the next action starts.
+
+**Game over.** When the adopted view's `phase` is `game-over`, the page sets `finished: true` in the slot (also when a game loads already finished), so `/` stops offering to continue it.
+
+### 17.5 The event display model
+
+Events are replayed one at a time on a **display model** (`DisplayModel` in `display.ts`: the table-view fields the table renders plus the hand banner, the highlighted seat and a `dealt` flag). `applyEvent(model, event, target)` is pure and returns a new model; `target` is the adopted view and is used only to take the human's hand at a deal. The model starts from the view that was shown before the adoption (200) or from an **empty table** (201: the seats with 0 cards, no bids, no tricks, no trump, empty tricks and hand).
+
+Each event's effect is applied when it starts, then held for its delay; the next event starts when the delay ends:
+
+| Event | Effect | Delay |
+|---|---|---|
+| `game-started`, `game-over` | none | 0 ms |
+| `hand-dealt` | trump card and `trumpCardInDealerHand`, dealer and hand number; every seat gets `cardsPerPlayer` cards, no bid, 0 tricks; tricks emptied; banner cleared; the human's hand becomes the adopted view's `yourHand` | 600 ms |
+| `bid-made` | sets that seat's bid | 600 ms |
+| `card-played` | adds the card to the current trick, lowers that seat's card count, removes the card from the shown hand when it is the human's | 600 ms |
+| `trick-won` | increments the winner's tricks, moves the current trick to the last trick | 1200 ms |
+| `hand-completed` | shows the banner `Fin de la mano <n>` with each seat's bid and tricks; it stays until the next deal or the end of the queue | 1200 ms |
+
+The seat that produced the event being shown is highlighted (`data-highlight="true"`). While the queue is non-empty: no seat shows the turn marker, no bid button or clickable card is shown, and the score sheet, the phase and the game-over screen come from the view shown *before* the adoption (for a 201 there is none: empty sheet, no ranking). They all switch to the adopted view when the queue empties, and the table then renders the adopted view exactly. `Saltar` (shown only while events play) empties the queue and shows the adopted view at once.
+
+The queue lives in the game page's reducer: `queue` holds the events not yet finished (the head is the one being shown) and one timer is armed per head, so `Saltar` and unmounting cancel cleanly. `finished: true` stays keyed on the adopted view, not the shown one.
+
+### 17.6 Table, score sheet, game over, cards and copy
+
+- **Table.** Per seat: name, `(vos)` on the human's seat, card count, bid (`—` when none), tricks, a dealer marker and a turn marker; the trump card (with `En mano del repartidor` when it is in the dealer's hand); the current trick with each card's seat; the last trick and its winner; `Mano <n> de <total> · <cards> cartas`; the human's hand.
+- **Score sheet.** The `Planilla` button opens a full-screen panel (`role="dialog"`) at every width; `Cerrar` closes it. One row per entry of `handPlan`: hand number, cards, and per seat bid, tricks and points for hands in `scoreboard.hands`; completed rows also show each seat's running total; a totals row shows `scoreboard.totals`. While `scoreboard.live` is present the current hand's row shows each seat's live bid, tricks and status (`En camino`, `Cumplida`, `Pasada`).
+- **Game over.** When the shown view's phase is `game-over`, a ranking from `finalRanking` (place, name, total, ascending; ties share a place) and a `Nueva partida` link to `/`. No input is shown.
+- **Cards.** A card is a CSS box with rank and suit from the slot's `deck` (unknown or missing falls back to `french-52`). `french-52` uses ♠ ♥ ♦ ♣ (hearts and diamonds red); `spanish-40` shows the suit word in a colour per suit and ranks `R`, `C`, `S` as `12`, `11`, `10`. Each card has an accessible name such as `10 de picas`, `Rey de copas`, `As de oros`; a clickable card is a `<button>`.
+- **Copy.** Every string is in `COPY` (`copy.ts`). Components and tests import it, so a test asserts `COPY.loadFailed` rather than retyping the sentence; `tests/ui/copy.test.ts` checks the specified texts verbatim once. A few labels have no prescribed text and use minimal Spanish: table labels (`Repartidor`, `Turno`, `Cartas`, `Pedido`, `Bazas`, `Triunfo`, `Baza actual`, `Última baza`, `Tu mano`), the score-sheet headings (`#`, `Puntos`, `Total`) and the game-over title `Fin de la partida`. Bid buttons have no prompt text. Change them in `COPY` freely.
+
+### 17.7 Styling
+
+One global stylesheet, `app/globals.css`, holds the colour tokens (`--bg`, `--surface`, `--text`, `--muted`, `--border`, `--accent`, `--accent-text`, `--danger`, `--highlight`, one `--card-*` per card colour), the font and `box-sizing`. Each component has its own `*.module.css`; inline `style` is used only for runtime values. The conventions below make the layout work at 375 px width, and `tests/ui/tap-targets.test.ts` checks them statically, so renaming a class is a deliberate test change:
+
+- Mobile first; one breakpoint, `@media (min-width: 768px)`.
+- Tap targets (bid buttons, cards, `Saltar`, `Reintentar`, `Planilla`, `Cerrar`, the game-over link) declare `min-width` and `min-height` of at least 44px.
+- Lists of cards, bid buttons and seats wrap (`flex-wrap: wrap`) instead of scrolling the page sideways.
+- The score sheet is a fixed full-screen panel; its table sits in a `.scroll` box with `overflow-x: auto` and `max-width: 100%`, so only the table scrolls sideways, never the page.
+
+### 17.8 UI tests
+
+UI tests are `tests/ui/**/*.test.{ts,tsx}`, run in jsdom by their own Vitest project (§4). `pnpm test` runs them with everything else; `pnpm vitest run --project ui` runs only them (a few seconds); `pnpm vitest run --project ui tests/ui/slot.test.ts` runs one file. `tests/**/*.tsx` is in `tsconfig.json` `include`, and Vitest compiles JSX without a React plugin. The dev dependencies are `jsdom`, `@testing-library/react`, `@testing-library/dom` and `@testing-library/user-event`, pinned like every other package.
+
+**The in-process API.** `tests/ui/support/in-process-api.ts` exports `makeInProcessApi()`, which returns `{ fetch, api, calls, failNext }`. Its `fetch` parses the URL and calls the real route handlers of §16 over a `MemoryObjectStore` (through `makeApi()` from `tests/api/support/api-fixtures.ts`), so the UI is tested against the real contract, not a hand-written mock.
+
+- `calls` records `{ method, path, headers, body, status }` per request (`status` is `null` when the call rejected, hung or was aborted).
+- `failNext(mode, match?)` injects one failure on the next matching call: `'reject-before'` (the handler does not run), `'reject-after'` (the handler runs, then the response is dropped: the retry case), `'hang'` (never resolves unless aborted), or a fixed `{ status, body }` (the handler does not run).
+- It honours `init.signal` (aborts with an `AbortError`). The handler `Request` is built without jsdom's `AbortSignal`, and the handler `Response` is copied into a plain `Response`.
+
+**Helpers.** `tests/ui/support/render.tsx`: `renderWithDeps(ui, { api?, overrides?, strict? })` (wraps in `ClientDepsProvider`, returns RTL's result plus `{ api, deps, navigated }`), `makeDeps`, `createStoredGame` (creates a real game and stores its slot) and `resetClientState()`. Call `resetClientState()` in `beforeEach`: the kept update and the memory slot are module variables. `tests/ui/support/fixtures.ts` has `makeView`, `makeUpdate`, `makeScoreboard` and `card` for hand-built views (a test that overrides `seats` must supply all four); `tests/ui/support/moves.ts` has `bid`, `play`, `armLoad`, `armMove`, `moveCalls` and `flush`.
+
+**Writing a test.**
+
+- Wrap the page or component with `renderWithDeps`; never mock `next/navigation`. Assert texts through `COPY`.
+- Under `vi.useFakeTimers()` use `fireEvent` and advance with the `flush(ms)` helper (`act` plus `vi.advanceTimersByTimeAsync`). `userEvent` hangs under Vitest's fake timers. Without fake timers, `userEvent` is fine.
+- **One `flush(ms)` fires at most one queue tick**: React renders and re-arms the timer only after the `act` ends. Step the clock once per event; `flush(60_000)` does not drain the queue.
+- A real 200 from the in-process API animates, so a test that needs the next legal action clicks `Saltar` first. When counting game controls, filter out the page's own `Planilla`, `Saltar` and `Reintentar` buttons.
+- To test a failure, arm it: `api.failNext('reject-after', { path: /moves/ })`, or use `armLoad` / `armMove` to answer with a fixture.
+- `tests/ui/full-game.test.tsx` plays one whole 2-AI game through `NewGamePage` and `GamePage` on real timers, clicking `Saltar` whenever it shows, and then checks the record: every request answered 200 or 201, every enabled control and every sent `moveId` was a legal move of the adopted update, the token appeared only in `Authorization` headers, and no card name was rendered that no update contained. It takes about 3 s.
+
+### 17.9 Manual play-through
+
+Automated tests cannot cover real browsers, real phones or a real network, so play at least one game by hand when you change the UI. These steps use the file store, which is the default outside Vercel; games are files under `FILE_STORE_DIR` (default `.data/`).
+
+1. Start the server with a scratch store and keep the browser console open (any React error or hydration warning is a failure):
+
+   ```sh
+   FILE_STORE_DIR=/tmp/podrida pnpm dev
+   ```
+
+   Open <http://localhost:3000/>. To start clean, stop the server, `rm -rf /tmp/podrida`, delete the `la-podrida:game` key in the browser's Local Storage and restart.
+
+2. **Full game.** Enter a name, choose 5 rivals, press `Empezar partida`. Bid with the buttons, play any enabled card; use `Saltar` to skip the replay. Open `Planilla` mid-game and at the end. Expect: the `Fin de la partida` ranking appears, its totals match the sheet's totals row, and no notice or error text appears in normal play.
+3. **Reload mid-hand.** Bid, play a card, then reload. Expect the same hand number, hand, bids and tricks, and play continues. `/` in a new tab shows `Continuar partida`.
+4. **Offline retry.** The game id is in the URL; count the server's commits with `ls /tmp/podrida/games/<gameId>/commits | wc -l`. In DevTools, Network, set `Offline` and click a card. (a) Back to `No throttling` within about 3 s: the move applies. (b) Stay offline until `No se pudo enviar la jugada.` and `Reintentar` appear (about 7 s), go online and click `Reintentar`. Both times the commit count rises by exactly 1 and the table moves on.
+5. **Phone layout.** In the DevTools device toolbar choose 375 × 667 and check `/` and the game with the score sheet closed and open. Two worst cases of the default preset: 5 rivals (6 seats, 8-card first hand, bid buttons 0 to 8) and 2 rivals (3 seats, 17-card first hand, bid buttons 0 to 17, a 29-row score sheet). The page must never scroll sideways (the sheet's table may scroll inside its box), every bid button and card must be visible, and each tap target must measure at least 44 × 44 px.
+6. **Other browsers.** Repeat step 2 for one hand in Firefox and in Safari on iOS. Over plain `http://<LAN IP>:3000` `crypto.randomUUID` is unavailable, so this also exercises the id fallback.
+
+**Reaching the dev server from a phone.** Put the phone on the same network, find the computer's address (`ipconfig getifaddr en0` on macOS) and start the server on all interfaces with that address allowed:
+
+```sh
+DEV_ALLOWED_ORIGINS=<LAN IP> FILE_STORE_DIR=/tmp/podrida pnpm dev --hostname 0.0.0.0
+```
+
+Then open `http://<LAN IP>:3000` on the phone (allow incoming connections for Node if a firewall asks). Next 16 blocks cross-origin dev requests (the `/_next/` dev resources and the hot-reload websocket) from any host other than `localhost`, so without the variable the page loads but live reload fails and the console shows `Blocked cross-origin request`. `next.config.ts` passes `DEV_ALLOWED_ORIGINS` to `allowedDevOrigins`: a comma-separated list of **hosts only** (no scheme, no port). It affects `pnpm dev` only; builds ignore it.
+
+### 17.10 Gotchas and limitations
+
+- **No polling, one remembered game.** The page fetches only on load, after a move and for recovery. To see changes made elsewhere, reload. A second tab playing the same game gets a 409 or a recovery GET on its next move, which jumps to the current state with a notice.
+- **Strict Mode.** In development React runs effects twice. The kept 201 update is cached in a ref and the load is deduplicated per attempt, so a new game still plays its events and a load still sends one GET. A new `GamePage` instance per route id (`key={id}`) is what makes navigating between games reload.
+- **`Reintentar` has two jobs.** After a failed load it repeats the load; after a failed recovery GET it repeats that GET; after exhausted move retries it resends the captured move.
+- **Only a 200 or 201 animates.** A game that loads at any point never replays its past; a `game-over` response need not fold to exactly the final view, so the page shows the adopted view when the queue empties.
+- **The display model has no turn marker or legal moves.** The page takes both from the adopted update once the queue is empty.
+- **Score sheet details.** The live row is the shown view's current hand, and its total cell is empty. Tied seats in the ranking keep the server's order.
+- **Hand order and dimming.** Cards keep the order of `yourHand`; during bidding they are plain, and when no legal move exists they are dimmed.
+- **Browsers.** Latest two versions of Chrome, Edge, Firefox and Safari (macOS and iOS); there are no polyfills.
+- **Not automated.** There is no real-browser test; layout at 375 px is checked by the static CSS test and by hand (§17.9).
+
+---
+
+## 18. Known limitations
 
 - **Configuration is validated on the first API request, not at server startup.** The service factory calls `getConfig()` lazily (§16.5), so a misconfigured deployment starts, and its first request answers 500 with a `ConfigError` error line in the logs. Building at module load would break `next build` instead.
 - **Blob credentials are checked by `createObjectStore`, not by `loadConfig`** (§13.3), so a `blob` configuration without them is reported when the store is first built, not at startup.
 - **The Vercel Blob driver has not run against a real store yet**; it is tested against a mocked SDK, and the behaviours it assumes are listed in §13.7.
 - **The layer rule does not check dynamic `import()` or `require()`.** Use static `import` statements.
-- **No UI yet:** the game core (`src/domain` §9, `src/engine` §10, `src/score` §11, `src/players` §12), the storage layer (`src/storage`, §13), the Game State Manager (`src/state`, §14), `GameService` (`src/service`, §15) and the HTTP API (`app/api`, §16) exist, but `/` is a placeholder page. A game can be played over HTTP (§16.10) or from code and tests, and all-AI games with `pnpm simulate`.
+- **The UI has no automated real-browser test.** Layout at phone width and play in Firefox and Safari are checked by hand (§17.9); the rest of the UI is tested in jsdom (§17.8).
 - **No move-latency measurement on Vercel Blob yet** ([`architecture.md`](./architecture.md) §11).
-- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12, **service limitations** in §15.11, **HTTP API limitations** in §16.12.
+- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12, **service limitations** in §15.11, **HTTP API limitations** in §16.12, **UI limitations** in §17.10.

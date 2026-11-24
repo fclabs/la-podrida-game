@@ -1,20 +1,17 @@
-# CONTEXT — UI (Phase 9)
+# CONTEXT — UI (Phase 9), final
 
-Last updated by: Iteration 7 (full-game test, security invariants, responsive pass). Branch `spec/09-ui`.
+Last updated by: Iteration 8 (documentation). Branch `spec/09-ui`. This describes the shipped system.
 
 ## Current state
 
-- Phases 0–8 are done and frozen (`specs/00`–`specs/08-*-frozen.md`). Phase 9 (UI) is in progress: Iterations 1–7 are done.
-- **Done**: jsdom component-test infrastructure beside the node tests; an in-process API (real Phase 8 handlers) for UI tests; pure modules `slot`, `ids`, `cards`, `copy`, `kept-update`; `app/globals.css`; the static layer-boundary test; the Phase 8 freeze (frozen capsule added, working files removed).
-- **Also done (Iterations 2–3)**: API client with FR-936 status mapping and shape checks; pure version guard / action capture / event display model; shared UI test fixtures.
-- **Also done (Iteration 4)**: `/` (new-game form, continue link) and `/game/[id]` (load paths, table). Nothing is playable: no bid buttons, clickable cards, animation, score sheet, game-over screen or move requests; the kept 201 update is shown at once.
-- **Also done (Iteration 5)**: bid buttons and clickable cards; one captured action per click, idempotent retries at 1/2/4 s then `Reintentar`, every FR-918 outcome, 4 s notices, `finished: true` on game over, slot ownership (FR-938). 200/201 adoption still jumps (no animation).
-- **Also done (Iteration 6)**: the event queue (201 from the empty table, 200 from the shown view), `Saltar`, seat highlight, hand-completed banner, `Planilla` score sheet (running totals, live statuses), game-over screen. 409/load/recovery stay instant.
-- **Also done (Iteration 7)**: `tests/ui/full-game.test.tsx` (VC-945-VC-949, one recorded 2-AI game), `tests/ui/tap-targets.test.ts` (NFR-901/902 static CSS), a small score-sheet CSS fix, P-6 resolved (`allowedDevOrigins` from `DEV_ALLOWED_ORIGINS`, D-028), `MANUAL-CHECKS.md` (VC-950-VC-954 PENDING the human).
-- **Not done**: docs (8); the five manual checks (human).
+- Phases 0–9 are built. The browser UI is complete: `/` (new game, continue link) and `/game/[id]` (table, bidding, playing, event animation, `Saltar`, score sheet, game over, resume, idempotent retries). All eight iterations are done.
+- Shipped docs: `docs/development.md` §17 "UI" (overview, module map, slot, calls, versions and moves, display model, table and copy, styling, UI tests, manual play-through with LAN access, gotchas); "Known limitations" is now §18; `docs/implementation.md` §5 decision 1 reads as decided (default preset only, `rulesPreset: defaultPresetId`). The docs do not mention the spec, the plan or this directory.
+- **Pending the human**: the five manual checks (VC-950 to VC-954) in `MANUAL-CHECKS.md`. They are written, not run, not claimed passed. `verify-spec` cannot return PASSED until each is recorded PASS, FAIL or WAIVED.
+- Layout at 375 px is verified only by `tests/ui/tap-targets.test.ts` (static CSS) and by reasoning until the human runs the manual checks.
 - Toolchain: Next 16.4.6, React 19.3.1, TypeScript 6.0.3 strict, Vitest 5.1.1 (Vite 8.3.8), pnpm 10.15.1. Local Node is 26 (the "Unsupported engine" WARN is expected and not fatal).
-- Test totals after Iteration 7: `pnpm test` = 99 files passed + 1 skipped, 1707 tests passed + 30 skipped.
-- `dependencies` are unchanged from `main`. New devDependencies (exact): `jsdom` 31.0.1, `@testing-library/react` 16.3.3, `@testing-library/dom` 10.4.2, `@testing-library/user-event` 14.6.13. `@vitejs/plugin-react` is NOT installed (not needed, see D-001).
+- Test totals at Iteration 8: `pnpm test` = 99 files passed + 1 skipped, 1707 tests passed + 30 skipped (`ui` project: 21 files, 239 tests).
+- `dependencies` are unchanged from `main`. New devDependencies (exact): `jsdom` 31.0.1, `@testing-library/react` 16.3.3, `@testing-library/dom` 10.4.2, `@testing-library/user-event` 14.6.13. `@vitejs/plugin-react` is not installed (not needed, D-001).
+- Source changes outside `app/_client` and `tests/ui`: `app/page.tsx`, `app/game/[id]/page.tsx`, `app/layout.tsx`, `app/globals.css`, `vitest.config.ts`, `tsconfig.json`, `next.config.ts` (`allowedDevOrigins`), `package.json`, `pnpm-lock.yaml`, the Phase 8 freeze housekeeping, and the docs.
 
 ## File map
 
@@ -59,7 +56,7 @@ Last updated by: Iteration 7 (full-game test, security invariants, responsive pa
 | `tests/ui/full-game.test.tsx` | VC-945-VC-949: records one game (create via `NewGamePage`, play on `GamePage`, `Saltar` each time), asserts per VC (D-029). |
 | `tests/ui/tap-targets.test.ts` | Static CSS check: 44px tap targets, wrapping, score-sheet scroll, single breakpoint (D-030). |
 | `next.config.ts` | `agentRules: false`; `allowedDevOrigins` from `DEV_ALLOWED_ORIGINS` (dev only, D-028). |
-| `specs/09-ui-plan-artifacts/MANUAL-CHECKS.md` | Steps and result table for VC-950-VC-954; all PENDING the human. |
+| `specs/09-ui-plan-artifacts/MANUAL-CHECKS.md` | Steps and result table for the five manual checks; all PENDING the human. |
 | `specs/08-http-api-frozen.md` | Phase 8 capsule (added). 08 working files are deleted (readable from git at `7eb81ae`). |
 
 ## Public interfaces
@@ -181,13 +178,15 @@ makeUpdate(o?): PlayerUpdate;  makeScoreboard(o?, seats?): ScoreBoard;  card(ran
 
 ## Commands
 
-- `pnpm test` — both projects. `pnpm vitest run --project ui` — only jsdom UI tests. `pnpm vitest run --project node` — only the old tests. One file: `pnpm vitest run --project ui tests/ui/slot.test.ts`.
-- `pnpm typecheck`, `pnpm lint`, `pnpm build`, `pnpm test:sim` (unchanged; `vitest.sim.config.ts` untouched).
+- `pnpm test` runs both projects. `pnpm vitest run --project ui` only the jsdom UI tests (~5 s). `pnpm vitest run --project node` only the old tests. One file: `pnpm vitest run --project ui tests/ui/slot.test.ts`.
+- `pnpm typecheck`, `pnpm lint` (eslint plus prettier over the whole repo, docs included), `pnpm build`, `pnpm test:sim` (unchanged; `vitest.sim.config.ts` untouched).
+- `FILE_STORE_DIR=/tmp/podrida pnpm dev` for manual play; add `DEV_ALLOWED_ORIGINS=<LAN IP>` and `--hostname 0.0.0.0` for a phone.
 
 ## Known gaps
 
-- The display model has no turn marker or legal moves (page takes them from the adopted update when the queue is empty, FR-937); `game-over` responses are not foldable to the final view by design.
-- `ScoreSheet` live row uses the shown view's `handIndex`; its `Total` column on a live row is empty; a `game-over` view's `live` is whatever the server sends.
-- Copy decided in Iteration 4 (D-019): table labels. No bid prompt copy exists (D-023). Score-sheet headings and game-over title: D-025.
-- `RecordedCall.status` is an addition to the plan's `{ method, path, headers, body }` (used by VC-945 "every request was 200/201").
-- Manual checks VC-950-VC-954 are written but not run (`MANUAL-CHECKS.md`). Layout at 375 px is verified only by the static CSS test and reasoning until then.
+- The display model has no turn marker or legal moves (the page takes them from the adopted update when the queue is empty); `game-over` responses are not foldable to the final view by design.
+- `ScoreSheet` live row uses the shown view's `handIndex`; its `Total` cell on a live row is empty; ties keep the server's order.
+- Minimal copy was chosen where the spec gave none (D-019, D-025); no bid prompt exists (D-023).
+- `RecordedCall.status` is an addition to the plan's `{ method, path, headers, body }`.
+- Stale statements left in `README.md` (outside this iteration's binding scope): it says the browser UI is "built in a later phase", that opening `/` shows "a page titled La Podrida" only, and that `pnpm test` runs only `tests/unit`, `tests/contract` and `tests/api`. A follow-up should update them.
+- No real-browser automated test (out of scope); no polling; one remembered game.
