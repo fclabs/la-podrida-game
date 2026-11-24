@@ -83,3 +83,39 @@
 **Decision**: `tests/ui/support/fixtures.ts` exports `card`, `makeScoreboard`, `makeView` (4 seats, human seat 0, hand `[3,2,1]`, version 5), `makeUpdate` (version follows the view). Tests needing server consistency use `makeInProcessApi` instead.
 **Rejected**: deep-partial overrides (shallow `Partial<PlayerView>` is enough).
 **Consequences**: a test that overrides `seats` must supply all four seats.
+
+## D-015: ClientDeps context with a router fallback (plan P-3 as applied)  (Iteration 4)
+**Context**: Components need `fetch`, storage, ids, timers and `navigate` injected, but `useRouter` throws without the app router (jsdom tests).
+**Decision**: `deps.tsx` exports `ClientDeps` (extends `ApiDeps` with `storage()`, `newId`, `navigate`), `ClientDepsProvider` (the context provider, the test seam), `WithClientDeps` and `useClientDeps`. `WithClientDeps` uses the injected value when present, else wraps children in `RouterDeps`, the only place that calls `useRouter` and builds browser deps from wrapper functions (`(...a) => globalThis.fetch(...a)`, `window.setTimeout`, `window.localStorage` in try/catch). `NewGamePage` and `GamePage` are `WithClientDeps` around an inner component. `ClientDeps` is passed straight to the API functions.
+**Rejected**: mocking `next/navigation`; calling `useRouter` unconditionally.
+**Consequences**: tests wrap in `ClientDepsProvider` (via `renderWithDeps`) and never touch the router. `app/game/[id]/page.tsx` renders `<GamePage key={id} id={id}/>` so a route change remounts.
+
+## D-016: GamePage reducer state (plan P-5 as applied)  (Iteration 4)
+**Context**: P-5 fixes the state shape; only loading exists so far.
+**Decision**: `gameReducer` in `game-page.tsx` (exported with `initialGameState`, types `GameState`, `GameAction`, `LoadStatus`). State: `load` (`init|loading|ready|no-access|invalid|gone|unsupported|failed`), `adopted`, `shownBefore`, `queue`, `display`, `request`, `notice`. Actions: `load-start`, `load-failed`, `denied{status}`, `no-access`, `adopt{update, source}`. `adopt` applies `shouldAdopt` and, for now, always takes the non-animated path (`shownBefore = adopted.view`, queue empty, `display` null); the kept 201 update uses source `'load'` here. `request`, `notice`, `queue`, `display` exist but are not driven yet. The table renders `state.display ?? viewToDisplay(adopted.view)` and passes `toAct` only when the queue is empty.
+**Rejected**: building the animated adoption now (not in scope, would be untested code).
+**Consequences**: Iteration 5 adds move actions; Iteration 6 makes `adopt` animated for `create`/`move` via `isAnimated`.
+
+## D-017: The in-memory slot lives in `memory-slot.ts`  (Iteration 4)
+**Context**: FR-931 needs a tab-session copy of the slot when `localStorage` cannot be written.
+**Decision**: New module `app/_client/memory-slot.ts` with `getMemorySlot()` / `setMemorySlot(slot | null)` (a module variable). `NewGamePage` sets it only when `writeSlot` fails (and clears it when the write succeeds). `GamePage.resolveSlot` prefers the stored slot when its `gameId` equals the route id, else the memory slot when it matches. `clearOwnSlot` (FR-907/FR-938) re-reads the stored slot and clears it only when it matches the route id, and nulls the memory slot when it matches. The continue link on `/` reads storage only.
+**Rejected**: putting it in `slot.ts` (kept pure/storage-only); showing the continue link from memory (FR-904 speaks of "a valid slot", FR-931 limits memory to the game page).
+**Consequences**: tests reset it with `resetClientState()` (`tests/ui/support/render.tsx`).
+
+## D-018: Load is deduplicated per attempt  (Iteration 4)
+**Context**: P-4 fixes the kept update under Strict Mode; the GET path would otherwise run twice in dev.
+**Decision**: `Game` keeps `keptRef` (`{ id, update }`, taken once per instance and id) and `startedRef` (`"<id>:<attempt>"`); an effect run for an already started key returns. `Reintentar` increments `attempt` and so repeats the GET. A late response after unmount is not guarded (React 19 ignores it).
+**Rejected**: cancel flags in effect cleanup (Strict Mode would cancel the first GET and fire a second).
+**Consequences**: one GET under Strict Mode; kept path makes zero GETs.
+
+## D-019: Unspecified table copy chosen in this iteration  (Iteration 4)
+**Context**: The spec gives no text for several table labels; the plan says to pick minimal Spanish labels when the spec is silent.
+**Decision**: Added to `COPY`: `title` "La Podrida", `loading` "Cargando…", `dealerMarker` "Repartidor", `turnMarker` "Turno", `seatCards` "Cartas", `seatBid` "Pedido", `seatTricks` "Bazas", `trumpLabel` "Triunfo", `currentTrickLabel` "Baza actual", `lastTrickLabel` "Última baza", `lastTrickWinner(name)` "Ganó <name>", `yourHandLabel` "Tu mano", `seatFallback(seat)` "Asiento <n>". None contradicts a spec string.
+**Rejected**: English labels; omitting the markers.
+**Consequences**: Iterations 5-6 still need copy for bid prompts, score sheet headings and the game-over screen (record there). Not covered by the verbatim `copy.test.ts`.
+
+## D-020: Fake-timer tests use `fireEvent`, not `userEvent`  (Iteration 4)
+**Context**: Plan P-5 suggests `userEvent.setup({ advanceTimers: vi.advanceTimersByTime })`. With Vitest fake timers a `user.type`/`user.click` hung until the 5 s test timeout, even with `delay: null` (RTL's `asyncWrapper` awaits a real `setTimeout(0)` and only auto-advances for Jest's fake timers).
+**Decision**: Tests that run under `vi.useFakeTimers()` set values and click with `fireEvent` inside `act`, advancing time with `await act(async () => { await vi.advanceTimersByTimeAsync(ms) })`. Tests without fake timers keep `userEvent`.
+**Rejected**: `shouldAdvanceTime`/real timers (cannot assert exact 20 s).
+**Consequences**: Iterations 5-6 do the same for 1/2/4 s retries and the 600/1200 ms animation steps; do not call `userEvent` while fake timers are on.

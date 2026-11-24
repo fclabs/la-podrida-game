@@ -18,6 +18,21 @@ export const COPY = {
   loadFailed: 'No se pudo cargar la partida.',
   retry: 'Reintentar',
 
+  // Copy the spec gives no text for (Iteration 4, D-017): minimal Spanish labels.
+  title: 'La Podrida',
+  loading: 'Cargando…',
+  dealerMarker: 'Repartidor',
+  turnMarker: 'Turno',
+  seatCards: 'Cartas',
+  seatBid: 'Pedido',
+  seatTricks: 'Bazas',
+  trumpLabel: 'Triunfo',
+  currentTrickLabel: 'Baza actual',
+  lastTrickLabel: 'Última baza',
+  lastTrickWinner: (name: string): string => `Ganó ${name}`,
+  yourHandLabel: 'Tu mano',
+  seatFallback: (seat: number): string => `Asiento ${seat + 1}`,
+
   // Moves (FR-917, FR-918)
   moveFailed: 'No se pudo enviar la jugada.',
   moveConflict: 'La partida avanzó; se actualizó la mesa.',

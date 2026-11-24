@@ -1,7 +1,5 @@
+import { NewGamePage } from './_client/new-game-page';
+
 export default function HomePage() {
-  return (
-    <main>
-      <h1>La Podrida</h1>
-    </main>
-  );
+  return <NewGamePage />;
 }

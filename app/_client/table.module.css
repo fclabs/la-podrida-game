@@ -1,0 +1,80 @@
+.table {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.handLine {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.seats,
+.plays,
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.seat {
+  display: flex;
+  flex-direction: column;
+  min-width: 96px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 0.9rem;
+}
+
+.highlight {
+  background: var(--highlight);
+}
+
+.name {
+  font-weight: 700;
+}
+
+.marker {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 0.75rem;
+}
+
+.trump {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.trick h3,
+.hand h3 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.trick p {
+  margin: 0 0 4px;
+}
+
+.play {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: 0.8rem;
+}
+
+@media (min-width: 768px) {
+  .seat {
+    min-width: 128px;
+  }
+}
