@@ -89,3 +89,21 @@
 - **Decision**: `getGameHandler(req, ctx, deps)` / `submitMoveHandler(req, ctx, deps)` with `ctx: GameRouteContext = { params: Promise<{ id: string }> }`, each inside `withRequestLog`: `await ctx.params` → `assertGameIdFormat` → `meta.gameId` → `parseBearer` → `parseSince` / `readJsonBody`+`parseBody(SubmitMoveBodySchema)` → `meta.fromVersion` → `deps.getService()` call → `{ status: 200, body: update, update }`. Route files type `ctx` inline (`{ params: Promise<{ id: string }> }`), two imports + one export. `api-fixtures.ts` gains `bearer(token)`, `GameIds` and `playToEndVia(api, ids)`.
 - **Rejected**: importing `GameRouteContext` into the route files (keeps them at exactly two imports, the P-8 shape).
 - **Consequences**: `deps.getService()` is not called at all when a pre-check fails (check-order tests count it). Iteration 4 drives full games with `playToEndVia`.
+
+## D-016: The no-leak oracle as applied (P-12)  (Iteration 4)
+- **Context**: P-12 defines `assertNoLeak`; VC-831 checks ~1,200 bodies over two ~200-move games, and each body needs every commit's events `0…tip`.
+- **Decision**: `tests/api/support/leak-oracle.ts` applies P-12 as written, plus: it returns `LeakCheckResult { kind, stockTrump, fullDeal }` so the test can count cases; it asserts `update.version === tip` (the comparison is only valid against the state behind the body), `view.you === seat`, the stock size (`deck − N × cardsPerPlayer`) and that the trump is in the stock iff not `trumpCardInDealerHand`; every body is also checked for the seed and each seat-token hash as substrings (BR-801). Commit events are loaded with `GameStateManager.load` once per (store, game, version) and cached in a `WeakMap` — commits are create-only and immutable.
+- **Rejected**: re-loading all commits per body (O(n²) schema parses, seconds per game); reading only the tip's events (misses card plays from earlier commits of the current hand).
+- **Consequences**: call it right after the response it checks. A `P-12` describe feeds it 14 mutated bodies (one per leak kind) that must throw.
+
+## D-017: No-leak game timeout  (Iteration 4)
+- **Context**: each VC-831 game takes ≈ 3.5–4.8 s; Vitest's default timeout is 5 s, and one full-suite run timed out. Profiling: without the `?since=0` GETs a game takes ≈ 0.6 s — the service re-reads every commit per `since=0` call (O(n²) over the game). The plan requires that GET after every move.
+- **Decision**: the two VC-831 cases get an explicit 60 s timeout (`GAME_TIMEOUT_MS`). `tests/api` Duration stays ≈ 8.2 s (< 20 s, NFR-802).
+- **Rejected**: GET `?since=0` only every k moves (weaker than the plan); splitting presets into two files (outside Touches); changing the service (Scope Out).
+- **Consequences**: on a slow CI runner the suite has ~2.4× headroom under NFR-802.
+
+## D-018: Structure scan is stricter than "status position" (VC-832)  (Iteration 4)
+- **Context**: VC-832 forbids numeric statuses ≥ 400 in `handlers.ts` and the four `route.ts`; D-014 already keeps those files free of any 4xx/5xx number, comments included.
+- **Decision**: `structure.test.ts` fails on any `\b[45]\d\d\b` token, on `status:`/`status =` 4xx/5xx literals and on `jsonResponse(`/`Response(` 4xx/5xx calls; imports are found in static `import`/`export … from`, side-effect imports, `import()` and `require()`, resolved (`@/` alias or relative) against the repo root and rejected under `src/state|storage|engine`. Both scanners have positive controls. Mutation check: appending `export const _teapot = { status: 418 };` to `handlers.ts` fails the test; reverted.
+- **Rejected**: a status-position-only regex (a constant like `const S = 404` would slip through).
+- **Consequences**: no 4xx/5xx number may appear in those five files, even in comments.
