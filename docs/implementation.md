@@ -202,15 +202,16 @@ Runs as soon as Phase 5 is done, in parallel with later phases. It does not bloc
 ### Phase 7 — GameService
 
 **Tasks**
-1. `service/errors.ts`: `VersionConflict` (carrying the fresh update), `IllegalMove`, `NotYourTurn`, `Unauthorized`, `GameNotFound`.
+1. `service/errors.ts`: `VersionConflict` (carrying the fresh update), `IllegalMove`, `NotYourTurn`, `Unauthorized`, `GameNotFound`, `InvalidRequest` (the service re-checks its inputs and names the failing field) and `GameUnsupported` (a game stored by another `ENGINE_VERSION`; nothing is applied).
 2. `service/game-service.ts` (reusing `buildPlayerView` and `runAiLoop` from Phase 4):
    - `createGame`: validate the preset, `aiCount` (2–5), **and** that `aiCount + 1` is inside the preset's `players.min..max`; generate `gameId` (128-bit base32), seed (`crypto.randomBytes(32)`) and seat token (256-bit) with only its SHA-256 hash in meta; write `ENGINE_VERSION` to `meta.json`; build seats (human at seat 0, AIs `random`); run the AI loop; persist commit 0 with `version = 0`; return `{ gameId, seat, seatToken, update }`.
-   - `getUpdate(gameId, token, since?)`.
+   - `getUpdate(gameId, token, since?)`: the tip for the seat; `events` is `[]` without `since`, else the events of commits `since + 1 … tip`, read up to the already-loaded tip (never `eventsSince`), so they end exactly at the returned version.
    - `submitMove` exactly as design §9 steps 1–9:
      - Retry check against commit `req.version + 1` (matching `clientRequestId` and `actorSeat`) when the version is stale.
      - The service sets `version = req.version + 1` on the new state before committing.
-     - On `CommitConflictError`: read commit `req.version + 1` with a consistent read. If it is this request, return its result projected for this seat. Otherwise probe forward from it to the tip and throw `VersionConflict` with an update built from that tip (architecture §6.3.4), so the 409 body is never stale.
+     - On `CommitConflictError`: read commit `req.version + 1` with a consistent read. If it is this request, return its result projected for this seat. Otherwise reload the tip (`loadLatest` probes forward past a stale `head.json`, so it is at least `req.version + 1`) and throw `VersionConflict` with an update built from that tip (architecture §6.3.4), so the 409 body is never stale.
    - Constant-time token comparison.
+3. `service/replay.ts`: `replayGame(meta, commits)`, which rebuilds every stored state from the seed and the move events with `applyMove` only.
 
 **Done when** service tests (memory store) cover:
 - a full game played through `submitMove` to `game-over`, with `final.json` written and `finalRanking` present only at game over;

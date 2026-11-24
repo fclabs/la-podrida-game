@@ -37,7 +37,7 @@ src/
   players/              Player / AI strategies                        ┘
   state/                Game State Manager: load/save game state      ┐ I/O
   storage/              ObjectStore drivers (memory, file, Vercel Blob)┘
-  service/              GameService: orchestrates core + state
+  service/              GameService: orchestrates core + state; view, AI loop, replay
   config.ts             Validated environment configuration
 tests/
   unit/                 Pure logic, lint-rule fixtures, config
@@ -49,7 +49,7 @@ tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
 
-`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12), `src/storage` (§13) and `src/state` (§14) are built, and `src/service` holds the two pure helpers `buildPlayerView` and `runAiLoop` (§12) but not `GameService` yet. The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
+`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12), `src/storage` (§13), `src/state` (§14) and `src/service` (`GameService`, `replayGame` and the two pure helpers `buildPlayerView` and `runAiLoop`, §12 and §15) are built. The HTTP route handlers in `app/api/` are not. The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
 
 **Import alias.** `@/` maps to the **project root**, so imports read `@/src/engine/...` or `@/app/...`. It works in TypeScript, Next.js, Vitest and `tsx`.
 
@@ -473,7 +473,7 @@ Shared helpers live in `tests/unit/engine/helpers.ts` (not a `*.test.ts`, so not
 - **`rngFromSource` reads each draw as `next() >>> 0`**, the identity for valid uint32 values, so a stub that returns `-1` is read as `2^32 − 1` instead of producing out-of-range results. Stubs should still return uint32 values.
 - **`rng.int(0, 2 ** 32 − 1)` returns raw generator outputs** (nothing is rejected at that range); use it to compare streams in tests. `int` accepts any integer bounds, including unsafe integers beyond 2^53 where results are imprecise; the engine only uses small ranges.
 - **`checkInvariants` does not bound `cardsPerPlayer` by the deck.** A state with an oversized `cardsPerPlayer` that still passes `(c)` and `(h)` reports nothing (and `(f)` is skipped for it). It also does not check the `trumpCard` itself in `(a)`/`(b)`; when the trump is in the dealer's hand it is checked as one of the dealer's cards.
-- **Not in the engine:** scoring and `live` hand status (Score Engine, §11); `PlayerView`, players, strategies, the AI loop and the simulator (§12); seed generation and setting `version` (GameService, which the Game State Manager checks, §14.7; see [`implementation.md`](./implementation.md) for when it arrives). Bid changes, revokes, target-score endings, tie-break hands and special hands are out of scope by design ([`design.md`](./design.md) §1.2, §4.2).
+- **Not in the engine:** scoring and `live` hand status (Score Engine, §11); `PlayerView`, players, strategies, the AI loop and the simulator (§12); seed generation and setting `version` (`GameService`, §15; the Game State Manager checks it, §14.7). Bid changes, revokes, target-score endings, tie-break hands and special hands are out of scope by design ([`design.md`](./design.md) §1.2, §4.2).
 
 ---
 
@@ -621,7 +621,7 @@ Score-only builders live in `tests/unit/score/helpers.ts` (not collected): `make
 Three pieces sit on top of the engine and the score engine:
 
 - **`src/players`** decides moves: the `Player` and `AIStrategy` shapes, their factories, the first AI (`randomStrategy`) and the strategy registry.
-- **Two service helpers** turn a game state into what a seat sees and play the AI turns: `buildPlayerView` (`src/service/player-view.ts`) and `runAiLoop` (`src/service/ai-loop.ts`). They are what `GameService` will call; the simulator and the tests call them today.
+- **Two service helpers** turn a game state into what a seat sees and play the AI turns: `buildPlayerView` (`src/service/player-view.ts`) and `runAiLoop` (`src/service/ai-loop.ts`). `GameService` (§15) calls them, and so do the simulator and the tests.
 - **Simulation** proves that the whole core holds together over thousands of games: the `pnpm simulate` command-line simulator (`scripts/simulate.ts`) and the `pnpm test:sim` suite (`tests/sim/`).
 
 The model and the loop's contract are in [`design.md`](./design.md) §8; this section is about using, extending and testing the code.
@@ -878,7 +878,7 @@ Test helpers: a stub view needs `{ … } as unknown as PlayerView`; wrap a stub 
 - **The simulator has no `--help` and no `--strategy`**, so every seat plays `random`. Its failing-game path (`game <seed> failed`) has no automated test.
 - **Memory.** A simulated game keeps every intermediate state for replay (about a thousand for `argentina-fidepo` with 3 players). Fine at today's sizes; stream the comparison if games grow much longer.
 - **In `tests/sim/ledger.ts`, failure helpers are function declarations returning `never`**, so TypeScript narrows after them; an arrow function assigned to a `const` does not narrow. Inside callbacks, copy a narrowed `let` into a `const` first.
-- **Not here yet:** seed generation, seat tokens, `PlayerUpdate` assembly and versions are `GameService`'s job (a later phase), and persistence is the Game State Manager's (§14); only the `random` strategy exists.
+- **Not here:** seed generation, seat tokens, `PlayerUpdate` assembly and versions are `GameService`'s job (§15), and persistence is the Game State Manager's (§14). Only the `random` strategy exists.
 
 ---
 
@@ -1416,15 +1416,389 @@ Tests on the file store create their folder with `fs.mkdtemp(path.join(os.tmpdir
 - **`InvalidCommitError` covers every rejected document**, including `meta` in `create` and the board in `writeFinalScores`; read `reason` to tell them apart.
 - **No migrations.** A document with any `schemaVersion` other than 1 is reported as corrupt ([`architecture.md`](./architecture.md) §6.4).
 - **Exclusivity on Blob is still assumed.** Exactly-one-winner races are proven on the memory and file stores; on Blob they rely on the storage contract and the preview checks ([`architecture.md`](./architecture.md) §11), like the rest of the Blob driver (§13.7).
-- **Not in the state layer:** generating ids, seeds and seat tokens, hashing and checking tokens, the `clientRequestId` retry check, mapping errors to `VersionConflict` and HTTP, the AI loop (all `GameService`), and deleting old games (the retention job).
+- **Not in the state layer:** generating ids, seeds and seat tokens, hashing and checking tokens, the `clientRequestId` retry check, mapping errors to `VersionConflict` and HTTP, the AI loop (all `GameService`, §15), and deleting old games (the retention job).
 
 ---
 
-## 15. Known limitations
+## 15. Service
 
-- **Configuration is not validated at server startup yet.** `getConfig()` has no caller; it is wired in by its first user, the GameService factory (Phase 8 in [`implementation.md`](./implementation.md)). Until then a misconfigured deployment would still start.
+`src/service` is the top of the backend: `GameService` turns what a player does (start a game, look at it, make a move) into calls to the engine (§10), the score engine (§11), the players and the AI loop (§12) and the Game State Manager (§14). It is the only module that combines them, and the only one that generates secrets: the game id, the seed and the seat token. Route handlers are its only production caller. The interface and the step-by-step behaviour are in [`design.md`](./design.md) §9, the request lifecycle and the 409 rules in [`architecture.md`](./architecture.md) §5 and §6.3; this section is about using and testing the code.
+
+Three rules shape it:
+
+- **One request, at most one commit.** `createGame` writes exactly one game (meta + commit 0) and `submitMove` at most one commit. The service never retries a write; a retried *request* that already committed gets its original result and writes nothing.
+- **Every move goes through the engine.** The human's move and every AI move are applied with `applyMove`. The service never edits a `GameState` except to set `version` on the state it commits.
+- **All I/O, time and randomness come in through the constructor.** `game-service.ts` reads storage only through the `GameStateManager` it is given, the clock only through `now` and random bytes only through `randomBytes`. `replay.ts` uses none of them. Two greps keep that true (they also match comments):
+
+```sh
+grep -nE "(^|[^.#[:alnum:]_])randomBytes\(|new Date\(|Math\.random" src/service/game-service.ts   # only the two deps defaults in the constructor
+grep -nE "storage|config|node:|Date|Math\.random|crypto" src/service/replay.ts                      # must find nothing
+```
+
+### 15.1 Module map
+
+Import from each module directly; there is no barrel `index.ts`.
+
+| Module | Exports | What it does |
+|---|---|---|
+| `@/src/service/game-service` | `GameService`; types `GameServiceDeps`, `CreateGameRequest`, `CreateGameResult`, `SubmitMoveRequest` | Create a game, get an update, submit a move (§15.3–§15.6). |
+| `@/src/service/errors` | `InvalidRequest`, `Unauthorized`, `GameNotFound`, `GameUnsupported`, `NotYourTurn`, `IllegalMove`, `VersionConflict` | The seven typed service errors (§15.7). |
+| `@/src/service/replay` | `replayGame(meta, commits)` | Rebuild a stored game from its seed and move events (§15.9). |
+| `@/src/service/player-view` | `buildPlayerView(state, seat)` | The only builder of a `PlayerView` (§12). |
+| `@/src/service/ai-loop` | `runAiLoop`, `AiLoopLimitError` | Lets the AIs play until a human must act (§12.2). |
+
+The layer rule (§3) lets `src/service` import every layer and `src/config.ts`, but the service does not read the configuration itself: the caller passes what it needs (§15.2). Nothing under `src/` imports `src/service`.
+
+### 15.2 Constructing the service
+
+```ts
+interface GameServiceDeps {
+  state: GameStateManager;                  // required: all storage goes through it
+  defaultPresetId?: PresetId;               // preset for a createGame without rulesPreset; default 'argentina-fidepo'
+  now?: () => Date;                         // clock for createdAt and commit `at`; default () => new Date()
+  randomBytes?: (n: number) => Uint8Array;  // source of the id, seed and token bytes; default node:crypto
+}
+```
+
+The constructor only stores its arguments: it does no I/O and reads no configuration, so building one per request is cheap. In the app, the store and the default preset come from the validated configuration (§5, §13.3):
+
+```ts
+import { loadConfig } from '@/src/config';
+import { GameService } from '@/src/service/game-service';
+import { GameStateManager } from '@/src/state/game-state-manager';
+import { createObjectStore } from '@/src/storage';
+
+const config = loadConfig({ STORAGE_DRIVER: 'memory' }); // in the app: getConfig()
+const appService = new GameService({
+  state: new GameStateManager(createObjectStore(config)),
+  defaultPresetId: config.defaultRulesPreset,
+});
+```
+
+In tests, inject a fixed clock, and scripted bytes whenever an id, seed or token must be known in advance. `randomBytes` is called exactly three times per `createGame`, in this order: 16 bytes (game id), 32 (seed), 32 (seat token).
+
+```ts
+import { GameService } from '@/src/service/game-service';
+import { GameStateManager } from '@/src/state/game-state-manager';
+import { MemoryObjectStore } from '@/src/storage/memory-store';
+
+const state = new GameStateManager(new MemoryObjectStore());
+const service = new GameService({
+  state,
+  now: () => new Date('2026-11-23T14:05:00.000Z'), // every createdAt and `at` is this instant
+});
+
+const fixed = new GameService({
+  state: new GameStateManager(new MemoryObjectStore()),
+  randomBytes: (n) => new Uint8Array(n), // all zero bytes
+});
+const zero = await fixed.createGame({ humanName: 'Ana', aiCount: 2 });
+// zero.gameId === 'aaaaaaaaaaaaaaaaaaaaaaaaaa'; the seed is 64 '0's; the token is 43 'A's
+```
+
+### 15.3 Creating a game
+
+```ts
+createGame(req: { rulesPreset?: string; humanName: string; aiCount: number }): Promise<CreateGameResult>
+// CreateGameResult = { gameId: string; seat: number; seatToken: string; update: PlayerUpdate }
+```
+
+**Inputs.** Checked before any I/O, in this order; the first failure rejects with `InvalidRequest` whose `reason` names the field:
+
+| Check | `reason` |
+|---|---|
+| `humanName` is a string of 1–40 characters after `trim()` (UTF-16 code units). The trimmed value becomes the seat's name. | `humanName` |
+| `aiCount` is an integer from 2 to 5 (`'3'`, `2.5` and `NaN` fail). | `aiCount` |
+| `rulesPreset`, when present, is a string naming a known preset. When absent, `defaultPresetId` is used. | `rulesPreset` |
+| `aiCount + 1` is within the preset's `players.min … max`. | `aiCount` |
+
+With today's presets every `aiCount` from 2 to 5 is valid for every preset; the last check protects future presets.
+
+**Seats.** Seat 0 is `{ playerId: 'human-0', name: <trimmed humanName>, kind: 'human' }`, then seat `i` (1 … `aiCount`) is `{ playerId: 'ai-<i>', name: 'AI <i>', kind: 'ai', strategy: 'random' }`. There is always exactly one human, at seat 0.
+
+**Ids and secrets.** From `randomBytes`, in order:
+
+| Value | Bytes | Encoding | Example shape |
+|---|---|---|---|
+| `gameId` | 16 | lowercase base32, no padding (26 characters, `^[a-z2-7]{26}$`) | `aaaqeayeaudaocajbifqydiob4` (bytes `0x00…0x0f`) |
+| `seed` | 32 | lowercase hex (64 characters) | stored in the state, never returned |
+| `seatToken` | 32 | base64url, no padding (43 characters) | returned once |
+
+The service stores only the token's SHA-256 (64 lowercase hex characters) in `meta.seatTokenHashes[0]`; AI seats get `null`. The token itself is in `createGame`'s result and nowhere else: not in storage, not in any later response, not in any error. The caller must hand it to the player once (the API returns it in the create response and the browser keeps it) and must never log it. It never accepts a seed, id or token from the caller.
+
+**What is written.** Engine `createGame`, then `runAiLoop`, because the first bidders may be AIs. Commit 0 holds the engine's creation events followed by the AIs' moves, the state where the human must act (or the game is over), and its scoreboard. The meta records the preset id, `engineVersion: ENGINE_VERSION`, the seats and the token hashes; `createdAt` and commit 0's `at` are the same `now()` instant. Both go out in one `state.create` (4 store writes, no reads). The returned `update` is commit 0 for seat 0, with commit 0's events.
+
+Every error from the engine, the AI loop or `state.create` propagates unchanged and nothing else is written. `GameExistsError` would mean two games drew the same 128-bit id, i.e. a bug in the byte source.
+
+### 15.4 Authentication
+
+`getUpdate` and `submitMove` start the same way:
+
+1. **Before any I/O**, first failure wins: a `gameId` that is not 26 lowercase base32 characters → `GameNotFound` (an invalid id names no game); a `seatToken` that is not a non-empty string → `Unauthorized`; then the method's own arguments → `InvalidRequest`.
+2. **Load** `meta.json` and the tip commit **in parallel**. A state `GameNotFoundError` from either → `GameNotFound`. Other errors propagate.
+3. **Find the seat.** The token's SHA-256 digest is compared with `timingSafeEqual` against **every** non-null entry of `meta.seatTokenHashes`, with no early exit, so the time taken does not reveal which seat matched or whether any did. The matching index is the seat; no match → `Unauthorized`. A game with several human seats works the same way.
+4. **Engine version.** `meta.engineVersion !== ENGINE_VERSION` → `GameUnsupported { gameId, engineVersion }`. The check runs after authentication, so only a seat of that game learns it. Nothing is applied or written.
+
+`game-service.ts` imports `createHash`, `randomBytes` and `timingSafeEqual` by name from `node:crypto` (never `import * as` or a default import), so a test can replace one of them with a partial module mock (§15.10).
+
+### 15.5 Getting an update
+
+```ts
+getUpdate(gameId: string, seatToken: string, sinceVersion?: number): Promise<PlayerUpdate>
+```
+
+Resolves to the tip's `PlayerUpdate` for the authenticated seat. `sinceVersion` decides `events`:
+
+| `sinceVersion` | `events` |
+|---|---|
+| absent | `[]` (a reload: the client just renders the view) |
+| an integer from 0 to `MAX_COMMIT_VERSION` | the events of commits `sinceVersion + 1 … update.version`, in order; `[]` when `sinceVersion` ≥ the tip |
+| anything else (`-1`, `1.5`, `'0'`) | `InvalidRequest { reason: 'sinceVersion' }`, before any I/O |
+
+**Missed events end exactly at `update.version`.** The service reads commits `sinceVersion + 1 … tip − 1` with `state.load` (at most 8 at a time) and appends the tip's own events from the commit it already loaded. It never uses `state.eventsSince`, which finds the tip again and could include a commit that landed in the meantime, so events and view always describe the same version. A commit missing inside the range (deleted meanwhile) propagates as `CommitNotFoundError`.
+
+Store calls with `head.json` exact: 6 without `sinceVersion` (1 meta read + 5 for `loadLatest`, the first 4 in flight together), plus 2 for each commit strictly between `sinceVersion` and the tip.
+
+### 15.6 Submitting a move
+
+```ts
+submitMove(gameId: string, seatToken: string, req: { version: number; moveId: string; clientRequestId: string }): Promise<PlayerUpdate>
+```
+
+- `version` is the version the player saw: an integer from 0 to `MAX_COMMIT_VERSION − 1` (`reason: 'version'`).
+- `moveId` is one of that version's `legalMoves[].id`: a string of 1–32 characters (`reason: 'moveId'`).
+- `clientRequestId` identifies the attempt: a string of 1–128 characters (`reason: 'clientRequestId'`). The client makes a new one for every move and **reuses it when it resends the same move** (for example after a timeout).
+
+The flow, after validation and authentication (§15.4), with tip `t`:
+
+1. **`req.version` is not `t.version`: retry check.** If `req.version < t.version`, load commit `req.version + 1`. If its `clientRequestId` equals the request's **and** its `actorSeat` is this seat, this request already committed: resolve to that commit's update for this seat, with that commit's events, and write nothing. Later commits do not matter. Otherwise, or when `req.version` is ahead of the tip, reject with `VersionConflict`, whose `update` is the tip for this seat with the events since `req.version`.
+2. **Apply** the human's move with `applyMove`. Another seat to act → `NotYourTurn { seat }`. A finished game → `IllegalMove { reason: 'game-over' }`; a move id that is not legal now → `IllegalMove { reason: 'unknown-move' }`.
+3. **AI loop:** `runAiLoop(state, createPlayers(state.seats))`. Players, rules and hand plan come from the stored state, never from the preset registry. `AiLoopLimitError` and any error from inside the loop propagate, and nothing is written.
+4. **Commit** `req.version + 1` with `state.commit`: `actorSeat` = the seat, the request's `clientRequestId`, `events` = the human move's events then the AIs', `state.version` = the new version and `scoreboard = evaluate(state)`.
+5. **Lost race.** `CommitConflictError` means another request committed `req.version + 1` first. The service loads that commit: if it holds this same request from this seat (two copies raced), resolve to its update with its events. Otherwise, including when it cannot be found, reload the tip with `loadLatest` (a game gone by then → `GameNotFound`) and reject with `VersionConflict` carrying that tip and the events since `req.version`. The winner exists, so this tip is at least `req.version + 1` even while `head.json` still names `req.version`. Any other error from `commit` propagates.
+6. **Final scores.** When the committed state is `game-over`, await `state.writeFinalScores` (best-effort: it never rejects). A matched retry (step 1 or 5) does not write it again.
+7. **Resolve** to the committed update for this seat, with the commit's events. `view.finalRanking` is present only at game over.
+
+A whole session, continuing the example in §15.2:
+
+```ts
+import { VersionConflict } from '@/src/service/errors';
+
+const created = await service.createGame({ humanName: '  Ana ', aiCount: 3 });
+const { gameId, seatToken } = created; // keep seatToken secret; the player sends it back on every request
+// created.update: version 0, the seat-0 view (name 'Ana'), the legal moves, commit 0's events
+
+const req = {
+  version: created.update.version,
+  moveId: created.update.legalMoves[0].id,
+  clientRequestId: 'move-1',
+};
+const after = await service.submitMove(gameId, seatToken, req);
+// after.version === 1; after.events: the human's move, then every AI move up to the human's next turn
+
+const again = await service.submitMove(gameId, seatToken, req);
+// the same request resent (a lost response): deep-equals `after`, nothing written
+
+let latest = after;
+try {
+  await service.submitMove(gameId, seatToken, { ...req, clientRequestId: 'move-1b' });
+} catch (error) {
+  if (!(error instanceof VersionConflict)) throw error;
+  latest = error.update; // version 1 with the events since version 0: show them, then let the player choose again
+}
+
+const reload = await service.getUpdate(gameId, seatToken); // version 1, events []
+const catchUp = await service.getUpdate(gameId, seatToken, 0); // version 1, the events of commit 1
+```
+
+**Store calls** with `head.json` exact: a successful move is **8** (1 meta read and the 5 calls of `loadLatest`, the first 4 in flight together, then 1 commit `put` and 1 `head.json` `put`), plus 1 `put` for `final.json` on the move that ends the game. A stale-version `VersionConflict` is 8 + 2 for each commit strictly between `req.version` and the tip (6 to load, 2 for the retry-check read of commit `req.version + 1`, then the missed commits). Validation failures make no call at all.
+
+### 15.7 Errors
+
+Each service error extends `Error`, sets `name` to its class name and exposes only the fields below. The HTTP status is the mapping intended for the API (one mapping function in the route layer, [`architecture.md`](./architecture.md) §7 and §10):
+
+| Error (fields) | When | Intended HTTP | What the client does |
+|---|---|---|---|
+| `InvalidRequest` (`reason`: `humanName`, `aiCount`, `rulesPreset`, `sinceVersion`, `version`, `moveId` or `clientRequestId`) | An argument fails its check (§15.3–§15.6), before any I/O. | 400 `invalid_request` | Fix the request. With the API's own schema checks in front, this means a client bug. |
+| `Unauthorized` | The token is empty or matches no seat of the game. | 401 `unauthorized` | The stored token is wrong or lost: the game cannot be resumed from this browser; offer a new game. |
+| `GameNotFound` (`gameId`, the caller's input clipped to 64 characters) | Malformed id, or `meta.json` / commit 0 missing (never created, or deleted by retention). | 404 `game_not_found` | Forget the stored id and token; offer a new game. |
+| `GameUnsupported` (`gameId`, `engineVersion`) | The game was stored by another `ENGINE_VERSION` (after an engine upgrade). | not decided; proposed 410 | The game cannot continue; offer a new game. |
+| `NotYourTurn` (`seat`) | Valid seat, but another seat must act. | 403 `not_your_turn` | Fetch the current update and wait. |
+| `IllegalMove` (`moveId`, `reason`: `game-over` \| `unknown-move`) | The move is not legal in the current state. | 422 `illegal_move` | Fetch the current update and choose from its `legalMoves`. |
+| `VersionConflict` (`update`) | Stale or future `version`, or a lost race, and the committed move is not this request. | 409 `version_conflict`, with `update` in the body | Play `update.events`, show `update.view`, and let the player choose again at `update.version`. Do not resend the old request. |
+| anything else | Engine, state or storage errors; `AiLoopLimitError`; `GameExistsError`. | 500 `internal` | Retry later. Resending a move with the same `clientRequestId` is always safe. |
+
+Messages are fixed text plus at most those fields: `Invalid request: moveId`, `Unauthorized`, `Game not found: <id>`, `Game <id> was created with engine version <n>, which this server does not support`, `Not your turn (seat 0)`, `Illegal move "bid:99": unknown-move`, `Version conflict: the game is at version 7`.
+
+A sketch of the intended mapping (the API owns the real one):
+
+```ts
+import {
+  GameNotFound,
+  GameUnsupported,
+  IllegalMove,
+  InvalidRequest,
+  NotYourTurn,
+  Unauthorized,
+  VersionConflict,
+} from '@/src/service/errors';
+
+function toHttpStatus(error: unknown): { status: number; code: string } {
+  if (error instanceof InvalidRequest) return { status: 400, code: 'invalid_request' };
+  if (error instanceof Unauthorized) return { status: 401, code: 'unauthorized' };
+  if (error instanceof NotYourTurn) return { status: 403, code: 'not_your_turn' };
+  if (error instanceof GameNotFound) return { status: 404, code: 'game_not_found' };
+  if (error instanceof VersionConflict) return { status: 409, code: 'version_conflict' };
+  if (error instanceof GameUnsupported) return { status: 410, code: 'game_unsupported' };
+  if (error instanceof IllegalMove) return { status: 422, code: 'illegal_move' };
+  return { status: 500, code: 'internal' }; // log it; never serialize it
+}
+```
+
+### 15.8 Secrets: what must never be serialized
+
+The game's hidden information is the **seed**, the **seat token** and its stored **hash**, **other seats' hands** and the **stock**, and the AI decision counter **`aiDecisionCount`**. The service keeps them out of everything it returns:
+
+- Every `PlayerUpdate` comes from `buildPlayerView` and `legalMoves` for the requesting seat (§12), including the one inside `VersionConflict`. The only card of another seat that can appear is the dealer's publicly shown trump card ([`design.md`](./design.md) §4.5); events carry cards only in `card-played.card` and `hand-dealt.trumpCard`.
+- The seven service errors carry only the fields in §15.7. `GameNotFound` and `IllegalMove` echo the caller's own input, clipped to 64 and 32 characters.
+- The seat token appears only in `createGame`'s result.
+
+**Any other error is server-only.** `AiLoopLimitError.state` is the full `GameState` (every hand and the seed); engine, state and storage errors may name keys or internal values. The API must log them and answer `500 internal`, never put them, their message or their fields in a response. Request logs never include a seat token or a hand ([`architecture.md`](./architecture.md) §10).
+
+### 15.9 Replay
+
+```ts
+replayGame(meta: GameMeta, commits: readonly Commit[]): GameState[]
+```
+
+Rebuilds a stored game from its seed and move events, with no players and no AI loop, the way [`design.md`](./design.md) §7 describes. It is pure and synchronous.
+
+- **Guards, in order:** `commits` must be non-empty with `commits[i].version === i` (else `RangeError`, message starting `Invalid commits:`); then `meta.engineVersion` must equal `ENGINE_VERSION` (else `GameUnsupported`). No engine call happens before both pass.
+- **Replay:** engine `createGame` with `meta.gameId`, `meta.seats`, and the rules and seed stored in commit 0's state; its own events are skipped (commit 0 already holds them). Then, commit by commit, every `bid-made` event is applied as `bid:<tricks>` and every `card-played` as `play:<cardId>` by its seat. An `IllegalMoveError` (a tampered or corrupt log) propagates.
+- **Result:** one state per commit, with `version` set to that commit's version. For an untampered game each equals the stored `state`, `aiDecisionCount` included, and `evaluate` of each equals the stored `scoreboard`.
+
+Use it to debug a stored game or to check a log, continuing the session above:
+
+```ts
+import { replayGame } from '@/src/service/replay';
+
+const tip = await state.loadLatest(gameId);
+const commits = await Promise.all(
+  Array.from({ length: tip.version + 1 }, (_, v) => state.load(gameId, v)),
+);
+const states = replayGame(await state.loadMeta(gameId), commits);
+// states[v] deep-equals commits[v].state for every v
+```
+
+### 15.10 Service tests
+
+Unit tests live in `tests/unit/service/` and run with `pnpm test`. All of them use `MemoryObjectStore`, a fixed clock and, where an id must be known, scripted bytes; none touches a real store. The whole folder takes about a second locally.
+
+| File | Protects |
+|---|---|
+| `errors.test.ts` | Each error's `name`, fields and exact message; `GameNotFound` clips to 64 characters. |
+| `replay.test.ts` | Replay of chains built without the service equals every stored state and scoreboard; the guards and their order; a tampered `card-played` → `IllegalMoveError`. |
+| `create.test.ts` | Construction makes no call; default and configured preset; every invalid input with its `reason` and 0 calls; boundaries; 100 real games' id, seed, token formats and hash; the known base32 literal; meta and commit 0 contents; AI bids in commit 0; the returned update. |
+| `create-preset-mock.test.ts` | (mocks `getPreset`) the player-range check with a narrow preset; a game in progress keeps its stored rules and hand plan after the registry changes. |
+| `auth.test.ts` | Input-check order; unknown and half-deleted games; storage errors propagate; wrong and foreign tokens; `GameUnsupported`. |
+| `auth-crypto.test.ts` | (mocks `node:crypto`) `timingSafeEqual` is called once per human seat on both match and mismatch. |
+| `get-update.test.ts` | `sinceVersion` cases; events end at `update.version` even when a commit lands mid-request; call counts; 4 calls in flight in the first round. |
+| `submit.test.ts` | Input checks; `NotYourTurn`, `IllegalMove`; stale and future versions; retries after a lost response and after later commits; a matching id from another seat is a conflict; at most one commit `put` per call. |
+| `concurrency.test.ts` | Real races: different moves (one wins, one 409), the same request (both resolve equal), a failing `head.json` write, a phantom conflict, a generic `put` error. |
+| `full-game.test.ts` | A full game through `submitMove` to game over: versions, events, `finalRanking` only at the end, `final.json`, a failing `final.json` write, and replay of the stored game. |
+| `ai-loop-mock.test.ts` | (mocks `runAiLoop`) `AiLoopLimitError` on create and on a move writes nothing; an id collision → `GameExistsError`. |
+| `secrets.test.ts` | Over a full game, the rejections and the conflicts: no other seat's card, seed, token hash or `aiDecisionCount` in any update or service error; the token only in `createGame`'s result. |
+| `io-budget.test.ts` | Store-call counts for a move, the final move, a stale 409 and `createGame`; 4 calls in flight in the first round. |
+| `player-view.test.ts`, `ai-loop.test.ts` | The two helpers (§12.7). |
+
+**Test support** lives in `tests/unit/service/support/` (not collected as tests):
+
+- `service-fixtures.ts`: `FIXED_NOW`; `makeService(store?, overrides?)` → `{ service, state, store }`, by default over a `RecordingStore` around a fresh `MemoryObjectStore`, with `now = () => FIXED_NOW` and real randomness; `scriptedBytes(seq)` (the k-th call returns `seq[k]`, and throws on a length mismatch or when exhausted); `byteRange(start, n)`; `firstLegalMoveId(update)`; `playToEnd(service, created)` (the human always plays its first legal move; returns every response); `sha256Hex(text)`; `storeHandmadeGame(state, { gameId, seats, tokens, seed, runLoop? })` for games `createGame` cannot make: several human seats, or an AI to act at the tip (`runLoop: false`).
+- `gated-store.ts`: `GatedStore(inner)`, an `ObjectStore` that starts **closed** and holds every call until `release()`; `pending` counts held calls, `whenPending(n)` and `settle()` wait for calls to arrive. `barrierOnCommitPut(n)` instead opens the gate and holds only create-only commit `put`s until `n` are waiting, then lets them go together, so two racing requests both load the same tip before either commits.
+- `replay-fixtures.ts`: `buildStoredChain(opts)`, a stored human-plus-AI game built with the engine and the AI loop only, to test replay independently of the service.
+- From the state tests: `RecordingStore` and `StoreHooks` (`tests/unit/state/support/store-wrappers.ts`, §14.11) record calls and replace them with hooks. Import them; do not copy them.
+
+A race between two different moves, as in `concurrency.test.ts`:
+
+```ts
+import { expect } from 'vitest';
+import { MemoryObjectStore } from '@/src/storage/memory-store';
+import { RecordingStore } from '../state/support/store-wrappers';
+import { GatedStore } from './support/gated-store';
+import { firstLegalMoveId, makeService } from './support/service-fixtures';
+
+const memory = new MemoryObjectStore(); // build the game on the plain store: a closed GatedStore would hang
+const setup = makeService(memory).service;
+const game = await setup.createGame({ humanName: 'Ana', aiCount: 3 });
+let view = game.update;
+while (view.legalMoves.length < 2) {
+  // a race of different moves needs two legal moves
+  view = await setup.submitMove(game.gameId, game.seatToken, {
+    version: view.version,
+    moveId: firstLegalMoveId(view),
+    clientRequestId: `setup-${view.version + 1}`,
+  });
+}
+
+const gated = new GatedStore(new RecordingStore(memory));
+gated.barrierOnCommitPut(2);
+const racer = makeService(gated).service;
+const outcomes = await Promise.allSettled(
+  [0, 1].map((i) =>
+    racer.submitMove(game.gameId, game.seatToken, {
+      version: view.version,
+      moveId: view.legalMoves[i].id,
+      clientRequestId: `race-${i}`,
+    }),
+  ),
+);
+expect(outcomes.map((o) => o.status).sort()).toEqual(['fulfilled', 'rejected']); // the loser got VersionConflict
+```
+
+**Replacing a module function.** Use a partial module mock that delegates to the original, never `vi.spyOn` on an ES module namespace (it cannot redefine the export). `vi.mock` is hoisted to the top of its file and applies to the whole file, so give each mocked module **its own test file**, as `create-preset-mock.test.ts`, `auth-crypto.test.ts` and `ai-loop-mock.test.ts` do:
+
+```ts
+import { afterEach, vi } from 'vitest';
+import * as aiLoop from '@/src/service/ai-loop';
+import { AiLoopLimitError } from '@/src/service/ai-loop';
+
+vi.mock('@/src/service/ai-loop', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/src/service/ai-loop')>();
+  return { ...actual, runAiLoop: vi.fn(actual.runAiLoop) };
+});
+const runAiLoopMock = vi.mocked(aiLoop.runAiLoop);
+afterEach(() => runAiLoopMock.mockClear());
+
+// Only the next call fails; later calls run the real loop.
+runAiLoopMock.mockImplementationOnce((loopState) => {
+  throw new AiLoopLimitError(1000, loopState);
+});
+```
+
+The mock works because `game-service.ts` imports `runAiLoop` from `./ai-loop`, which resolves to the same module as `@/src/service/ai-loop`. Setup calls count too: `mockClear()` after building the game when a test counts calls.
+
+### 15.11 Gotchas and limitations
+
+- **One human per game from `createGame`, and only the `random` AI.** Authentication and the retry check already handle several human seats (tests build such games with `storeHandmadeGame`), so multi-user games ([`architecture.md`](./architecture.md) §12) need no change here.
+- **The API validates first.** The service's input checks (§15.3–§15.6) are a second line of defence: the API still checks request shapes with its own schemas, reads the token from the `Authorization` header, and rejects any `seed` field.
+- **A configured default preset that does not exist is a server error**, not `InvalidRequest`: `getPreset`'s `UnknownPresetError` propagates, because the caller did not choose it. (The configuration schema only allows known presets, §5.) A `rulesPreset` that is present but not a string is `InvalidRequest` without a registry lookup.
+- **Name and id lengths count UTF-16 code units**, so an emoji counts as two characters toward the 40-character `humanName` limit.
+- **External deletes in the middle of a request.** Only retention deletes, and only year-old games. If it happens anyway, the retry-check read in step 1 and the race re-read in step 5 propagate the state error (`CommitNotFoundError` or `GameNotFoundError`, so a 500), except that the race path's `loadLatest` answers `GameNotFound`.
+- **Two identical copies of one request usually never reach the race path.** With the same clock and the same request, both write byte-identical commits, and the state layer counts an identical write as success (§14.7), so both resolve with the same result. The race-path match (step 5) handles copies whose bytes differ, for example because their `at` timestamps differ. Tests reach it with two services with different clocks.
+- **`head.json` failing still needs the barrier in tests.** To test a race while `head.json` names the old version, keep `barrierOnCommitPut(2)`; without it the loser's `loadLatest` probes past the stale hint, sees the new tip and takes the stale-version path instead of the race path.
+- **A move with only one legal choice cannot race against a different move.** The first hands often leave the human a single legal bid; advance the game until there are two, as the race example does.
+- **`final.json` is written once, by the request that committed the last move.** If that write fails it stays missing (a matched retry does not write it); readers fall back to the terminal commit ([`design.md`](./design.md) §6.3).
+- **An `ENGINE_VERSION` bump abandons games in progress.** They answer `GameUnsupported` until retention deletes them ([`architecture.md`](./architecture.md) §6.4).
+- **`getUpdate` with an old `sinceVersion` reads one commit per missed version** (2 store calls each, 8 at a time). A client that has been away for a whole game should reload without `sinceVersion` instead.
+- **No rate limiting** and no request logging in the service; both belong to the API.
+
+---
+
+## 16. Known limitations
+
+- **Configuration is not validated at server startup yet.** `getConfig()` has no caller; it is wired in by its first user, the factory that builds `GameService` for the route handlers (§15.2; Phase 8 in [`implementation.md`](./implementation.md)). Until then a misconfigured deployment would still start.
 - **Blob credentials are checked by `createObjectStore`, not by `loadConfig`** (§13.3), so a `blob` configuration without them is reported when the store is first built, not at startup.
 - **The Vercel Blob driver has not run against a real store yet**; it is tested against a mocked SDK, and the behaviours it assumes are listed in §13.7.
 - **The layer rule does not check dynamic `import()` or `require()`.** Use static `import` statements.
-- **No `GameService` or API yet:** the game core (`src/domain` §9, `src/engine` §10, `src/score` §11, `src/players` §12), the two pure service helpers (§12), the storage layer (`src/storage`, §13) and the Game State Manager (`src/state`, §14) exist, but nothing calls the manager yet: `GameService` is not written, and `/` is a placeholder page. A game can be played and scored only from code, tests or `pnpm simulate`, and saved only from code or tests.
-- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12.
+- **No API or UI yet:** the game core (`src/domain` §9, `src/engine` §10, `src/score` §11, `src/players` §12), the storage layer (`src/storage`, §13), the Game State Manager (`src/state`, §14) and `GameService` (`src/service`, §15) exist, but no route handler calls the service yet, and `/` is a placeholder page. A game can be created, played and saved only from code or tests, and all-AI games played with `pnpm simulate`.
+- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12, **service limitations** in §15.11.
