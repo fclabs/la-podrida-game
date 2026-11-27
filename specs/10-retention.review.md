@@ -30,3 +30,4 @@ Original: 218 lines.
 | R-024 | 2 | SHOULD | NFR-1002 | VC-1006 and VC-1011 do not cite NFR-1002 | deferred | Delta pass |
 | R-025 | 2 | COULD | VC-1017 | Clock derived from the real creation time | deferred | Delta pass |
 | R-026 | 2 | COULD | VC-1001 | Header value of the cronSecret-unset case | deferred | Delta pass |
+| R-027 | impl | SHOULD | VC-1022 | File store leaves empty `games/<id>/commits` folders (`FileObjectStore.delete` removes files only), so "games/<id> no longer exists" cannot hold | decided | Operator: amend the wording to "no file remains under games/<id>/"; src/ and spec 05 unchanged |

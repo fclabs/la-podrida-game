@@ -203,7 +203,7 @@ Automated VCs run in `tests/retention/` under `pnpm test`. **Every automated VC 
 
 ### Manual (local, `pnpm dev`, file store)
 
-- **VC-1022:** start `pnpm dev` with `FILE_STORE_DIR=/tmp/podrida CRON_SECRET=local-test-secret RETENTION_DAYS=1`; create a game with `curl` (spec 08); rename its marker folder `index/created/<today>/` to `index/created/2020-01-01/`; call `curl -H 'Authorization: Bearer local-test-secret' localhost:3000/api/cron/cleanup` → 200 `{"gamesDeleted":1,…}`, `/tmp/podrida/games/<id>` no longer exists, and the game's `GET` answers 404 `game_not_found`; the same call without the header answers 401. *(FR-1000, FR-1001, FR-1004, FR-1005)*
+- **VC-1022:** start `pnpm dev` with `FILE_STORE_DIR=/tmp/podrida CRON_SECRET=local-test-secret RETENTION_DAYS=1`; create a game with `curl` (spec 08); rename its marker folder `index/created/<today>/` to `index/created/2020-01-01/`; call `curl -H 'Authorization: Bearer local-test-secret' localhost:3000/api/cron/cleanup` → 200 `{"gamesDeleted":1,…}`, no file remains under `/tmp/podrida/games/<id>/` (the file store may leave empty folders, spec 05), and the game's `GET` answers 404 `game_not_found`; the same call without the header answers 401. *(FR-1000, FR-1001, FR-1004, FR-1005)*
 
 ## Open Questions
 
