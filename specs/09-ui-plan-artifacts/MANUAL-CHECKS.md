@@ -115,12 +115,12 @@ Fill in: date, browser and version, OS, `PASS` / `FAIL` / `WAIVED`, notes.
 
 | VC | Check | Date | Browser / OS | Result | Notes |
 |----|-------|------|--------------|--------|-------|
-| VC-950 | Full game, 5 AIs, Chrome | | | | |
-| VC-951 | Reload mid-hand, continue link | | | | |
-| VC-952 | Offline retry A (before third retry) | | | | |
-| VC-952 | Offline retry B (`Reintentar`) | | | | |
-| VC-953 | 375 px, case (a) closed / open | | | | |
-| VC-953 | 375 px, case (b) closed / open | | | | |
-| VC-953 | Tap targets >= 44 x 44 | | | | |
-| VC-954 | Firefox, one hand | | | | |
-| VC-954 | Safari iOS over LAN IP, one hand | | | | |
+| VC-950 | Full game, 5 AIs, Chrome | 2026-11-27 | Chrome (version not given) | PASS | Reported by user: "worked well". Totals/ranking match and no-console-error details not itemised. |
+| VC-951 | Reload mid-hand, continue link | 2026-11-27 | Chrome (version not given) | PASS | Reported by user: reload brings back the current game. `Continuar partida` in a new tab not itemised. |
+| VC-952 | Offline retry A (before third retry) | 2026-11-27 | Orca built-in browser (Chromium), macOS | PASS | Offline, clicked a card, back online at ~3 s. Commits 2 -> 3 (+1). No notice shown. |
+| VC-952 | Offline retry B (`Reintentar`) | 2026-11-27 | Orca built-in browser (Chromium), macOS | PASS | `No se pudo enviar la jugada.` + `Reintentar` after ~10 s offline; online + click. Commits 3 -> 4 (+1). |
+| VC-953 | 375 px, case (a) closed / open | 2026-11-27 | Orca built-in browser, 375x667 mobile emulation | PASS | 6 seats, Mano 1 de 14 · 8 cartas, 9 bid buttons. Closed and open (14 rows): no horizontal scroll, no control < 44px. |
+| VC-953 | 375 px, case (b) closed / open | 2026-11-27 | Orca built-in browser, 375x667 mobile emulation | PASS | 3 seats, Mano 1 de 29 · 17 cartas, 18 bid buttons. Closed and open (29 rows): no horizontal scroll, all bids inside 375 px, no control < 44px. |
+| VC-953 | Tap targets >= 44 x 44 | 2026-11-27 | Orca built-in browser, 375x667 mobile emulation | PASS | Measured: Saltar 68.6x44, Reintentar 102.9x44; bid buttons, Planilla, Cerrar and card buttons all >= 44x44. No console errors or warnings in the session. |
+| VC-954 | Firefox, one hand | 2026-11-27 | not run | WAIVED | Waived by user ("waived right now"); not run. Firefox untested. |
+| VC-954 | Safari iOS over LAN IP, one hand | 2026-11-27 | not run | WAIVED | Waived by user ("waived right now"); not run. `crypto.randomUUID` fallback (FR-935) is covered by VC-924 in jsdom only. |
