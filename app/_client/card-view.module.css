@@ -1,0 +1,54 @@
+.card {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 64px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font: inherit;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+button.card {
+  cursor: pointer;
+}
+
+button.card:disabled {
+  cursor: default;
+}
+
+.dimmed {
+  opacity: 0.4;
+}
+
+.rank {
+  font-size: 1.1rem;
+}
+
+.suit {
+  font-size: 0.9rem;
+}
+
+.red {
+  color: var(--card-red);
+}
+.black {
+  color: var(--card-black);
+}
+.oros {
+  color: var(--card-oros);
+}
+.copas {
+  color: var(--card-copas);
+}
+.espadas {
+  color: var(--card-espadas);
+}
+.bastos {
+  color: var(--card-bastos);
+}
