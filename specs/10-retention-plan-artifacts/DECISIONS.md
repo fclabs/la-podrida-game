@@ -20,3 +20,31 @@
 **Decision**: `runCleanup` wraps the whole marker walk in one `try/catch`; `gamesDeleted` is a local incremented only after a game's marker delete succeeds, so the catch reads it directly and throws `CleanupFailedError(gamesDeleted, error)`. Option validation sits before the `try`, so its `RangeError`s are unwrapped. The round limit throws a plain `Error` that gets wrapped like store errors; `deleteGameKeys` lists exactly `MAX_LIST_ROUNDS_PER_GAME` times before giving up.
 **Rejected**: per-call wrapping inside helpers (error-prone, repeated); a `{ gamesDeleted }` side channel passed to helpers.
 **Consequences**: `CleanupFailedError.message` copies the cause's message; the original stays in `cause`. A game whose marker delete threw is not counted.
+
+## D-004: Bearer check compares two SHA-256 digests with `timingSafeEqual`  (Iteration 3)
+
+**Context**: FR-1000/BR-1004 need a constant-time compare with no `===`/`startsWith`/`includes` on the secret or header; `timingSafeEqual` throws on unequal lengths.
+**Decision**: `isAuthorized(header, secret)` returns false for a null header or unset secret, else `timingSafeEqual(sha256(header), sha256('Bearer ' + secret))`. Scheme, case and spacing are covered by the whole-string compare.
+**Rejected**: length check then direct compare (leaks length, needs `!==` on lengths of secret values); parsing the scheme (needs `startsWith`).
+**Consequences**: the secret never appears in a comparison operator; every wrong header costs two hashes.
+
+## D-005: 401 is built from `RequestError`, 500 from a fresh `Error`  (Iteration 3)
+
+**Context**: `Unauthorized` is in `src/service/errors`, which cleanup.ts may not import (BR-1005); `toErrorResponse` of an arbitrary thrown value could map a store error to a non-500 status.
+**Decision**: 401 = `toErrorResponse(new RequestError(401, 'unauthorized'))` (same body as `Unauthorized`); every failure answers `toErrorResponse(new Error('internal'))`.
+**Rejected**: importing `Unauthorized`; hand-writing the bodies (drifts from spec 08).
+**Consequences**: bodies always equal the spec 08 `unauthorized`/`internal` bodies and carry nothing from the thrown value.
+
+## D-006: `errorName`/`errorMessage` describe the cause  (Iteration 3)
+
+**Context**: `CleanupFailedError` copies its cause's message but its own name is `CleanupFailedError`; FR-1009 wants the original error.
+**Decision**: for a `CleanupFailedError` use `error.cause` (`name` if an `Error`, else `typeof`; message or `String(...)`), else the error itself; message `.slice(0, 500)`. `gamesDeleted` is the wrapper's, else 0.
+**Rejected**: logging the wrapper (name always the same, hides the real fault).
+**Consequences**: a store error message that includes a key path is logged as is (see CONTEXT Known gaps).
+
+## D-007: `durationMs` brackets only `runCleanup`  (Iteration 3)
+
+**Context**: FR-1012 asks for the run's wall-clock time.
+**Decision**: `deps.now()` is read right after `getStore` (start), once for `runCleanup`'s `now`, and once after (end); `Math.round(end - start)`. The `now` passed to `runCleanup` is a separate call, so a clock queue in tests sees three reads.
+**Rejected**: timing from the request start (includes auth and config).
+**Consequences**: with a fixed clock `durationMs` is 0.

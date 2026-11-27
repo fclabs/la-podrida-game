@@ -1,9 +1,15 @@
 // Retention cleanup core (spec 10: FR-1002–FR-1006, FR-1009 (error shape), FR-1010, FR-1011,
-// BR-1001, BR-1002, BR-1005, BR-1006; plan iterations 1–2). Walks the `index/created/` markers in key order, deletes every
+// BR-1001, BR-1002, BR-1005, BR-1006; plan iterations 1–3). Walks the `index/created/` markers in key order, deletes every
 // expired game's `games/{id}/` keys page by page, then its marker. Reads no game document and
 // imports only the storage contract and the key builders.
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { type Config, getConfig } from '@/src/config';
+import { createObjectStore } from '@/src/storage';
 import type { ObjectStore } from '@/src/storage/object-store';
 import { GAME_ID_PATTERN, gameKeyPrefix, indexCreatedPrefix } from '@/src/state/keys';
+import { RequestError, toErrorResponse } from './errors';
+import { jsonResponse } from './http';
+import { type LogSink, consoleLog } from './log';
 
 /** The list page size used when a caller does not choose one (the `ObjectStore` maximum). */
 export const DEFAULT_PAGE_SIZE = 1000;
@@ -15,6 +21,9 @@ export const DEFAULT_BATCH_SIZE = 500;
 export const MAX_LIST_ROUNDS_PER_GAME = 10_000;
 
 const MS_PER_DAY = 86_400_000;
+/** The longest logged `errorMessage` (FR-1009). */
+const MAX_ERROR_MESSAGE = 500;
+const ROUTE = 'cron/cleanup';
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface CleanupOptions {
@@ -117,5 +126,86 @@ export async function runCleanup(opts: CleanupOptions): Promise<CleanupResult> {
     }
   } catch (error) {
     throw new CleanupFailedError(gamesDeleted, error);
+  }
+}
+
+/** What `cleanupHandler` needs (FR-1014); the route binds `defaultCleanupDeps`. */
+export interface CleanupDeps {
+  getConfig: () => Config;
+  getStore: (config: Config) => ObjectStore;
+  /** The wall clock. */
+  now: () => Date;
+  log: LogSink;
+  batchSize: number;
+  pageSize: number;
+}
+
+/** The production deps: memoised config, `createObjectStore`, the system clock, the console sink. */
+export const defaultCleanupDeps: CleanupDeps = {
+  getConfig,
+  getStore: createObjectStore,
+  now: () => new Date(),
+  log: consoleLog,
+  batchSize: DEFAULT_BATCH_SIZE,
+  pageSize: DEFAULT_PAGE_SIZE,
+};
+
+function sha256(value: string): Buffer {
+  return createHash('sha256').update(value).digest();
+}
+
+/**
+ * True iff `header` is exactly `Bearer <secret>` and a secret is set (FR-1000, FR-1001). Both sides
+ * are hashed first so the constant-time compare always sees equal lengths (BR-1004).
+ */
+function isAuthorized(header: string | null, secret: string | undefined): boolean {
+  if (header === null || secret === undefined) return false;
+  return timingSafeEqual(sha256(header), sha256(`Bearer ${secret}`));
+}
+
+/** The original error behind a failed run, as the two logged fields (FR-1009). */
+function describeError(error: unknown): { errorName: string; errorMessage: string } {
+  const original = error instanceof CleanupFailedError ? error.cause : error;
+  return {
+    errorName: original instanceof Error ? original.name : typeof original,
+    errorMessage: (original instanceof Error ? original.message : String(original)).slice(
+      0,
+      MAX_ERROR_MESSAGE,
+    ),
+  };
+}
+
+/**
+ * `GET /api/cron/cleanup` (FR-1000, FR-1001, FR-1008, FR-1009, FR-1012). Order: `getConfig`, the
+ * bearer check (401, no log, no store), `getStore`, `runCleanup`. A thrown error answers the fixed
+ * 500 `internal` body and writes one `error` line with `route`, `gamesDeleted`, `errorName` and
+ * `errorMessage` only.
+ */
+export async function cleanupHandler(req: Request, deps: CleanupDeps): Promise<Response> {
+  let gamesDeleted = 0;
+  try {
+    const config = deps.getConfig();
+    if (!isAuthorized(req.headers.get('authorization'), config.cronSecret)) {
+      const { status, body } = toErrorResponse(new RequestError(401, 'unauthorized'));
+      return jsonResponse(status, body);
+    }
+    const store = deps.getStore(config);
+    const start = deps.now().getTime();
+    const result = await runCleanup({
+      store,
+      now: deps.now(),
+      retentionDays: config.retentionDays,
+      batchSize: deps.batchSize,
+      pageSize: deps.pageSize,
+    });
+    const durationMs = Math.round(deps.now().getTime() - start);
+    deps.log('info', { route: ROUTE, status: 200, ...result, durationMs });
+    return jsonResponse(200, result);
+  } catch (error) {
+    if (error instanceof CleanupFailedError) gamesDeleted = error.gamesDeleted;
+    deps.log('error', { route: ROUTE, gamesDeleted, ...describeError(error) });
+    // Always the fixed `internal` body: nothing of the thrown value reaches the response.
+    const { status, body } = toErrorResponse(new Error('internal'));
+    return jsonResponse(status, body);
   }
 }
