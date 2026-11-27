@@ -55,3 +55,10 @@
 **Decision**: MANUAL-CHECKS.md checks `find <dir> -type f` is empty and records the deviation; the docs iteration uses the same wording. No `src/` change (out of scope; spec 05 is frozen).
 **Rejected**: pruning empty directories (touches `src/storage`); marking VC-1022 FAIL (behaviour is correct, only the wording is off).
 **Consequences**: `verify-spec` should accept the recorded deviation or amend the spec text.
+
+## D-009: §18 is organised by reader need; limits live in 18.12 and are mirrored in §19  (Iteration 5)
+
+**Context**: FR-1015 lists topics, not a structure; the build record is by iteration.
+**Decision**: `development.md` §18 has 12 subsections (what and why, route and auth with responses and logging, cutoff, walk and delete order, cap, failure and resume, skipped markers, code and deps, schedule, tests, try it locally, gotchas). Each retention limit is stated in 18.12 and also as a bullet in §19 (which points back), so §19 stays the single list of limits.
+**Rejected**: one subsection per iteration; limits only in §19 (the module sections each keep their own gotchas, §18 follows that).
+**Consequences**: the local try-it steps use a `DIR` variable (default `/tmp/podrida`) so the commands can run unchanged on any fresh directory.

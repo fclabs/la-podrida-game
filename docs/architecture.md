@@ -286,6 +286,7 @@ Games are **deleted one year (365 days) after they were created**, whether finis
 - The job lists `index/created/` in order and stops at the first day newer than the cutoff (`today − RETENTION_DAYS`). For each older marker it lists and deletes `games/{gameId}/`, then deletes the marker **last**, so a run that fails halfway is picked up again the next day.
 - Each run handles at most a fixed batch (e.g. 500 games) to stay within the function time limit; any remainder is handled the next day.
 - Games are deleted at the cutoff even if a request happens to be in flight. A partially deleted game returns 404. This race needs activity on a year-old game, so it is accepted rather than fenced.
+- The job is shipped in `app/api/_lib/cleanup.ts` (route: `app/api/cron/cleanup/route.ts`; details in [`development.md`](./development.md) §18).
 - The local and test stores support the same job, so it is covered by an API test with `MemoryObjectStore` and a fake clock.
 
 ---
@@ -300,7 +301,7 @@ Next.js Route Handlers under `app/api`. JSON in, JSON out, validated with Zod. H
 | `GET /api/games/{id}[?since={version}]` | seat token | – | 200 `PlayerUpdate`. Without `since`, `events` is `[]`; with it, the events of every commit after that version. |
 | `POST /api/games/{id}/moves` | seat token | `{ version, moveId, clientRequestId }` | 200 the new `PlayerUpdate`. Resending the same request (same `clientRequestId`) answers 200 with the original body. |
 | `GET /api/presets` | – | – | 200 `{ defaultPresetId, presets: [{ id, name, description, players: { min, max }, deck }] }` |
-| `GET /api/cron/cleanup` | `CRON_SECRET` | – | Internal. Called daily by Vercel Cron to delete games older than `RETENTION_DAYS` (§6.5). Not built yet. |
+| `GET /api/cron/cleanup` | `CRON_SECRET` | – | Internal. Called daily by Vercel Cron to delete games older than `RETENTION_DAYS` (§6.5). Authenticated with a constant-time bearer check; answers `{ gamesDeleted, capReached, skippedMarkers }`. How it works: [`development.md`](./development.md) §18. |
 
 `PlayerUpdate = { version, events, view, legalMoves }` (design §7). The full score sheet is part of `view.scoreboard`, so no separate scores endpoint is needed. The seat token is in the 201 body and in no other response.
 

@@ -1,7 +1,7 @@
-# CONTEXT: Phase 10 retention (state after Iteration 4)
+# CONTEXT: Phase 10 retention (shipped system)
 
 ## Current state
-Iterations 1-4 done: `runCleanup`, `cleanupHandler`, `defaultCleanupDeps`, the route `GET /api/cron/cleanup`, the daily cron in `vercel.json`, the end-to-end test and the static layering/secret tests. VC-1022 was run by hand (PASS, `MANUAL-CHECKS.md`). Not built yet: docs (5). Nothing under `src/` or `package.json` has changed (`git diff main -- src` is empty).
+Phase 10 is complete (iterations 1-5): `runCleanup`, `cleanupHandler`, `defaultCleanupDeps`, the route `GET /api/cron/cleanup`, the daily cron in `vercel.json`, the end-to-end test and the static layering/secret tests. VC-1022 was run by hand (PASS, `MANUAL-CHECKS.md`; re-run in iteration 5 from the docs). The docs are written: `docs/development.md` `## 18. Retention` (18.1-18.12) and `## 19. Known limitations` (renumbered), `docs/architecture.md` §7 row and §6.5 sentence. Nothing under `src/` or `package.json` has changed (`git diff main -- src` is empty).
 
 ## File map
 - `app/api/cron/cleanup/route.ts`: `export const GET = (req: Request) => cleanupHandler(req, defaultCleanupDeps);` (only export).
@@ -9,6 +9,7 @@ Iterations 1-4 done: `runCleanup`, `cleanupHandler`, `defaultCleanupDeps`, the r
 - `tests/retention/structure.test.ts`: VC-1014 and VC-1018 (static; regex over import specifiers; line scan of secret identifiers; no store matrix).
 - `tests/retention/end-to-end.test.ts`: VC-1017 (real `GameService` via `makeApi`/`createGameVia`, clock 2028-11-23, `getGameHandler` 404, empty store).
 - `specs/10-retention-plan-artifacts/MANUAL-CHECKS.md`: VC-1022 steps and results table.
+- `docs/development.md`: §18 Retention (what/why, route and auth, cutoff, walk, cap, failure, skipped markers, code and deps, schedule, tests, try it locally, gotchas), `tests/retention/` in the §4 table and the folder tree, §19 Known limitations with the retention limits; `docs/architecture.md`: §7 cleanup row (built), §6.5 shipped sentence. README unchanged (it neither names the section number nor says the cron is missing). The shipped docs contain no reference to the spec, plan or artifacts.
 - `app/api/_lib/cleanup.ts`: `runCleanup`, `CleanupFailedError`, constants, `CleanupDeps`, `cleanupHandler`, `defaultCleanupDeps`, plus private helpers `isCalendarDay`, `parseMarkerKey`, `deleteGameKeys`, `sha256`, `isAuthorized`, `describeError`.
 - `tests/retention/handler.test.ts`: VC-1000, 1001, 1008, 1012, 1013, 1015 and extras; helpers `configWith(over)`, `makeDeps(store, config?)` (returns `{ deps, lines, getStoreCalls }`), `call(deps, authHeader?)`.
 - `tests/retention/limits.test.ts`: VC-1006, VC-1007 (store part), RangeError and wrapping tests on both stores; VC-1011 on memory only.
@@ -72,7 +73,7 @@ Note `make()` is async (returns a Promise of `MadeStore`).
 `pnpm vitest run --project node tests/retention` (add `--reporter=verbose` to see memory/file), `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm format`.
 
 ## Known gaps
-- Docs not written yet (Iteration 5).
+None beyond the limits below (all are documented in `docs/development.md` §18.12 and §19).
 - `FileObjectStore.delete` leaves empty directories, so after a cleanup `games/<id>/commits/` exists on disk with no file (D-008); no key remains.
 - The Vercel cron firing, `CRON_SECRET` on the real project and Blob list ordering are unverified (Phase 11). No `maxDuration`: the platform default time limit applies; a cut-off run resumes the next day.
 - The logged `errorMessage` is the original store error's message (<= 500 chars) and may contain store key paths, hence game ids (spec 05: messages carry the key). The spec asks for the original message, so it is logged as is; the response body never carries it.
