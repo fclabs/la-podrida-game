@@ -29,7 +29,7 @@ This guide explains how the repository is organised, which rules the tooling enf
 
 ```
 app/                    Next.js App Router: pages, layouts, components (UI)
-  api/                  HTTP route handlers; shared code in api/_lib/ (§16)
+  api/                  HTTP route handlers; shared code in api/_lib/ (§16); the retention cron (§18)
   _client/              Browser UI: pages' components, API client, state (§17)
   game/[id]/            The game page route (§17)
 src/
@@ -46,13 +46,14 @@ tests/
   contract/             Cross-module contracts (e.g. every ObjectStore driver)
   api/                  Route handlers
   ui/                   Browser UI in jsdom: modules, components, full game (§17.8)
+  retention/            The daily cleanup job on the memory and file stores (§18.10)
   sim/                  Long-running simulations (run by `pnpm test:sim` only)
 scripts/simulate.ts     Command-line simulator (`pnpm simulate`)
 tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
 
-`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12), `src/storage` (§13), `src/state` (§14) and `src/service` (`GameService`, `replayGame` and the two pure helpers `buildPlayerView` and `runAiLoop`, §12 and §15) are built, and so is the HTTP API in `app/api/` (§16). So is the browser UI in `app/_client/` (§17): the new-game page at `/` and the game page at `/game/[id]`. The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
+`src/domain` (§9), `src/engine` (§10), `src/score` (§11), `src/players` (§12), `src/storage` (§13), `src/state` (§14) and `src/service` (`GameService`, `replayGame` and the two pure helpers `buildPlayerView` and `runAiLoop`, §12 and §15) are built, and so is the HTTP API in `app/api/` (§16), including the daily retention job (§18). So is the browser UI in `app/_client/` (§17): the new-game page at `/` and the game page at `/game/[id]`. The App Router lives in the root `app/` folder, not `src/app`, so that `src/` holds only the layered backend code.
 
 **Import alias.** `@/` maps to the **project root**, so imports read `@/src/engine/...` or `@/app/...`. It works in TypeScript, Next.js, Vitest and `tsx`.
 
@@ -109,6 +110,7 @@ Tests are Vitest files named `*.test.ts` (`*.test.tsx` under `tests/ui/`), place
 | `tests/contract/` | Contracts that several implementations must satisfy (e.g. one suite run against every storage driver, §13.6). The Vercel Blob run is skipped unless `BLOB_READ_WRITE_TOKEN` is set. | `pnpm test` |
 | `tests/api/` | Route handlers, called directly (§16.8). | `pnpm test` |
 | `tests/ui/` | The browser UI in jsdom: pure client modules and React components with Testing Library, against an in-process API (§17.8). | `pnpm test` (`pnpm vitest run --project ui` for only these) |
+| `tests/retention/` | The retention cleanup job, run against the memory and file stores (§18.10). | `pnpm test` |
 | `tests/sim/` | Long-running simulations (many full games). | `pnpm test:sim` only |
 
 Test files anywhere else (for example next to the code in `src/`) are **never run**. The simulation suite, its `SIM_SEEDS` setting and its helpers are described in §12.5.
@@ -129,7 +131,7 @@ describe('loadConfig', () => {
 
 Run a single file with `pnpm vitest run tests/unit/example.test.ts`.
 
-**Two Vitest configs.** `vitest.config.ts` (used by `pnpm test`) defines two projects that share the `@` alias: `node` (`tests/{unit,contract,api}`, Node environment) and `ui` (`tests/ui`, jsdom, with `tests/ui/setup.ts` cleaning up Testing Library and `localStorage` after each test); `vitest.sim.config.ts` (used by `pnpm test:sim`) includes only `tests/sim` and allows an empty folder. They are two standalone files because merging configs concatenates the `include` lists (sim would also run everything else) and importing one config from the other is not supported cleanly by Vite's config loader. **Keep the `resolve.alias` and `environment` settings of both files in sync.**
+**Two Vitest configs.** `vitest.config.ts` (used by `pnpm test`) defines two projects that share the `@` alias: `node` (`tests/{unit,contract,api,retention}`, Node environment) and `ui` (`tests/ui`, jsdom, with `tests/ui/setup.ts` cleaning up Testing Library and `localStorage` after each test); `vitest.sim.config.ts` (used by `pnpm test:sim`) includes only `tests/sim` and allows an empty folder. They are two standalone files because merging configs concatenates the `include` lists (sim would also run everything else) and importing one config from the other is not supported cleanly by Vite's config loader. **Keep the `resolve.alias` and `environment` settings of both files in sync.**
 
 **Layer-rule fixture tests.** `tests/unit/layer-boundaries.test.ts` runs ESLint's `lintText` on inline source strings with a virtual file path (e.g. `src/engine/x.ts`) and asserts whether a `layer-boundaries/imports` error is reported. There are no fixture files on disk, so neither `pnpm lint` nor `pnpm typecheck` sees them. Add a row `[label, virtualPath, code, expectError]` to the `rows` table for each new case.
 
@@ -1148,7 +1150,7 @@ Import from each module directly (`import { GameStateManager } from '@/src/state
 | `@/src/state/errors` | `InvalidGameIdError`, `GameNotFoundError`, `GameExistsError`, `CommitNotFoundError`, `CommitConflictError`, `InvalidCommitError` | The manager's errors (§14.10). |
 | `@/src/state/game-state-manager` | `GameStateManager` | Creating, loading and committing games over an `ObjectStore` (§14.4–§14.9). |
 
-The retention job will use the key builders (`indexCreatedPrefix`, `gameKeyPrefix`) and the store directly; it does not need the manager.
+The retention job (§18) uses the key builders (`indexCreatedPrefix`, `gameKeyPrefix`) and the store directly; it does not need the manager.
 
 ### 14.2 Keys
 
@@ -1420,7 +1422,7 @@ Tests on the file store create their folder with `fs.mkdtemp(path.join(os.tmpdir
 - **`InvalidCommitError` covers every rejected document**, including `meta` in `create` and the board in `writeFinalScores`; read `reason` to tell them apart.
 - **No migrations.** A document with any `schemaVersion` other than 1 is reported as corrupt ([`architecture.md`](./architecture.md) §6.4).
 - **Exclusivity on Blob is still assumed.** Exactly-one-winner races are proven on the memory and file stores; on Blob they rely on the storage contract and the preview checks ([`architecture.md`](./architecture.md) §11), like the rest of the Blob driver (§13.7).
-- **Not in the state layer:** generating ids, seeds and seat tokens, hashing and checking tokens, the `clientRequestId` retry check, mapping errors to `VersionConflict` and HTTP, the AI loop (all `GameService`, §15), and deleting old games (the retention job).
+- **Not in the state layer:** generating ids, seeds and seat tokens, hashing and checking tokens, the `clientRequestId` retry check, mapping errors to `VersionConflict` and HTTP, the AI loop (all `GameService`, §15), and deleting old games (the retention job, §18).
 
 ---
 
@@ -2074,7 +2076,7 @@ A 4-seat `argentina-fidepo` game takes about 200 human moves and a few seconds t
 - **Configuration is validated on the first request**, not at server startup (§16.5).
 - **`application/json` only.** `+json` media types such as `application/merge-patch+json` are rejected.
 - **Lengths count UTF-16 code units** (`humanName`, `moveId`, `clientRequestId`); the 16,384 cap counts bytes.
-- **No rate limiting, CORS or accounts** ([`architecture.md`](./architecture.md) §12); `GET /api/cron/cleanup` does not exist yet.
+- **No rate limiting, CORS or accounts** ([`architecture.md`](./architecture.md) §12); the cron route `GET /api/cron/cleanup` is not one of the four game routes and is described in §18.
 - **No move-latency measurement yet.** Timings from `pnpm dev` (the `durationMs` field) use the file store and say nothing about Vercel Blob; the preview benchmark is pending ([`architecture.md`](./architecture.md) §11).
 
 ---
@@ -2260,7 +2262,211 @@ Then open `http://<LAN IP>:3000` on the phone (allow incoming connections for No
 
 ---
 
-## 18. Known limitations
+## 18. Retention
+
+`GET /api/cron/cleanup` is the daily job that deletes every game created more than `RETENTION_DAYS` days ago, finished or not. This section covers what it does and why, how to run and test it, and what it cannot do. The policy itself (one year, creation date only) is in [`architecture.md`](./architecture.md) §6.5; the route row is in §7.
+
+### 18.1 What the job does
+
+Every game is stored as `games/{id}/…` keys plus one empty marker `index/created/{yyyy-mm-dd}/{id}` that is written first when the game is created (§14.5). Without a job, Vercel Blob would keep all of them forever. Once a day, Vercel Cron calls the route; the job lists the markers in date order, deletes each expired game's keys page by page, deletes its marker last, and stops after 500 games. It answers a small JSON summary and writes one log line.
+
+Four properties shape the design:
+
+- **It works from the markers only and never reads a game.** It works this way because retention must also delete games the engine can no longer load (`GameUnsupported`, a changed `schemaVersion`), and because a run then costs only `list` and `delete` calls.
+- **It is driven by creation date alone.** A game is deleted whether it is finished, in progress or unsupported, because "last activity" tracking would add a write to every move for no real gain (architecture AD-11).
+- **It is idempotent.** Running it twice, or two runs overlapping, ends in the same store state and never fails because a key is already gone, because storage deletes are idempotent (§13.4) and Vercel may retry a cron call.
+- **It only touches what it can prove it created:** the keys under `games/{id}/` and the one marker of an expired game. Keys of newer games, other prefixes and malformed markers are never deleted.
+
+### 18.2 The route, authentication and responses
+
+| Method & path | Auth | Success | Failure |
+|---|---|---|---|
+| `GET /api/cron/cleanup` | `Authorization: Bearer ${CRON_SECRET}` | 200 `{ gamesDeleted, capReached, skippedMarkers }`, `Content-Type: application/json`, `Cache-Control: no-store` | 401 `unauthorized`; 500 `internal` |
+
+The route file exports only `GET`, so Next answers any other method with its default 405.
+
+The handler runs in a fixed order: **`getConfig()`, then the authentication check, then `getStore`**. Consequences:
+
+- **It fails closed.** With no `CRON_SECRET` configured (possible only locally, §5) every request is rejected with 401. It works this way because the route deletes data; nothing may run it by accident.
+- **A 401 is silent.** It uses the usual `unauthorized` body (the text `Missing or invalid seat token` is reused as is), writes no log line and never builds the store, so a scanner learns nothing and causes no storage call.
+- **A configuration error answers 500 even for an unauthenticated call**, because the configuration is read before the caller is checked. It carries the usual fixed `internal` body and one `error` log line.
+- **The header must be exactly `Bearer <secret>`**: one space, the scheme in that case, nothing after the secret. The check hashes both sides with SHA-256 and compares the digests with `timingSafeEqual`. It works this way so the compare is constant-time and never needs `timingSafeEqual`'s equal-length precondition, and so no `===`, `startsWith` or `includes` is ever applied to the secret or the header. The secret is never logged, echoed or placed in an error message.
+
+**Logging.** After a completed run the handler writes one `info` line, regardless of `LOG_LEVEL` (it is a daily line, not per-request noise):
+
+```json
+{"route":"cron/cleanup","status":200,"gamesDeleted":3,"capReached":false,"skippedMarkers":0,"durationMs":412}
+```
+
+`durationMs` covers the store build to the end of the walk, not authentication. Any failure writes one `error` line with only `route`, `gamesDeleted` (games fully deleted before the error), `errorName` and `errorMessage` (the original store error's name and message, cut to 500 characters). The 500 response is always the fixed `internal` body and carries nothing from the error.
+
+### 18.3 Which games expire
+
+The cutoff day is the **UTC calendar date of `now − RETENTION_DAYS × 86,400,000 ms`**. A game is expired if its marker's day is **strictly earlier** than the cutoff day.
+
+Worked example: `now` is 2026-11-27T03:00Z and `RETENTION_DAYS` is 365, so the cutoff day is 2025-11-27. Markers dated 2025-11-26 and earlier expire; a marker dated 2025-11-27 is kept and goes with the next day's run. The time of day does not matter: 00:00:00.000Z and 23:59:59.999Z on the same date give the same cutoff, and leap years follow the calendar.
+
+It works this way, strictly older, because a game then lives at least `RETENTION_DAYS` full days, and deleting a game early is the worse error. The cutoff is always UTC because the marker's day is the UTC creation date. `RETENTION_DAYS` is already validated by `loadConfig` (an integer from 1 to 3650, §5), so the job does not check it again.
+
+### 18.4 The walk and the delete order
+
+1. **Walk the markers.** List `index/created/` in ascending key order, page by page with the returned `cursor`. Keys sort by date, so the expired games come first.
+2. **Stop early.** The first valid marker whose day is not expired ends the run. No page beyond the one holding it is listed, so a run with nothing to do costs one `list` call per page of markers read and no `delete`.
+3. **Delete a game's keys.** Repeatedly list `games/{id}/` from the start (no cursor), and `delete` the keys of that page; stop when a listing returns no key. A `delete` is never called with an empty list.
+4. **Delete the marker last.** Only after a listing of `games/{id}/` came back empty is `index/created/{day}/{id}` deleted, and the game counts as deleted.
+
+For one game with `k ≥ 1` keys and page size `p` that is `ceil(k/p) + 1` `list` calls, `ceil(k/p)` `delete` calls for the keys, one `delete` for the marker, and no `get`, `exists` or `put`.
+
+**The marker goes last** because it is the only way to find the game again. If the run dies halfway, the marker still exists and the next run finishes the job (§18.6); with the marker gone first, the leftover keys would be orphans no one could find.
+
+**Each page is listed again from the start** instead of following a cursor, because the keys just deleted are no longer there, so the first page is always the next batch to delete.
+
+### 18.5 The batch cap and `capReached`
+
+One run deletes at most **500 games**, to stay within the function time limit; the remainder is handled by the next day's run. The cap is a constant (`DEFAULT_BATCH_SIZE`), not an environment variable, because that keeps `src/config.ts` unchanged. Tests pass a small batch through the injected deps instead (§18.8).
+
+`capReached` is `true` exactly when the run stopped because it deleted 500 games. It is `true` **even if nothing is left to delete**: the job does not look ahead, so with exactly 500 expired games the run answers `true` and the next one answers `{ gamesDeleted: 0, capReached: false }`. Read it as "the run stopped at its cap", not as "more work remains".
+
+### 18.6 Failure, resume and the round limit
+
+Any error from the store stops the run. The route answers the fixed 500 `internal` and writes the `error` line with the games deleted so far (§18.2). **Nothing is rolled back**: games deleted before the error stay deleted. It works this way, a 500 instead of a 200 with a summary, because Vercel then shows the cron run as failed.
+
+**Resume.** If a run fails or is cut off after deleting only some keys of a game, that game's marker is still there. The next run finds it, deletes the remaining keys and then the marker. A marker whose keys are already all gone (the keys were deleted and the run died before the marker) costs one `delete` for the marker alone.
+
+**The 10,000-round guard.** A game's keys are deleted in at most 10,000 `list` rounds (`MAX_LIST_ROUNDS_PER_GAME`). If the listing is still not empty after that, the run fails like any other store error and the marker is kept. It works this way because on Blob a listing is a hint (§13.7): a stale listing that never empties must not keep a cron function looping until the platform kills it. A game normally has a few hundred keys, so the guard never binds in practice.
+
+Option errors (`batchSize` not an integer ≥ 1, `pageSize` not an integer from 1 to 1000) are `RangeError`s thrown before any store call. The production deps cannot trigger them.
+
+### 18.7 Skipped markers
+
+A key under `index/created/` that is not exactly `index/created/{yyyy-mm-dd}/{gameId}`, with a real calendar date (`2025-02-30` is not one) and a valid game id (`^[a-z2-7]{26}$`), is **skipped**: counted in `skippedMarkers`, never deleted, and the walk continues. It works this way because the job only deletes what it can prove it created; a malformed marker is reported in the count for the operator to inspect.
+
+Only malformed keys met **before the stop point** are counted: the walk ends at the first valid, non-expired marker, so a malformed key sorting after it (such as `index/created/not-a-date/…`) is never reached and never counted.
+
+### 18.8 Where the code lives and what is injectable
+
+| File | What it holds |
+|---|---|
+| `app/api/_lib/cleanup.ts` | `runCleanup(options)`, `CleanupFailedError`, the constants, `CleanupDeps`, `cleanupHandler(req, deps)` and `defaultCleanupDeps`. |
+| `app/api/cron/cleanup/route.ts` | `export const GET = (req) => cleanupHandler(req, defaultCleanupDeps)`, the only export. |
+| `vercel.json` | The cron schedule (§18.9). |
+
+```ts
+interface CleanupDeps {
+  getConfig: () => Config;
+  getStore: (config: Config) => ObjectStore;
+  now: () => Date;        // the wall clock
+  log: LogSink;
+  batchSize: number;      // integer >= 1
+  pageSize: number;       // integer 1-1000, the ObjectStore limit
+}
+```
+
+`defaultCleanupDeps` binds `getConfig`, `createObjectStore`, `() => new Date()`, `consoleLog`, `batchSize` 500 and `pageSize` 1000. Tests call `cleanupHandler` with their own deps (a fixed clock, a counting store, a batch of 2, a page size of 1), so they need no sleeping, no Vercel and no 500-game fixtures. `runCleanup` takes `store`, `now`, `retentionDays`, `batchSize` and `pageSize` and returns `{ gamesDeleted, capReached, skippedMarkers }`; on any store error it throws `CleanupFailedError`, which carries `gamesDeleted` and keeps the original error as `cause`.
+
+**Layering.** The cleanup code imports only the `ObjectStore` type, `createObjectStore`, `Config`, the key builders (`@/src/state/keys`) and the sibling `_lib` modules. It does not import the Game State Manager, the schemas, the service or the engine, and no file under `src/` changed to build it. It lives in `app/api/_lib` rather than in a new `src` layer because a new layer would change the lint layer table for a single consumer, and `app/api` may already import `src/storage` and `src/state/keys`. `pnpm lint` does not constrain `app/api/**`, so `tests/retention/structure.test.ts` enforces the import list and the secret handling.
+
+### 18.9 The schedule and Vercel Cron
+
+`vercel.json` has one cron: path `/api/cron/cleanup`, schedule `0 3 * * *`, 03:00 UTC every day, a quiet hour for the Americas. It works this way (a fixed constant, not configurable) because a second knob buys nothing for a once-a-day job.
+
+What Vercel Cron does, and what to know when you deploy:
+
+- Schedules are in **UTC**.
+- Cron invokes **production deployments only**: previews never run the job.
+- It calls the route with `GET` and, when `CRON_SECRET` is set in the project, with `Authorization: Bearer ${CRON_SECRET}`. Set `CRON_SECRET` in every environment where the job should run; it is required on preview and production (§5).
+- On the **Hobby plan** the job fires at some point within its hour, so "03:00" means 03:00 to 03:59.
+- No `maxDuration` is set, so the platform's default function time limit applies. A run cut off by it leaves the unfinished game with its marker and resumes the next day (§18.6).
+
+The first run on a real Blob store, the real `durationMs` and Blob's list order (§19) are verified when the app is deployed.
+
+### 18.10 Running the tests
+
+```sh
+pnpm vitest run --project node tests/retention
+pnpm vitest run --project node tests/retention --reporter=verbose   # shows the memory and file runs
+```
+
+`pnpm test` and CI include the folder. Fixtures write the real key layout (marker, `meta.json`, commits, `head.json`, optionally `scores/final.json`) straight into the store. The store-level suites run against both `MemoryObjectStore` and `FileObjectStore` (a temporary directory).
+
+| File | Protects |
+|---|---|
+| `core.test.ts` | The cutoff table (365 days, leap year, time of day), the marker walk and its early stop, deletion of exactly the expired games, marker deleted last, no `delete` when nothing expired, skipped markers, the store-call budget for one game, a marker with no keys left. |
+| `limits.test.ts` | The batch cap (runs of 2, 2, 1, 0 and the exact-cap case), failure then resume, the 10,000-round guard (memory only), option `RangeError`s. |
+| `handler.test.ts` | Authentication (six bad headers, secret unset), the check order, the 500 and its log line, overlapping runs, the `info` line, the default deps and the injected clock. |
+| `end-to-end.test.ts` | A game created through the real service is found, deleted and answers 404 afterwards, so the key layout the manager writes is the layout the job walks. |
+| `structure.test.ts` | `vercel.json`, the route's exports, the import list and the secret handling of the cleanup code. |
+
+`tests/retention/support/fixtures.ts` holds the helpers: `storeMatrix`, `gameId(n)`, `makeGameKeys`, `snapshot`, `wrap`, and the fault injectors `failOnNthList` and `staleListing`.
+
+### 18.11 Trying the job locally
+
+This walks the whole cycle on the file store: create a game, make it look old, call the job and check that it is gone. It needs `curl` and `jq`, and port 3000 free. The marker's day is the UTC date, hence `date -u`.
+
+1. In one terminal, start the server on a fresh directory with a short retention:
+
+   ```sh
+   DIR=/tmp/podrida
+   rm -rf $DIR && FILE_STORE_DIR=$DIR CRON_SECRET=local-test-secret RETENTION_DAYS=1 pnpm dev
+   ```
+
+2. In a second terminal, create a game and keep its id and seat token:
+
+   ```sh
+   DIR=/tmp/podrida
+   curl -s -X POST localhost:3000/api/games -H 'Content-Type: application/json' \
+     -d '{"humanName":"Ana","aiCount":3}' > /tmp/create.json
+   ID=$(jq -r .gameId /tmp/create.json); TOKEN=$(jq -r .seatToken /tmp/create.json)
+   find $DIR -type f
+   ```
+
+   The listing shows `games/$ID/meta.json`, `games/$ID/head.json`, `games/$ID/commits/00000000.json` and `index/created/<today, UTC>/$ID`.
+
+3. Make the game look old by renaming its marker folder:
+
+   ```sh
+   mv $DIR/index/created/$(date -u +%F) $DIR/index/created/2020-01-01
+   ```
+
+4. Call the route without the secret. It answers `401` with `{"error":{"code":"unauthorized","message":"Missing or invalid seat token"}}`:
+
+   ```sh
+   curl -i localhost:3000/api/cron/cleanup
+   ```
+
+5. Call it with the secret. It answers `200` with `{"gamesDeleted":1,"capReached":false,"skippedMarkers":0}`, and the server prints one `{"route":"cron/cleanup","status":200,…}` line:
+
+   ```sh
+   curl -i -H 'Authorization: Bearer local-test-secret' localhost:3000/api/cron/cleanup
+   ```
+
+6. Check the store. No file remains. The file store leaves the empty folders behind (for example `games/$ID/commits/`), so "no file remains" is the check, not "the folder is gone":
+
+   ```sh
+   find $DIR -type f      # prints nothing
+   ```
+
+7. Read the game. It answers `404` with `{"error":{"code":"game_not_found","message":"Game not found"}}`:
+
+   ```sh
+   curl -i -H "Authorization: Bearer $TOKEN" localhost:3000/api/games/$ID
+   ```
+
+8. Optional: repeat step 5. The answer is `{"gamesDeleted":0,…}`, because the job is idempotent.
+9. Stop the server with Ctrl-C and check that nothing listens on port 3000 (`lsof -i :3000`).
+
+### 18.12 Gotchas and limitations
+
+- **Blob's list order is assumed, not yet verified.** The early stop relies on `list` returning keys in ascending order across pages (§13.7). If a real Blob store orders them differently, the job could stop before an expired marker; it would then need a different walk. This is checked on the real store at deployment.
+- **A partly deleted game answers 404.** Retention does not fence requests in flight, so a client that touches a game while the job deletes it can get `game_not_found` (§16.2). It takes activity on a year-old game, so it is accepted.
+- **A game without a marker is never deleted.** Only a caller bug writes one (§14.12); the job finds games through the markers and does not scan `games/`.
+- **A logged store error may contain key paths.** The `error` line carries the original error's message, and a store message names the key, so it can contain a game id. The response body never carries it.
+- **The cap, the schedule and the cutoff timezone are constants.** There is no dry run, manual trigger, admin page or alert; a failed run shows up as a failed cron run in Vercel's logs.
+- **A throw from the log sink after a completed run** is reported as a 500 even though the deletions are done.
+
+---
+
+## 19. Known limitations
 
 - **Configuration is validated on the first API request, not at server startup.** The service factory calls `getConfig()` lazily (§16.5), so a misconfigured deployment starts, and its first request answers 500 with a `ConfigError` error line in the logs. Building at module load would break `next build` instead.
 - **Blob credentials are checked by `createObjectStore`, not by `loadConfig`** (§13.3), so a `blob` configuration without them is reported when the store is first built, not at startup.
@@ -2268,4 +2474,10 @@ Then open `http://<LAN IP>:3000` on the phone (allow incoming connections for No
 - **The layer rule does not check dynamic `import()` or `require()`.** Use static `import` statements.
 - **The UI has no automated real-browser test.** Layout at phone width and play in Firefox and Safari are checked by hand (§17.9); the rest of the UI is tested in jsdom (§17.8).
 - **No move-latency measurement on Vercel Blob yet** ([`architecture.md`](./architecture.md) §11).
-- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12, **service limitations** in §15.11, **HTTP API limitations** in §16.12, **UI limitations** in §17.10.
+- **Retention runs under the platform's default function time limit.** The cleanup route sets no `maxDuration` (§18.9). A run that is cut off leaves the unfinished game with its marker, and the next day's run resumes it.
+- **The cleanup walk assumes Vercel Blob lists keys in ascending order.** This is the same assumption as the storage limit in §13.7, unverified on a real store until the app is deployed; if it is wrong, the early stop could skip expired markers (§18.12).
+- **Orphan games without an index marker are never deleted by retention.** The job finds games only through their markers (§18.4, §14.12).
+- **A game that retention is deleting answers 404** while it is partly deleted (§18.12).
+- **The file store leaves empty folders after a delete.** After a cleanup, `games/<id>/commits/` can remain on disk with no file in it; no key remains (§18.11).
+- **A store error message logged on a cleanup 500 may contain key paths**, hence game ids (§18.2). The response never contains it.
+- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12, **service limitations** in §15.11, **HTTP API limitations** in §16.12, **UI limitations** in §17.10, **retention limitations** in §18.12.
