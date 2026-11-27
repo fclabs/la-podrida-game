@@ -228,3 +228,5 @@ out/
 coverage/
 *.tsbuildinfo
 next-env.d.ts
+.vercel
+.env*
