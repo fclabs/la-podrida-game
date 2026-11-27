@@ -48,3 +48,10 @@
 **Decision**: `deps.now()` is read right after `getStore` (start), once for `runCleanup`'s `now`, and once after (end); `Math.round(end - start)`. The `now` passed to `runCleanup` is a separate call, so a clock queue in tests sees three reads.
 **Rejected**: timing from the request start (includes auth and config).
 **Consequences**: with a fixed clock `durationMs` is 0.
+
+## D-008: VC-1022 is documented as "no key remains", not "directory gone"  (Iteration 4)
+
+**Context**: The manual run showed `FileObjectStore.delete` removes files but leaves empty directories (`games/<id>/commits`), so the spec's wording "`games/<id>` no longer exists" is literally false on the file store.
+**Decision**: MANUAL-CHECKS.md checks `find <dir> -type f` is empty and records the deviation; the docs iteration uses the same wording. No `src/` change (out of scope; spec 05 is frozen).
+**Rejected**: pruning empty directories (touches `src/storage`); marking VC-1022 FAIL (behaviour is correct, only the wording is off).
+**Consequences**: `verify-spec` should accept the recorded deviation or amend the spec text.

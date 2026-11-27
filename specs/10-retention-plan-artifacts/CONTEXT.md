@@ -1,9 +1,14 @@
-# CONTEXT: Phase 10 retention (state after Iteration 3)
+# CONTEXT: Phase 10 retention (state after Iteration 4)
 
 ## Current state
-Iterations 1-3 done: `runCleanup` (walk, delete, batch cap, round limit, option validation, `CleanupFailedError`) and `cleanupHandler` (auth, summary, failure reporting, logging) with `defaultCleanupDeps`. Not built yet: the route file and `vercel.json` (4); docs (5). Nothing under `src/` has changed.
+Iterations 1-4 done: `runCleanup`, `cleanupHandler`, `defaultCleanupDeps`, the route `GET /api/cron/cleanup`, the daily cron in `vercel.json`, the end-to-end test and the static layering/secret tests. VC-1022 was run by hand (PASS, `MANUAL-CHECKS.md`). Not built yet: docs (5). Nothing under `src/` or `package.json` has changed (`git diff main -- src` is empty).
 
 ## File map
+- `app/api/cron/cleanup/route.ts`: `export const GET = (req: Request) => cleanupHandler(req, defaultCleanupDeps);` (only export).
+- `vercel.json`: `$schema`, `framework: nextjs`, `crons: [{ path: '/api/cron/cleanup', schedule: '0 3 * * *' }]`.
+- `tests/retention/structure.test.ts`: VC-1014 and VC-1018 (static; regex over import specifiers; line scan of secret identifiers; no store matrix).
+- `tests/retention/end-to-end.test.ts`: VC-1017 (real `GameService` via `makeApi`/`createGameVia`, clock 2028-11-23, `getGameHandler` 404, empty store).
+- `specs/10-retention-plan-artifacts/MANUAL-CHECKS.md`: VC-1022 steps and results table.
 - `app/api/_lib/cleanup.ts`: `runCleanup`, `CleanupFailedError`, constants, `CleanupDeps`, `cleanupHandler`, `defaultCleanupDeps`, plus private helpers `isCalendarDay`, `parseMarkerKey`, `deleteGameKeys`, `sha256`, `isAuthorized`, `describeError`.
 - `tests/retention/handler.test.ts`: VC-1000, 1001, 1008, 1012, 1013, 1015 and extras; helpers `configWith(over)`, `makeDeps(store, config?)` (returns `{ deps, lines, getStoreCalls }`), `call(deps, authHeader?)`.
 - `tests/retention/limits.test.ts`: VC-1006, VC-1007 (store part), RangeError and wrapping tests on both stores; VC-1011 on memory only.
@@ -63,10 +68,13 @@ Note `make()` is async (returns a Promise of `MadeStore`).
 - Tests: fixed `now`, explicit days, test names cite the VC; format with `pnpm format`.
 
 ## Commands
+`pnpm build` lists `ƒ /api/cron/cleanup` (dynamic). Manual local try-out: `MANUAL-CHECKS.md`.
 `pnpm vitest run --project node tests/retention` (add `--reporter=verbose` to see memory/file), `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm format`.
 
 ## Known gaps
-- No route file, `vercel.json` cron entry, docs yet (Iterations 4-5).
+- Docs not written yet (Iteration 5).
+- `FileObjectStore.delete` leaves empty directories, so after a cleanup `games/<id>/commits/` exists on disk with no file (D-008); no key remains.
+- The Vercel cron firing, `CRON_SECRET` on the real project and Blob list ordering are unverified (Phase 11). No `maxDuration`: the platform default time limit applies; a cut-off run resumes the next day.
 - The logged `errorMessage` is the original store error's message (<= 500 chars) and may contain store key paths, hence game ids (spec 05: messages carry the key). The spec asks for the original message, so it is logged as is; the response body never carries it.
 - `cleanupHandler` does not catch a throw from `deps.log` inside the success path separately: it would be logged as an error and answer 500 (the run itself already completed).
 - The walk assumes ascending list order (spec assumption; Blob unverified).
