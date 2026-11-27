@@ -7,7 +7,7 @@ import { FileObjectStore } from '@/src/storage/file-store';
 import { MemoryObjectStore } from '@/src/storage/memory-store';
 import type { ObjectStore } from '@/src/storage/object-store';
 import { commitKey, finalScoresKey, headKey, indexCreatedKey, metaKey } from '@/src/state/keys';
-import { RecordingStore } from '../../unit/state/support/store-wrappers';
+import { RecordingStore, type StoreHooks } from '../../unit/state/support/store-wrappers';
 
 const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
 
@@ -84,4 +84,33 @@ export async function snapshot(store: ObjectStore): Promise<[string, string][]> 
 /** A `RecordingStore` around `store`. */
 export function wrap(store: ObjectStore): RecordingStore {
   return new RecordingStore(store);
+}
+
+/** Hooks that throw `Error('injected')` on the n-th (1-based) `list` of `prefix`; all else delegates. */
+export function failOnNthList(prefix: string, n: number): Partial<StoreHooks> {
+  let seen = 0;
+  return {
+    list: async ({ prefix: p, opts }, inner) => {
+      if (p === prefix && ++seen === n) throw new Error('injected');
+      return inner.list(p, opts);
+    },
+  };
+}
+
+/**
+ * Hooks whose `list` of `prefix` always returns the first key it ever saw there, so a delete is
+ * accepted but the listing never empties. Other prefixes and methods delegate.
+ */
+export function staleListing(prefix: string): Partial<StoreHooks> {
+  let first: string | undefined;
+  return {
+    list: async ({ prefix: p, opts }, inner) => {
+      if (p !== prefix) return inner.list(p, opts);
+      if (first === undefined) {
+        const { keys } = await inner.list(p, opts);
+        first = keys[0];
+      }
+      return { keys: first === undefined ? [] : [first] };
+    },
+  };
 }
