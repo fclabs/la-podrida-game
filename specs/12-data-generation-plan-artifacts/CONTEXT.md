@@ -1,16 +1,19 @@
-# CONTEXT — Spec 12 data generation (state after Iteration 4)
+# CONTEXT — Spec 12 data generation (state after Iteration 5)
 
 ## Current state
 - Spec start commit (HEAD before any Phase 12 change): `af777e04fcf3d8b751444c48770134c470622a9b`.
-- Iteration 1 done: `pnpm generate-data` exists with full argument validation; `run` and `validate`
-  are still **stubs** that print `generate-data: <subcommand> is not implemented yet` to stderr and
-  exit 1 (later iterations replace them).
+- Iteration 1 done: `pnpm generate-data` exists with full argument validation; `validate` is still a
+  **stub** that prints `generate-data: validate is not implemented yet` to stderr and exits 1.
 - Iteration 2 done: `decisions` row schemas and the observing recorder exist.
 - Iteration 3 done: outcome labels, `games`/`hands` rows, the FR-1212 checks 1-5 and the sampled
   replay (FR-1213) exist as `playRecordedGame`; it returns rows in memory, nothing is written to disk.
 - Iteration 4 done: gzip JSONL sinks, the manifest schema/helpers and `processShard` exist; a shard
   can be written to disk in-process (no workers, no `run` command yet). Failed-shard cleanup of
   `.tmp` files is NOT done (Iteration 6); `processShard` leaves them in place.
+- Iteration 5 done: `pnpm generate-data run` works end to end with a worker pool and prints the
+  4-line summary; exit 0 when every shard is complete, else 1 (a `failed` shard is recorded in the
+  manifest but its files are NOT cleaned up and unexpected errors/worker deaths just reject the run;
+  Iteration 6). No resume yet: `run` into an existing run id overwrites the manifest (Iteration 8).
 - A-2 proven: a `worker_threads` worker started with `execArgv: ['--import', 'tsx']` from a tsx
   process loads `.ts` and resolves `@/`.
 - Baseline of `pnpm --silent simulate --games 200 --seed sim` is in `baseline-simulate.txt`
@@ -18,11 +21,13 @@
 
 ## File map
 - `package.json` — only change: script `"generate-data": "tsx scripts/generate-data.ts"`.
-- `scripts/generate-data.ts` — entry; dispatches on the first argument; UsageError -> stderr line.
+- `scripts/generate-data.ts` — entry; dispatches on the first argument; UsageError -> stderr line; `run` -> `executeRun` (git info read once here via `git rev-parse HEAD` / `git status --porcelain`); `validate` stub.
 - `scripts/datagen/constants.ts` — `SCHEMA_VERSION`, `GENERATOR_VERSION`, FR-1203 defaults, `DEFAULT_OUT`.
 - `scripts/datagen/args.ts` — `parseRunArgs`, `parseValidateArgs`, `UsageError`, option types.
-- `scripts/datagen/worker.ts` — worker entry; only answers `{kind:'selftest', seed}` so far.
-- `scripts/datagen/worker-host.ts` — `startWorker`.
+- `scripts/datagen/worker.ts` — worker entry: answers `selftest` and `shard` messages (never mentions the manifest, VC-1251).
+- `scripts/datagen/worker-host.ts` — `startWorker` and the message types `ShardRequest`/`ShardResponse`/`ShardErrorResponse`.
+- `scripts/datagen/run.ts` — `executeRun`, the pool, `formatSummary`, `oneDecimal`.
+- `tests/unit/datagen/run.test.ts` — VC-1201/1203/1204/1205/1227/1228/1229/1232/1249 at CLI level, summary format.
 - `scripts/datagen/schema.ts` — Zod schemas `PendingDecisionRowSchema`, `OutcomeColumnsSchema`, `DecisionRowSchema`, `GamesRowSchema`, `HandsRowSchema`, and the manifest: `ShardFileSchema`, `ManifestParamsSchema`, `ShardEntrySchema`, `ManifestSchema` (+ types).
 - `scripts/datagen/sinks.ts` — `createJsonlGzipSink`.
 - `scripts/datagen/manifest.ts` — `planShards`, `newManifest`, `writeManifestAtomic`, `readManifest`, shard naming helpers.
@@ -54,8 +59,19 @@ DEFAULT_SHARD_SIZE = 1000; DEFAULT_REPLAY_EVERY = 100; DEFAULT_STRATEGY = 'rando
 // scripts/datagen/worker-host.ts
 startWorker(entryFile: string | URL, workerData?: unknown): Worker
   // = new Worker(entryFile, { execArgv: ['--import', 'tsx'], workerData })
-// scripts/datagen/worker.ts message protocol (iteration 1):
+// scripts/datagen/worker.ts message protocol:
 //   in  { kind: 'selftest', seed }  ->  out { kind: 'selftest-result', totals: number[] }
+//   in  ShardRequest { kind:'shard', params: ShardParams, shard, runDir, git_commit, git_dirty }
+//       -> out ShardResponse { kind:'shard-result', shard, result: ShardResult }   (complete entry or {status:'failed',seed,message})
+//       -> or ShardErrorResponse { kind:'shard-error', shard, message }  (any non-GameFailure error thrown by processShard)
+//   A worker handles one shard message at a time and stays alive for the next (the pool reuses it).
+//   The worker builds `stamp.now = () => new Date().toISOString()`; hooks are not passed yet (Iteration 6).
+// scripts/datagen/run.ts
+executeRun(options: RunOptions, deps: { now: () => string; gitInfo: {git_commit,git_dirty}; write?: (s)=>void }):
+  Promise<{ manifest: Manifest; exitCode: 0|1 }>
+formatSummary(manifest, skipped: number, durationSeconds: number): string   // the 4 lines + trailing "\n"; reused by resume
+oneDecimal(n): string                                                       // never "-0.0"
+// generate-data.ts: `process.exitCode = (await executeRun(parseRunArgs(rest), { now: () => new Date().toISOString(), gitInfo: readGitInfo() })).exitCode`
 // tests/unit/datagen/helpers.ts
 runCli(args: string[], opts?: { env?: Record<string,string>; cwd?: string }): Promise<{ code: number|null; stdout: string; stderr: string }>
 makeTempDir(): string        // fresh empty dir under os.tmpdir(), prefix "datagen-"
@@ -178,12 +194,18 @@ Keys of every row are the schema's order (tests check this against the schemas' 
 - Node here is v26 (engines says 24); pnpm prints a harmless warning.
 
 ## Known gaps
-- `run` / `validate` are stubs; worker only has the selftest message; no pool, no `executeRun`.
+- `validate` is a stub.
+- Pool (D-014): `min(workers, shards)` workers started with `startWorker(worker.ts)`; one shared queue (`shift()` in
+  shard order); a worker that answers gets the next shard; the main thread writes the manifest in `record()`
+  (serialised promise chain) right after each result; the first `shard-error`, worker `error` or unexpected
+  `exit` rejects `executeRun` (workers are terminated in `finally`). `skipped` is always 0 (resume: Iteration 8).
+  `executeRun` does mkdir -p of `<out>/<run_id>` (resolved against cwd) and rewrites any existing manifest.
 - Failed-shard cleanup (deleting `.tmp`/final files) and start-up `*.tmp` cleanup are not implemented (Iterations 6, 8).
 - `processShard` rethrows non-`GameFailure` errors (no seed attached); Iteration 6 converts them to failures.
 - The manifest `ShardEntry` 'failed' shape is `error: {seed, message}`; `ShardFailure` (processShard) is flat; the caller maps.
 - `rec.rows()` returns the live array; `buildTables` copies into new `DecisionRow` objects.
 - Rows are not schema-parsed inside `playRecordedGame` (perf); the sinks/validate iterations parse where needed.
+- The manifest `failed` entry is built from the worker's `{seed,message}` in `run.ts` (error.seed string; `null` only after Iteration 6).
 - Hook modules from the environment (`GENERATE_DATA_TEST_HOOKS`) are not loaded yet (Iteration 6).
 - Replay compares move ids rebuilt from `bid-made`/`card-played` events of the replay result.
 - `--out` default for `validate` is `.data/datasets` (I-1).

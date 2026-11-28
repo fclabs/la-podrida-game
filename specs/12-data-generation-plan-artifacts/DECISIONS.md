@@ -68,3 +68,21 @@ Consequences: Iteration 5's worker message carries the params and stamp fields; 
 ## D-013: Only `GameFailure` becomes a failure result in Iteration 4 (Iteration 4)
 Decision: following the plan scope ("on a `GameFailure`"), `processShard` returns a failure only for `GameFailure`; other errors abort the sinks and propagate unchanged. Iteration 6 widens it (seed from `gameSeed`).
 Consequences: no `.tmp` cleanup yet in either case.
+
+## D-014: Pool = long-lived workers fed from one shared queue (Iteration 5)
+Context: FR-1216 wants at most W workers, each taking the next unprocessed shard; a shard by exactly one worker.
+Decision: `executeRun` starts `min(workers, shards)` workers once (`startWorker(worker.ts)`). The main thread owns a queue of shard numbers; each worker slot posts a `ShardRequest` for `queue.shift()` and, when the worker answers, records the result in the manifest and posts the next one, until the queue is empty. Workers are reused for many shards and terminated in `finally`. The unit of work is one message per shard, so no shard can be taken twice.
+Rejected: one worker per shard (start-up cost of tsx per shard); workers pulling from a shared array (needs SharedArrayBuffer/locks).
+Consequences: shard order of completion varies with workers, but the dataset does not (rows depend only on the seed).
+
+## D-015: Message protocol and manifest ownership (Iteration 5)
+Decision: types live in worker-host.ts. `ShardRequest {kind:'shard', params, shard, runDir, git_commit, git_dirty}` -> `ShardResponse {kind:'shard-result', shard, result}` or `ShardErrorResponse {kind:'shard-error', shard, message}`. The worker builds the clock itself. The main thread maps a `{status:'failed',seed,message}` result to the manifest entry `{shard,games,status:'failed',error:{seed,message}}`; `record()` replaces the entry and chains an atomic rewrite (serialised). worker.ts never imports or mentions the manifest.
+Rejected: worker writing results to disk itself (BR-1206); passing `now` (functions are not cloneable).
+Consequences: Iteration 6 extends `shard-error` into a failure with `seed` (via `gameSeed`) and handles worker exit.
+
+## D-016: Interim failure behaviour (Iteration 5)
+Decision: failed shards (GameFailure) are recorded and the run exits 1 after the summary; a `shard-error`, worker `error` or unexpected `exit` rejects `executeRun` (uncaught -> nonzero exit, no summary). No file cleanup. Both are replaced by FR-1217 handling in Iteration 6.
+Consequences: nothing in this iteration depends on it; no test exercises it.
+
+## D-017: `run` test must not use the default `--out` (Iteration 5)
+Decision: the old args.test "valid run hits the stub" was removed (it would now run 1000 games into `.data/datasets`); CLI run tests always pass `--out <makeTempDir()>`.

@@ -6,16 +6,40 @@
 //   pnpm generate-data validate --run-id <id> [--out <dir>]
 //
 // An invalid command line prints one line `generate-data: <problem>` to stderr and exits 1.
+import { execFileSync } from 'node:child_process';
 import { UsageError, parseRunArgs, parseValidateArgs } from './datagen/args';
+import { type GitInfo, executeRun } from './datagen/run';
 
-function main(argv: string[]): number {
+/** `git rev-parse HEAD` and `git status --porcelain`, once; `"unknown"` / dirty when git fails. */
+function readGitInfo(): GitInfo {
+  const git = (args: string[]): string =>
+    execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  let git_commit = 'unknown';
+  let git_dirty = false;
+  try {
+    git_commit = git(['rev-parse', 'HEAD']).trim() || 'unknown';
+  } catch {
+    // git unavailable or not a repository
+  }
+  try {
+    git_dirty = git(['status', '--porcelain']).trim() !== '';
+  } catch {
+    // leave false
+  }
+  return { git_commit, git_dirty };
+}
+
+async function main(argv: string[]): Promise<number> {
   const [subcommand, ...rest] = argv;
   try {
     switch (subcommand) {
       case 'run':
-        parseRunArgs(rest);
-        process.stderr.write('generate-data: run is not implemented yet\n');
-        return 1;
+        return (
+          await executeRun(parseRunArgs(rest), {
+            now: () => new Date().toISOString(),
+            gitInfo: readGitInfo(),
+          })
+        ).exitCode;
       case 'validate':
         parseValidateArgs(rest);
         process.stderr.write('generate-data: validate is not implemented yet\n');
@@ -34,4 +58,4 @@ function main(argv: string[]): number {
   }
 }
 
-process.exitCode = main(process.argv.slice(2));
+process.exitCode = await main(process.argv.slice(2));

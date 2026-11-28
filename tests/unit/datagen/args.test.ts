@@ -142,15 +142,6 @@ describe('generate-data CLI usage errors (VC-1202)', () => {
     120_000,
   );
 
-  it('a valid run command line hits the not-implemented stub', async () => {
-    const result = await runCli(['run', '--run-id', 'r1']);
-    expect(result).toEqual({
-      code: 1,
-      stdout: '',
-      stderr: 'generate-data: run is not implemented yet\n',
-    });
-  }, 120_000);
-
   it('a valid validate command line hits the not-implemented stub', async () => {
     const result = await runCli(['validate', '--run-id', 'r1']);
     expect(result).toEqual({
