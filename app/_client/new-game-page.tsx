@@ -8,6 +8,7 @@ import { useClientDeps, WithClientDeps } from './deps';
 import { keepUpdate } from './kept-update';
 import { setMemorySlot } from './memory-slot';
 import styles from './new-game-page.module.css';
+import { RulesButton } from './rules-button';
 import { type GameSlot, readSlot, writeSlot } from './slot';
 
 const AI_COUNTS = [2, 3, 4, 5] as const;
@@ -102,6 +103,9 @@ function NewGameForm() {
           </p>
         )}
       </form>
+      <p>
+        <RulesButton />
+      </p>
     </main>
   );
 }
