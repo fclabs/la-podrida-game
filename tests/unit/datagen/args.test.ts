@@ -142,12 +142,13 @@ describe('generate-data CLI usage errors (VC-1202)', () => {
     120_000,
   );
 
-  it('a valid validate command line hits the not-implemented stub', async () => {
-    const result = await runCli(['validate', '--run-id', 'r1']);
+  it('a valid validate command line reaches validate (no run in the output directory)', async () => {
+    const tmp = makeTempDir();
+    const result = await runCli(['validate', '--run-id', 'r1', '--out', tmp]);
     expect(result).toEqual({
       code: 1,
       stdout: '',
-      stderr: 'generate-data: validate is not implemented yet\n',
+      stderr: `generate-data: no run "r1" in ${tmp}\n`,
     });
   }, 120_000);
 });

@@ -9,6 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { UsageError, parseRunArgs, parseValidateArgs } from './datagen/args';
 import { type GitInfo, executeRun } from './datagen/run';
+import { executeValidate } from './datagen/validate';
 
 /** `git rev-parse HEAD` and `git status --porcelain`, once; `"unknown"` / dirty when git fails. */
 function readGitInfo(): GitInfo {
@@ -41,9 +42,7 @@ async function main(argv: string[]): Promise<number> {
           })
         ).exitCode;
       case 'validate':
-        parseValidateArgs(rest);
-        process.stderr.write('generate-data: validate is not implemented yet\n');
-        return 1;
+        return (await executeValidate(parseValidateArgs(rest))).exitCode;
       case undefined:
         throw new UsageError('missing subcommand (expected "run" or "validate")');
       default:

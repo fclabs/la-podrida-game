@@ -167,6 +167,39 @@ function replayCheck(
   replayLoop: RunAiLoopFn,
   fail: (message: string) => never,
 ): void {
+  replayAgainst({
+    preset: options.preset,
+    strategies: options.strategies,
+    seed,
+    recordedMoveIds: tables.decisions.map((r) => r.chosen_move_id),
+    recordedTotals: tables.games.final_total_by_seat,
+    replayLoop,
+    fail,
+  });
+}
+
+export interface ReplayAgainstOptions {
+  preset: string;
+  /** One strategy name per seat (`games.strategy_by_seat`); seats are rebuilt as `ai-<k>`. */
+  strategies: readonly string[];
+  /** The game's seed (`R-s-i`), also used as its `gameId`. */
+  seed: string;
+  /** The recorded `chosen_move_id` of every decision, in play order. */
+  recordedMoveIds: readonly string[];
+  /** The recorded final totals per seat. */
+  recordedTotals: readonly number[];
+  replayLoop?: RunAiLoopFn;
+  /** Called with the message of the first difference; must throw. */
+  fail: (message: string) => never;
+}
+
+/**
+ * Replays a game from its seed, seats and strategies without recording and compares every chosen
+ * move in order and the final totals with the recorded ones. Shared by the generator (FR-1213) and
+ * `validate` (FR-1221 check 7).
+ */
+export function replayAgainst(options: ReplayAgainstOptions): void {
+  const { seed, fail } = options;
   const initial = createGame({
     gameId: seed,
     rules: getPreset(options.preset),
@@ -174,9 +207,9 @@ function replayCheck(
     seed,
   }).state;
   const players = initial.seats.map((s) => createAiPlayer(s.seat, s.name, getStrategy(s.strategy)));
-  const replay = replayLoop(initial, players);
+  const replay = (options.replayLoop ?? runAiLoop)(initial, players);
   const replayed = moveIds(replay.events);
-  const recorded = tables.decisions.map((r) => r.chosen_move_id);
+  const recorded = options.recordedMoveIds;
   const n = Math.max(replayed.length, recorded.length);
   for (let step = 0; step < n; step++) {
     if (replayed[step] !== recorded[step]) {
@@ -187,7 +220,7 @@ function replayCheck(
     }
   }
   const totals = evaluate(replay.state).totals;
-  const expected = tables.games.final_total_by_seat;
+  const expected = options.recordedTotals;
   if (totals.length !== expected.length || totals.some((t, k) => t !== expected[k])) {
     fail(
       `replay: final totals differ (recorded ${expected.join(',')}, replayed ${totals.join(',')})`,

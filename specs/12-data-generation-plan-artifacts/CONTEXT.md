@@ -1,9 +1,8 @@
-# CONTEXT — Spec 12 data generation (state after Iteration 6)
+# CONTEXT — Spec 12 data generation (state after Iteration 7)
 
 ## Current state
 - Spec start commit (HEAD before any Phase 12 change): `af777e04fcf3d8b751444c48770134c470622a9b`.
-- Iteration 1 done: `pnpm generate-data` exists with full argument validation; `validate` is still a
-  **stub** that prints `generate-data: validate is not implemented yet` to stderr and exits 1.
+- Iteration 1 done: `pnpm generate-data` exists with full argument validation.
 - Iteration 2 done: `decisions` row schemas and the observing recorder exist.
 - Iteration 3 done: outcome labels, `games`/`hands` rows, the FR-1212 checks 1-5 and the sampled
   replay (FR-1213) exist as `playRecordedGame`; it returns rows in memory, nothing is written to disk.
@@ -18,6 +17,9 @@
   shard's files (final and `.tmp`) are deleted by the main thread, the shard is recorded `failed`, a
   replacement worker is started if shards remain; the run prints the summary and exits 1. Hook modules
   from `GENERATE_DATA_TEST_HOOKS` are loaded by the worker. No resume yet (Iteration 8).
+- Iteration 7 done: `pnpm generate-data validate` runs the seven checks of FR-1221 (streaming), prints
+  the distribution report (status `OK`, or `INCOMPLETE` + exit 1 for runs with non-complete shards) and
+  exits 1 on the first failing check. Resume and the parameter guard are still missing (Iteration 8).
 - A-2 proven: a `worker_threads` worker started with `execArgv: ['--import', 'tsx']` from a tsx
   process loads `.ts` and resolves `@/`.
 - Baseline of `pnpm --silent simulate --games 200 --seed sim` is in `baseline-simulate.txt`
@@ -25,7 +27,7 @@
 
 ## File map
 - `package.json` — only change: script `"generate-data": "tsx scripts/generate-data.ts"`.
-- `scripts/generate-data.ts` — entry; dispatches on the first argument; UsageError -> stderr line; `run` -> `executeRun` (git info read once here via `git rev-parse HEAD` / `git status --porcelain`); `validate` stub.
+- `scripts/generate-data.ts` — entry; dispatches on the first argument; UsageError -> stderr line; `run` -> `executeRun` (git info read once here via `git rev-parse HEAD` / `git status --porcelain`); `validate` -> `executeValidate`.
 - `scripts/datagen/constants.ts` — `SCHEMA_VERSION`, `GENERATOR_VERSION`, FR-1203 defaults, `DEFAULT_OUT`.
 - `scripts/datagen/args.ts` — `parseRunArgs`, `parseValidateArgs`, `UsageError`, option types.
 - `scripts/datagen/worker.ts` — worker entry: answers `selftest` and `shard` messages; loads hooks once at start; calls `onShard` around a shard (never mentions the manifest, VC-1251).
@@ -40,7 +42,10 @@
 - `scripts/datagen/manifest.ts` — `planShards`, `newManifest`, `writeManifestAtomic`, `readManifest`, shard naming helpers.
 - `scripts/datagen/shard.ts` — `processShard`.
 - `scripts/datagen/labels.ts` — `buildTables` (labels, `hands` rows, `games` row).
-- `scripts/datagen/game.ts` — `gameSeed`, `GameFailure`, `playRecordedGame`.
+- `scripts/datagen/game.ts` — `gameSeed`, `GameFailure`, `playRecordedGame`, `replayAgainst` (shared replay code).
+- `scripts/datagen/validate.ts` — `executeValidate`, `ValidationError`, `CHECK_NAMES`.
+- `scripts/datagen/report.ts` — `createReportAccumulator`, `formatReport`, `oneDecimal`, `ReportStats`.
+- `tests/unit/datagen/validate.test.ts` — VC-1233..1237 at CLI level, report formatting.
 - `scripts/datagen/cards.ts` — `cardIds`, `hiddenStockLeft`.
 - `scripts/datagen/recorder.ts` — `createRecorder`.
 - `tests/unit/datagen/recorder.test.ts`, `schema.test.ts` — VC-1207..1216, BR-1208.
@@ -174,6 +179,41 @@ processShard({ params, shard, runDir, hooks?, stamp }): Promise<ShardResult>
 ShardResult = CompleteShardEntry | { status: 'failed', seed: string, message: string }
 ```
 ```ts
+// scripts/datagen/game.ts (added in Iteration 7; playRecordedGame's replay now calls it)
+replayAgainst({ preset, strategies, seed, recordedMoveIds, recordedTotals, replayLoop?, fail }): void
+  // rebuilds seats `ai-<k>` (playerId = name = `ai-<k>`) with strategy names `strategy_by_seat[k]`, gameId = seed =
+  // the games row's seed, plays the real runAiLoop WITHOUT recording, compares every chosen move id in order and the
+  // final totals; `fail(message)` must throw (generator: GameFailure; validate: wrapped as check 7).
+// scripts/datagen/validate.ts
+executeValidate(options: ValidateOptions, io?: { out?, err? }): Promise<{ exitCode: 0 | 1 }>
+  // writes to process.stdout/stderr by default. Run dir = path.join(options.out, options.run_id).
+class ValidationError extends Error { check: number /* 1..7 */ }   // message: `validate: check N (<name>): <detail>`
+CHECK_NAMES = ['manifest','files','rows','join','decisions per game','labels','replay']
+// scripts/datagen/report.ts
+createReportAccumulator(): { addGame(game: GamesRow, decisionCount), addHand(hand: HandsRow), stats(): ReportStats }
+formatReport(runId: string, status: 'OK' | 'INCOMPLETE', stats: ReportStats): string   // 6+ lines, trailing "\n"
+oneDecimal(n): string          // never "-0.0" (run.ts has its own identical copy)
+```
+Validate flow: `<out>/<id>/manifest.json` missing (dir or file) -> stderr `generate-data: no run "<id>" in <out>`
+(out as given), exit 1, stdout empty. Else check 1 (readManifest; any error), check 2 over every complete shard
+(stat, SHA-256 streamed, rows = gunzip line count), then per complete shard in order: streams games -> hands ->
+decisions through `createReadStream -> createGunzip -> readline`, parsing each line (check 3), joining (4),
+counting decisions (5), labels (6), and keeps only that shard's games/hands rows plus the move ids of replay-sampled
+games (index = last seed segment, `index % manifest.params.replay_every === 0`); the lowest failing check of a shard
+is reported after its streaming, then the replays (7). stderr is ONE line `generate-data: validate: check N (<name>): <detail>`:
+- 1 `manifest.json: <first zod/JSON problem>`; 2 `shard S <table>: file <path> is missing | N bytes, manifest says M |
+  SHA-256 <hex> differs from the manifest | N rows, manifest says M | cannot be read (<reason>)`;
+- 3 `shard S <table> line L: <problem>`; 4 `shard S: duplicate game <id> | hands row for unknown game <id> | decisions row for
+  unknown game <id>` or `shard S game <id>: N hands rows, n_hands is M`;
+- 5 `shard S game <id>: N decisions rows, expected E` (also `n_hands is M, the hand plan has K`, `no hand plan for <preset>`);
+- 6 `shard S game <id> hand H seat K: differs from the score engine` (`scoreHand(getPreset(preset), {handIndex, cardsPerPlayer,
+  dealer, trumpSuit: trump_card's last char, bids, tricks})` vs bid/tricks/made/points) or `hand H: cannot be scored (<RangeError>)`;
+  also `shard S game <id> step N: hand_* labels differ from the hands row (hand H) | final_total/final_place differ from the
+  games row | no hands row for hand H`, or `... hand H: T tricks won, C cards dealt`, `... seat K: hands points sum to X, final total is Y`;
+- 7 `shard S game <id>: replay: step N differs (recorded a, replayed b)` / `replay: final totals differ (...)`.
+Report accumulator: seat/strategy averages in order of first appearance; histogram line per distinct cards_dealt.
+
+```ts
 // scripts/datagen/hooks.ts  (worker side only; the main thread never reads the variable)
 HOOKS_ENV = 'GENERATE_DATA_TEST_HOOKS'
 interface HookModule { runAiLoop?(real) => fn; replayRunAiLoop?(real) => fn;
@@ -228,7 +268,9 @@ Keys of every row are the schema's order (tests check this against the schemas' 
 - Node here is v26 (engines says 24); pnpm prints a harmless warning.
 
 ## Known gaps
-- `validate` is a stub.
+- Validate (D-022): checks 3-7 run per shard, not each over the whole dataset, so a check-3 failure in shard 5 is not
+  reported before a check-4 failure in shard 0 (shard 0's is). Check 5 of FR-1212 is re-scored with `scoreHand` (D-026).
+  Validate does not compare manifest `run_id` with `--run-id`.
 - Pool (D-014, D-018): `min(workers, shards)` slots, each owning at most one live worker (`startWorker(worker.ts)`);
   one shared queue (`shift()` in shard order); the main thread writes the manifest in `record()` (serialised
   promise chain). Per shard `exchange()` resolves on the first of: shard-result (complete or failed), `shard-error`,

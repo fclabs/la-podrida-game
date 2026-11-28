@@ -106,3 +106,24 @@ Consequences: a throwing `onShard` or a hook-load error is a `shard-error` (seed
 Decision: `fixtures/hooks-configurable.ts` exports all four hooks and is inert unless the test sets its `HOOK_*` env vars (documented in CONTEXT.md); `hooks-empty.ts` exports `{}`. Tests identify games by `state.seed` (I-4).
 Consequences: later tests (resume, validate) reuse these to create failed shards.
 
+## D-022: Validate checks 1-2 over the manifest, checks 3-7 shard by shard (Iteration 7)
+Context: FR-1221 lists seven checks "in order"; running each over the whole dataset would gunzip every file up to seven times.
+Decision: check 1, then check 2 for all complete shards (hash + row count), then for each shard one streaming pass that applies checks 3-6 (failures collected per check number, the lowest one reported at the end of the shard) and finally the replays (7) of that shard.
+Rejected: one full pass per check (cost x5); stopping at the first failure of any check inside a shard (could hide a lower-numbered one).
+Consequences: across shards the reported failure is the first failing shard's lowest check.
+
+## D-023: Replay code shared through `replayAgainst`; hands check by consistency (Iteration 7)
+Decision: `game.ts` exports `replayAgainst` (seats from `strategy_by_seat`, recorded move ids + totals); `playRecordedGame`'s replay now calls it with identical messages. Plan files touched beyond the scope list: `game.ts` (export only, behaviour unchanged). Rejected: duplicating the replay loop.
+Note: the first version of check 6 used a consistency proxy for FR-1212 check 5; superseded by D-026.
+
+## D-024: Validate stderr wording and exit rules (Iteration 7)
+Decision: a failed check prints one line `generate-data: validate: check N (<name>): <detail>` (names in `CHECK_NAMES`); no report on stdout. INCOMPLETE (pending/failed shards present, complete shards pass) prints the report and exits 1; failure inside the complete shards of such a run prints the check line only. Exact texts are in CONTEXT.md.
+Consequences: Iteration 8 and the docs can quote these lines.
+
+## D-025: Report accumulator streams, `oneDecimal` duplicated (Iteration 7)
+Decision: `report.ts` holds `createReportAccumulator` (fed per game/hand, keeps counters only) and `formatReport(runId, status, stats)`, with its own `oneDecimal`; `run.ts` keeps its identical copy to avoid touching the run module. With no complete shards the report prints zeros and empty seat/strategy lists.
+
+## D-026: Check 6 re-scores every hand with `scoreHand` (Iteration 7, gate fix)
+Context: FR-1221.6 uses FR-1212 check 5, i.e. bid/tricks/made/points must equal the score engine's, so a self-consistent tampering must be caught.
+Decision: per `hands` row validate calls `scoreHand(getPreset(game.preset), { handIndex, cardsPerPlayer: cards_dealt, dealer, trumpSuit: trump_card.slice(-1), bids, tricks })` (only bids, tricks, cardsPerPlayer and scoring are read) and compares bid, tricks, made, points per seat; a RangeError is reported as check 6 `cannot be scored`. Also kept: tricks sum == cards_dealt, decision `hand_*`/`final_*` vs their rows, Σ points == `final_total_by_seat`. The `made == (bid == tricks)` proxy was removed (scoreHand covers it).
+Rejected: rebuilding a GameState for `evaluate`.
