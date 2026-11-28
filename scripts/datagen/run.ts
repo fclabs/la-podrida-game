@@ -1,12 +1,21 @@
 // The `run` command (spec 12 FR-1201, FR-1214..FR-1216): creates the run directory and the
 // initial manifest, processes the shards with a pool of workers and prints the run summary.
 // Only this (main) thread writes the manifest (BR-1206).
-import { mkdir, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Worker } from 'node:worker_threads';
-import type { RunOptions } from './args';
-import { newManifest, shardFilePaths, writeManifestAtomic } from './manifest';
+import { UsageError, type RunOptions } from './args';
+import { GENERATOR_VERSION, SCHEMA_VERSION } from './constants';
+import {
+  MANIFEST_FILE,
+  newManifest,
+  readManifest,
+  shardFilePaths,
+  writeManifestAtomic,
+} from './manifest';
 import type { CompleteShardEntry, Manifest, ShardEntry } from './schema';
 import { startWorker } from './worker-host';
 import type { ShardErrorResponse, ShardRequest, ShardResponse } from './worker-host';
@@ -90,6 +99,82 @@ export async function cleanupShardFiles(runDir: string, shard: number): Promise<
   return problems.length === 0 ? null : problems.join(', ');
 }
 
+/** Streams a file through SHA-256 (hex). */
+function sha256File(file: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    createReadStream(file)
+      .on('error', reject)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+/** True when the three files of a `complete` entry exist with the manifest's size and SHA-256. */
+async function shardFilesValid(runDir: string, entry: CompleteShardEntry): Promise<boolean> {
+  for (const file of Object.values(entry.files)) {
+    const target = path.join(runDir, file.path);
+    try {
+      if ((await stat(target)).size !== file.bytes) return false;
+      if ((await sha256File(target)) !== file.sha256) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** FR-1219: the first of the compared fields that differs (I-7 order), or `null`. */
+function firstDifference(options: RunOptions, manifest: Manifest): string | null {
+  const { params } = manifest;
+  if (options.preset !== params.preset) return 'preset';
+  if (options.players !== params.players) return 'players';
+  if (options.games !== params.games) return 'games';
+  if (options.shard_size !== params.shard_size) return 'shard-size';
+  if (options.strategies.join(',') !== params.strategies.join(',')) return 'strategies';
+  if (options.replay_every !== params.replay_every) return 'replay-every';
+  if (manifest.schema_version !== SCHEMA_VERSION) return 'schema_version';
+  if (manifest.generator_version !== GENERATOR_VERSION) return 'generator_version';
+  return null;
+}
+
+/** Deletes every `*.tmp` file under `dir`, recursively (FR-1214, I-5). */
+async function removeTmpFiles(dir: string): Promise<void> {
+  for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith('.tmp')) {
+      await rm(path.join(entry.parentPath, entry.name), { force: true });
+    }
+  }
+}
+
+/**
+ * Decides what `run` does with `runDir` before anything is written (FR-1219, FR-1220). Throws a
+ * `UsageError` (nothing changed on disk) when the directory has no manifest but is not empty, or
+ * when the manifest's parameters differ. Returns the manifest to resume, or `null` for a new run.
+ */
+async function openRun(options: RunOptions, runDir: string): Promise<Manifest | null> {
+  let names: string[];
+  try {
+    names = await readdir(runDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+  if (!names.includes(MANIFEST_FILE)) {
+    if (names.length > 0) {
+      const shown = path.join(options.out, options.run_id);
+      throw new UsageError(`run directory "${shown}" exists without a manifest`);
+    }
+    return null;
+  }
+  const manifest = await readManifest(runDir);
+  const different = firstDifference(options, manifest);
+  if (different !== null) {
+    throw new UsageError(`run "${options.run_id}" has a different ${different}`);
+  }
+  return manifest;
+}
+
 /** What became of one shard sent to one worker. */
 type Exchange =
   { complete: CompleteShardEntry } | { failure: { seed: string | null; message: string } };
@@ -141,23 +226,41 @@ function exchange(worker: Worker, request: ShardRequest): Promise<Exchange> {
 export async function executeRun(options: RunOptions, deps: RunDeps): Promise<RunOutcome> {
   const started = performance.now();
   const runDir = path.resolve(options.out, options.run_id);
-  await mkdir(runDir, { recursive: true });
+  const existing = await openRun(options, runDir); // may throw: nothing is changed before this
 
-  const manifest = newManifest({
-    run_id: options.run_id,
-    params: {
-      preset: options.preset,
-      players: options.players,
-      games: options.games,
-      shard_size: options.shard_size,
-      strategies: options.strategies,
-      replay_every: options.replay_every,
-    },
-    created_at: deps.now(),
-  });
+  await mkdir(runDir, { recursive: true });
+  let manifest: Manifest;
+  let skipped = 0;
+  const queue: number[] = [];
+  if (existing === null) {
+    manifest = newManifest({
+      run_id: options.run_id,
+      params: {
+        preset: options.preset,
+        players: options.players,
+        games: options.games,
+        shard_size: options.shard_size,
+        strategies: options.strategies,
+        replay_every: options.replay_every,
+      },
+      created_at: deps.now(),
+    });
+    queue.push(...manifest.shards.map((s) => s.shard));
+  } else {
+    // Resume (FR-1218): keep valid complete shards untouched, reset every other one to pending.
+    manifest = existing;
+    await removeTmpFiles(runDir);
+    for (const entry of manifest.shards) {
+      if (entry.status === 'complete' && (await shardFilesValid(runDir, entry))) {
+        skipped += 1;
+        continue;
+      }
+      manifest.shards[entry.shard] = { shard: entry.shard, games: entry.games, status: 'pending' };
+      queue.push(entry.shard);
+    }
+  }
   await writeManifestAtomic(runDir, manifest);
 
-  const queue = manifest.shards.map((s) => s.shard);
   let writing: Promise<void> = Promise.resolve();
   // Manifest rewrites are serialised so two shards finishing together never interleave.
   const record = (entry: ShardEntry): Promise<void> => {
@@ -216,7 +319,9 @@ export async function executeRun(options: RunOptions, deps: RunDeps): Promise<Ru
   }
 
   const seconds = (performance.now() - started) / 1000;
-  (deps.write ?? ((text) => void process.stdout.write(text)))(formatSummary(manifest, 0, seconds));
+  (deps.write ?? ((text) => void process.stdout.write(text)))(
+    formatSummary(manifest, skipped, seconds),
+  );
   const allComplete = manifest.shards.every((s) => s.status === 'complete');
   return { manifest, exitCode: allComplete ? 0 : 1 };
 }

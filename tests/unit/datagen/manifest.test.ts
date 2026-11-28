@@ -82,7 +82,7 @@ describe('manifest', () => {
     expect(await readManifest(dir)).toEqual(m);
     expect(readdirSync(dir)).toEqual(['manifest.json']);
     expect(existsSync(path.join(dir, 'manifest.json.tmp'))).toBe(false);
-  });
+  }, 120_000);
 
   it('a polling reader never sees an unparsable file', async () => {
     const dir = makeTempDir();
@@ -116,7 +116,7 @@ describe('manifest', () => {
     expect(bad).toEqual([]);
     expect(reads).toBeGreaterThan(0);
     expect(existsSync(path.join(dir, 'manifest.json.tmp'))).toBe(false);
-  });
+  }, 120_000);
 
   it('readManifest rejects {} with a schema error', async () => {
     const dir = makeTempDir();

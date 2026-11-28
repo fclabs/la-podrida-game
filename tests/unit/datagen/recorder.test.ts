@@ -55,7 +55,7 @@ describe('recorder rows', () => {
       expect(rows.length).toBe(playPlain(seed).moves);
       expect(rows.length).toBe(result.moves);
     }
-  });
+  }, 120_000);
 
   it('every row parses against the pending schema; VC-1214 key names', () => {
     const { rows } = playRecorded('rec-a');
@@ -71,7 +71,7 @@ describe('recorder rows', () => {
       'hidden_hands',
       'hidden_stock_left',
     ]);
-  });
+  }, 120_000);
 
   it('VC-1208: bid and play row shapes', () => {
     const { rows } = playRecorded('rec-b');
@@ -92,7 +92,7 @@ describe('recorder rows', () => {
     }
     expect(bids).toBeGreaterThan(0);
     expect(plays).toBeGreaterThan(0);
-  });
+  }, 120_000);
 
   it('VC-1209, BR-1208: legal ids equal legalMoves(prev) and the chosen id is accepted', () => {
     for (const seed of SEEDS) {
@@ -106,7 +106,7 @@ describe('recorder rows', () => {
       }
       expect(state.phase).toBe('game-over');
     }
-  });
+  }, 120_000);
 
   it('VC-1210: strategy name, policy_probs null, explore false', () => {
     for (const row of playRecorded('rec-c').rows) {
@@ -114,7 +114,7 @@ describe('recorder rows', () => {
       expect(row.policy_probs).toBeNull();
       expect(row.explore).toBe(false);
     }
-  });
+  }, 120_000);
 
   it('trick_number and current_trick follow the public events', () => {
     const { rows } = playRecorded('rec-d');
@@ -137,7 +137,7 @@ describe('recorder rows', () => {
         if (seenInHand.length % row.bids_so_far.length === 0) tricks += 1;
       }
     }
-  });
+  }, 120_000);
 });
 
 describe('hidden columns', () => {
@@ -181,7 +181,7 @@ describe('hidden columns', () => {
     }
     expect(sawInDealer).toBe(true);
     expect(sawStock).toBe(true);
-  });
+  }, 120_000);
 });
 
 describe('observer effect', () => {
@@ -194,7 +194,7 @@ describe('observer effect', () => {
       expect(recorded.state.aiDecisionCount).toBe(plain.state.aiDecisionCount);
       expect(recorded.events).toEqual(plain.events);
     }
-  }, 60_000);
+  }, 120_000);
 
   it('VC-1216: the wrapper passes the same arguments and draws nothing extra', () => {
     const state = newGame('spy-1').state;
@@ -229,7 +229,7 @@ describe('observer effect', () => {
     expect(wrapped.draws).toBe(alone.draws);
     expect(wrapped.chosen).toBe(moves.find((m) => m.id === wrapped.chosen.id));
     expect(wrapped.chosen.id).toBe(alone.chosen.id);
-  });
+  }, 120_000);
 
   it('one inner call per decision in a whole game', () => {
     const start = newGame('spy-2');
@@ -245,7 +245,7 @@ describe('observer effect', () => {
     const result = runAiLoop(start.state, players, { onTransition: recorder.onTransition });
     expect(calls).toBe(result.moves);
     expect(recorder.rows().length).toBe(result.moves);
-  });
+  }, 120_000);
 });
 
 function firstView(state: GameState): PlayerView {

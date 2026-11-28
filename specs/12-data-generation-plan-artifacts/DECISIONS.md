@@ -127,3 +127,19 @@ Decision: `report.ts` holds `createReportAccumulator` (fed per game/hand, keeps 
 Context: FR-1221.6 uses FR-1212 check 5, i.e. bid/tricks/made/points must equal the score engine's, so a self-consistent tampering must be caught.
 Decision: per `hands` row validate calls `scoreHand(getPreset(game.preset), { handIndex, cardsPerPlayer: cards_dealt, dealer, trumpSuit: trump_card.slice(-1), bids, tricks })` (only bids, tricks, cardsPerPlayer and scoring are read) and compares bid, tricks, made, points per seat; a RangeError is reported as check 6 `cannot be scored`. Also kept: tricks sum == cards_dealt, decision `hand_*`/`final_*` vs their rows, Σ points == `final_total_by_seat`. The `made == (bid == tricks)` proxy was removed (scoreHand covers it).
 Rejected: rebuilding a GameState for `evaluate`.
+
+## D-027: The guard throws `UsageError` from `executeRun`; `generate-data.ts` unchanged (Iteration 8)
+Context: FR-1219/1220 need one stderr line, exit 1, nothing on disk changed. `executeRun` only had stdout (`write`).
+Decision: `openRun` (run.ts) does the guard first, before any mkdir/delete/write, and throws `UsageError`; `main` already prints `generate-data: <message>` and returns 1. Messages: `run directory "<join(--out, id)>" exists without a manifest` (path as given, like validate's `no run` line) and `run "<id>" has a different <name>`. Comparison uses the parsed `RunOptions` (defaults already applied) in the order preset, players, games, shard-size, strategies (joined names), replay-every, schema_version, generator_version (I-7).
+Rejected: a new `writeError` dep (touches the entry wiring); resolving the path in the message.
+Consequences: an invalid-but-present manifest.json is not handled (ZodError/SyntaxError crash, see Known gaps).
+
+## D-028: Resume resets non-valid shards to `pending` and rewrites the manifest before work (Iteration 8)
+Decision: with a matching manifest, `removeTmpFiles` runs first (every `*.tmp` file under the run dir, recursive; directories untouched). Each `complete` entry is checked with `stat` size and a streamed SHA-256 for its three files (path = runDir + `files.*.path`); a mismatch, missing file or read error means re-run. Every non-skipped entry becomes `{shard, games, status:'pending'}` (stale error/files/completed_at gone), the manifest keeps its `created_at`, is written atomically, then the pool runs the queue. `skipped` = the shards left untouched; the summary's rows/size come from the manifest's complete entries.
+Rejected: deleting an invalid shard's old files up front (the re-run renames over them; failure cleanup deletes them); skipping the manifest rewrite when nothing changed.
+Consequences: a resume with all shards valid rewrites only `manifest.json` (same content).
+
+## D-029: Kill-test helpers in `helpers.ts` (Iteration 8)
+Decision: `spawnCli` (child handle + `closed` promise), `waitForManifest` (poll every 20 ms with a timeout, no fixed sleeps) and `tryReadManifest` live next to `runCli`, reusable by Iterations 9-10. The kill happens only after the manifest shows >=3 complete shards; the manifest read after `closed` is the truth for what was complete.
+Rejected: a hook that slows shards (a 200-game run takes ~9 s on 2 workers, ample margin).
+Consequences: the `strategies` guard difference cannot be made through the CLI alone (only `random` exists), so tests edit the manifest.

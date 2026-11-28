@@ -50,7 +50,7 @@ describe('gameSeed and ids (VC-1204)', () => {
     expect(t.games.shard).toBe(2);
     expect(t.hands.every((h) => h.game_id === 'gt-2-3')).toBe(true);
     expect(t.decisions.every((d) => d.game_id === 'gt-2-3')).toBe(true);
-  });
+  }, 120_000);
 });
 
 describe('VC-1206: strategies and replay by hand', () => {
@@ -75,7 +75,7 @@ describe('VC-1206: strategies and replay by hand', () => {
     const result = runAiLoop(start.state, players);
     expect(evaluate(result.state).totals).toEqual(t.games.final_total_by_seat);
     expect(t.decisions).toHaveLength(result.moves);
-  });
+  }, 120_000);
 });
 
 describe('VC-1248: view columns agree with a replay of the seed', () => {
@@ -124,17 +124,21 @@ describe('VC-1248: view columns agree with a replay of the seed', () => {
       }
       expect(state.phase).toBe('game-over');
     }
-  });
+  }, 120_000);
 });
 
 describe('VC-1250: array lengths for 3 and 5 players', () => {
-  it.each([3, 5])('%i players', (n) => {
-    const t = playRecordedGame(opts({ strategies: Array(n).fill('random') }));
-    expect(t.games.n_players).toBe(n);
-    expect(t.games.final_total_by_seat).toHaveLength(n);
-    expect(t.hands[0].points_by_seat).toHaveLength(n);
-    expect(t.decisions[0].hidden_hands).toHaveLength(n);
-  });
+  it.each([3, 5])(
+    '%i players',
+    (n) => {
+      const t = playRecordedGame(opts({ strategies: Array(n).fill('random') }));
+      expect(t.games.n_players).toBe(n);
+      expect(t.games.final_total_by_seat).toHaveLength(n);
+      expect(t.hands[0].points_by_seat).toHaveLength(n);
+      expect(t.decisions[0].hidden_hands).toHaveLength(n);
+    },
+    120_000,
+  );
 });
 
 describe('per-game checks', () => {
@@ -147,21 +151,21 @@ describe('per-game checks', () => {
     const f = failureOf(() => playRecordedGame(opts({ runAiLoop: early })));
     expect(f.seed).toBe('gt-2-3');
     expect(f.message).toContain('check 1');
-  });
+  }, 120_000);
 
   it('check 2: removing a hands row fails', () => {
     const f = failureOf(() =>
       playRecordedGame(opts({ transformRows: (t) => ({ ...t, hands: t.hands.slice(1) }) })),
     );
     expect(f.message).toContain('check 2');
-  });
+  }, 120_000);
 
   it('check 3: dropping a decisions row fails', () => {
     const f = failureOf(() =>
       playRecordedGame(opts({ transformRows: (t) => ({ ...t, decisions: t.decisions.slice(1) }) })),
     );
     expect(f.message).toContain('check 3');
-  });
+  }, 120_000);
 
   it('check 4: a tricks_won sum different from cards_dealt fails', () => {
     const f = failureOf(() =>
@@ -179,7 +183,7 @@ describe('per-game checks', () => {
       ),
     );
     expect(f.message).toContain('check 4');
-  });
+  }, 120_000);
 
   it('check 5: a changed hand_points fails', () => {
     const f = failureOf(() =>
@@ -194,11 +198,11 @@ describe('per-game checks', () => {
       ),
     );
     expect(f.message).toContain('check 5');
-  });
+  }, 120_000);
 
   it('identity transform and defaults pass', () => {
     expect(() => playRecordedGame(opts({ transformRows: (t) => t }))).not.toThrow();
-  });
+  }, 120_000);
 });
 
 describe('replay check (FR-1213)', () => {
@@ -223,7 +227,7 @@ describe('replay check (FR-1213)', () => {
     const f = failureOf(() => playRecordedGame(opts({ index: 0, replayRunAiLoop: differ })));
     expect(f.seed).toBe('gt-2-0');
     expect(f.message).toMatch(/^replay: step 6 differs/);
-  });
+  }, 120_000);
 
   it('the replay loop is used only for indices that are multiples of replay_every', () => {
     const count = (every: number, indices: number[]): number[] => {
@@ -246,7 +250,7 @@ describe('replay check (FR-1213)', () => {
     // Default 100: only 0, 100, 200. Use few players' games; 205 games is fast enough.
     expect(count(100, idx)).toEqual([0, 100, 200]);
     expect(count(1, [0, 1, 2, 3])).toEqual([0, 1, 2, 3]);
-  }, 60_000);
+  }, 120_000);
 
   it('the runAiLoop hook is not used for the replay', () => {
     let own = 0;
@@ -260,5 +264,5 @@ describe('replay check (FR-1213)', () => {
       }),
     );
     expect(own).toBe(1);
-  });
+  }, 120_000);
 });

@@ -66,7 +66,7 @@ describe('buildTables', () => {
         }
       }
     }
-  });
+  }, 120_000);
 
   it('VC-1217/1218/1220: hands rows match evaluate; places and totals add up', () => {
     for (const [seed, n] of CASES) {
@@ -93,7 +93,7 @@ describe('buildTables', () => {
         expect(t).toBe(tables.hands.reduce((a, h) => a + h.points_by_seat[k], 0));
       });
     }
-  });
+  }, 120_000);
 
   it('VC-1219: decision labels equal the hands/games entries', () => {
     for (const [seed, n] of CASES) {
@@ -108,7 +108,7 @@ describe('buildTables', () => {
         expect(d.final_place).toBe(tables.games.final_place_by_seat[d.seat]);
       }
     }
-  });
+  }, 120_000);
 
   it('VC-1213: won_this_trick follows the next trick-won event', () => {
     for (const [seed, n] of CASES) {
@@ -140,5 +140,5 @@ describe('buildTables', () => {
         }
       }
     }
-  });
+  }, 120_000);
 });

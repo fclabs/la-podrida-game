@@ -1,29 +1,25 @@
-# CONTEXT — Spec 12 data generation (state after Iteration 7)
+# CONTEXT — Spec 12 data generation (state after Iteration 8)
 
 ## Current state
 - Spec start commit (HEAD before any Phase 12 change): `af777e04fcf3d8b751444c48770134c470622a9b`.
-- Iteration 1 done: `pnpm generate-data` exists with full argument validation.
-- Iteration 2 done: `decisions` row schemas and the observing recorder exist.
-- Iteration 3 done: outcome labels, `games`/`hands` rows, the FR-1212 checks 1-5 and the sampled
-  replay (FR-1213) exist as `playRecordedGame`; it returns rows in memory, nothing is written to disk.
-- Iteration 4 done: gzip JSONL sinks, the manifest schema/helpers and `processShard` exist; a shard
-  can be written to disk in-process. `processShard` leaves a failed shard's `.tmp` files in place; the
-  main thread deletes them (Iteration 6, `cleanupShardFiles`).
+- Iterations 1-2 done: `pnpm generate-data` with argument validation; `decisions` row schemas and recorder.
+- Iteration 3 done: labels, `games`/`hands` rows, FR-1212 checks 1-5, sampled replay (`playRecordedGame`, in memory).
+- Iteration 4 done: gzip JSONL sinks, manifest schema/helpers, `processShard`. A failed shard's `.tmp` files stay
+  for the main thread to delete (`cleanupShardFiles`).
 - Iteration 5 done: `pnpm generate-data run` works end to end with a worker pool and prints the
-  4-line summary; exit 0 when every shard is complete, else 1. No resume yet: `run` into an existing
-  run id overwrites the manifest (Iteration 8).
+  4-line summary; exit 0 when every shard is complete, else 1.
 - Iteration 6 done: failure handling (FR-1217) and the test-hook seam. Any error thrown while a game is
   played fails the shard with `gameSeed(run, shard, index)`; a failing/dying worker is terminated, the
   shard's files (final and `.tmp`) are deleted by the main thread, the shard is recorded `failed`, a
   replacement worker is started if shards remain; the run prints the summary and exits 1. Hook modules
-  from `GENERATE_DATA_TEST_HOOKS` are loaded by the worker. No resume yet (Iteration 8).
+  from `GENERATE_DATA_TEST_HOOKS` are loaded by the worker.
 - Iteration 7 done: `pnpm generate-data validate` runs the seven checks of FR-1221 (streaming), prints
   the distribution report (status `OK`, or `INCOMPLETE` + exit 1 for runs with non-complete shards) and
-  exits 1 on the first failing check. Resume and the parameter guard are still missing (Iteration 8).
-- A-2 proven: a `worker_threads` worker started with `execArgv: ['--import', 'tsx']` from a tsx
-  process loads `.ts` and resolves `@/`.
-- Baseline of `pnpm --silent simulate --games 200 --seed sim` is in `baseline-simulate.txt`
-  (3 players, the preset minimum).
+  exits 1 on the first failing check.
+- Iteration 8 done: `run` into an existing run id resumes (FR-1218) behind the parameter guard
+  (FR-1219/1220); start-up deletes `*.tmp` files; the summary prints `skipped`.
+- A-2 proven (worker with `execArgv: ['--import','tsx']` loads `.ts` and `@/`). Baseline of
+  `pnpm --silent simulate --games 200 --seed sim` is in `baseline-simulate.txt` (3 players).
 
 ## File map
 - `package.json` — only change: script `"generate-data": "tsx scripts/generate-data.ts"`.
@@ -35,7 +31,8 @@
 - `tests/unit/datagen/failures.test.ts` — VC-1221..1226/1229b/1247/1251/1253, `loadHooks`, `cleanupShardFiles`.
 - `tests/unit/datagen/fixtures/hooks-configurable.ts`, `hooks-empty.ts` — hook modules (see Public interfaces).
 - `scripts/datagen/worker-host.ts` — `startWorker` and the message types `ShardRequest`/`ShardResponse`/`ShardErrorResponse`.
-- `scripts/datagen/run.ts` — `executeRun`, the pool, `cleanupShardFiles`, `formatSummary`, `oneDecimal`.
+- `scripts/datagen/run.ts` — `executeRun` (guard, resume plan, pool), `cleanupShardFiles`, `formatSummary`, `oneDecimal`; internal `openRun`, `firstDifference`, `shardFilesValid`, `removeTmpFiles`.
+- `tests/unit/datagen/resume.test.ts` — VC-1238..1242, failed-run resume, `*.tmp` cleanup, skip of a finished run.
 - `tests/unit/datagen/run.test.ts` — VC-1201/1203/1204/1205/1227/1228/1229/1232/1249 at CLI level, summary format.
 - `scripts/datagen/schema.ts` — Zod schemas `PendingDecisionRowSchema`, `OutcomeColumnsSchema`, `DecisionRowSchema`, `GamesRowSchema`, `HandsRowSchema`, and the manifest: `ShardFileSchema`, `ManifestParamsSchema`, `ShardEntrySchema`, `ManifestSchema` (+ types).
 - `scripts/datagen/sinks.ts` — `createJsonlGzipSink`.
@@ -51,8 +48,8 @@
 - `tests/unit/datagen/recorder.test.ts`, `schema.test.ts` — VC-1207..1216, BR-1208.
 - `tests/unit/datagen/labels.test.ts`, `game.test.ts` — VC-1204/1206/1213/1217..1220/1248/1250, per-game checks, replay.
 - `tests/unit/datagen/manifest.test.ts`, `shard.test.ts` — VC-1205, VC-1249 naming, manifest atomicity; sink, VC-1204/1227/1232 at shard level.
-- `tests/unit/datagen/helpers.ts` — `runCli`, `makeTempDir`, `REPO_ROOT`.
-- `tests/unit/datagen/args.test.ts` — invalid-case matrix, defaults, CLI sample (VC-1202, VC-1203 first half).
+- `tests/unit/datagen/helpers.ts` — `runCli`, `spawnCli`, `waitForManifest`, `tryReadManifest`, `makeTempDir`, `REPO_ROOT`.
+- `tests/unit/datagen/args.test.ts` — invalid-case matrix, defaults, CLI sample (VC-1202, VC-1203).
 - `tests/unit/datagen/worker-bootstrap.test.ts` + `fixtures/spawn-selftest.ts` — A-2 proof.
 - `specs/12-data-generation{,-plan,.review}.md` — committed in iteration 1.
 
@@ -82,7 +79,17 @@ startWorker(entryFile: string | URL, workerData?: unknown): Worker
 //   treats {failed result, shard-error, worker 'error' event, worker exit} alike (see run.ts below).
 // scripts/datagen/run.ts
 executeRun(options: RunOptions, deps: { now: () => string; gitInfo: {git_commit,git_dirty}; write?: (s)=>void }):
-  Promise<{ manifest: Manifest; exitCode: 0|1 }>
+  Promise<{ manifest: Manifest; exitCode: 0|1 }>      // throws UsageError (guard) BEFORE touching the disk
+  // 1. openRun: run dir missing/empty -> new run; no manifest.json + not empty -> UsageError
+  //    `run directory "<out>/<id>" exists without a manifest` (path as join(--out, id), not resolved);
+  //    manifest -> readManifest, firstDifference (preset, players, games, shard-size, strategies, replay-every,
+  //    schema_version, generator_version) -> UsageError `run "<id>" has a different <name>`.
+  //    generate-data.ts prints UsageErrors as `generate-data: <message>`, exit 1 (no change to that file).
+  // 2. new: newManifest(created_at = deps.now()), queue = all shards. resume: manifest as read (created_at kept),
+  //    removeTmpFiles(runDir) (every *.tmp FILE, recursive), each `complete` entry whose 3 files have the
+  //    manifest's size and SHA-256 (stat + streamed hash, nothing else) is skipped (skipped++), every other entry
+  //    (pending, failed, invalid complete) is replaced by {shard,games,status:'pending'} and queued.
+  // 3. writeManifestAtomic, then the pool over the queue (unchanged), summary with `skipped`, exit 0 iff all complete.
 cleanupShardFiles(runDir: string, shard: number): Promise<string | null>
   // deletes the 3 final files and their `.tmp` of the shard (rm force: missing is fine); null when all gone,
   // else the other errors' messages joined with ", ". Call only after the shard's worker has stopped (I-6).
@@ -250,7 +257,12 @@ Keys of every row are the schema's order (tests check this against the schemas' 
 - Several problems in one command line: first one reported, in the order of the spec's Command line block (I-7); `--run-id` is checked first.
 - Messages in `UsageError` are single-line; `parseArgs` errors are cut at the first newline.
 - `--out` is not validated or touched by the parser (relative paths are relative to cwd).
-- Tests spawning the CLI/workers set a 120 s timeout and write only under `makeTempDir()`.
+- Tests spawning the CLI/workers write only under `makeTempDir()`. Tests that play many games or spawn processes set an explicit `120_000` ms timeout (last argument of `it`): the default 5 s fails under CPU contention.
+- Kill tests: `spawnCli(args, {env?, cwd?}) -> { child, closed }` (`child` = the node process: `child.kill('SIGKILL')`;
+  `closed` resolves to `{code, stdout, stderr}`), `waitForManifest(out, runId, predicate, {timeoutMs?, running?})`
+  polls every 20 ms (default 90 s) and returns the manifest; `tryReadManifest(out, runId)` returns null while
+  missing/unparsable. Pattern (resume.test.ts): spawn with `--workers 2`, wait for >=3 complete, SIGKILL, `await
+  closed`, then the manifest on disk is final. A 200-game, 10-per-shard run takes ~9 s on 2 workers.
 
 - Recorder: the view-derived columns are captured in `choose` BEFORE the inner strategy runs; the row is
   finished in `onTransition` (oracle columns from `prev`, `step` = rows so far). Hand boundaries: the
@@ -277,14 +289,13 @@ Keys of every row are the schema's order (tests check this against the schemas' 
   worker `error`, worker `exit` (message `worker exited unexpectedly (code N)`, seed null). On any failure the slot
   `terminate()`s the worker (waits for exit), runs `cleanupShardFiles`, records `failed` (`error: {seed, message}`,
   message gets `; cleanup failed: <reason>` when cleanup reports a problem), and spawns a replacement lazily.
-  Only a manifest write failure (disk) rejects `executeRun`. `skipped` is always 0 (resume: Iteration 8).
+  Only a manifest write failure (disk) rejects `executeRun`.
   Exit code: 0 iff every shard is `complete`, else 1 (summary is always printed first).
-  `executeRun` does mkdir -p of `<out>/<run_id>` (resolved against cwd) and rewrites any existing manifest.
-- Start-up `*.tmp` cleanup is not implemented (Iteration 8).
-- The manifest `ShardEntry` 'failed' shape is `error: {seed, message}`; `ShardFailure` (processShard) is flat; the caller maps.
-- `rec.rows()` returns the live array; `buildTables` copies into new `DecisionRow` objects.
+  `executeRun` does mkdir -p of `<out>/<run_id>` (resolved against cwd) after the guard has passed.
+- Resume (D-027..D-029): a manifest that exists but does not parse (ZodError/SyntaxError) is not handled: `run`
+  crashes with the stack trace (nonzero exit). A resume with nothing left to do still rewrites `manifest.json`
+  (same content). A reset shard's old, invalid files stay on disk until the shard's new files replace them (rename
+  over) or its failure cleanup deletes them. `strategies` can differ from the manifest only by length or name,
+  and only `random` is registered, so the CLI cannot produce that difference alone (tests edit the manifest).
+- The manifest 'failed' entry is `error: {seed|null, message}` (null for a dead worker, `shard-error`, `onShard`/hook-load errors); `ShardFailure` (processShard) is flat; run.ts maps.
 - Rows are not schema-parsed inside `playRecordedGame` (perf); the sinks/validate iterations parse where needed.
-- The manifest `failed` entry is `{shard, games, status:'failed', error:{seed: string|null, message}}`, built in `run.ts`;
-  `seed` is null for a dead worker, `shard-error`, `onShard`/hook-load errors.
-- Replay compares move ids rebuilt from `bid-made`/`card-played` events of the replay result.
-- `--out` default for `validate` is `.data/datasets` (I-1).

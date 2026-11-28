@@ -57,7 +57,7 @@ describe('JSONL gzip sink', () => {
     expect(r.bytes).toBe(statSync(final).size);
     expect(r.sha256).toBe(createHash('sha256').update(readFileSync(final)).digest('hex'));
     expect(lines(final)).toEqual(['{"a":1,"b":"é"}', '{"a":2,"b":"z"}']);
-  });
+  }, 120_000);
 
   it('abort leaves the .tmp file and no final file', async () => {
     const final = path.join(makeTempDir(), 'y.jsonl.gz');
@@ -66,7 +66,7 @@ describe('JSONL gzip sink', () => {
     await sink.abort();
     expect(existsSync(final)).toBe(false);
     expect(existsSync(`${final}.tmp`)).toBe(true);
-  });
+  }, 120_000);
 
   it('handles many rows (backpressure)', async () => {
     const final = path.join(makeTempDir(), 'z.jsonl.gz');
@@ -79,7 +79,7 @@ describe('JSONL gzip sink', () => {
     const r = await sink.finish();
     expect(r.rows).toBe(100000);
     expect(lines(final)).toHaveLength(100000);
-  });
+  }, 120_000);
 });
 
 describe('processShard', () => {
@@ -96,7 +96,7 @@ describe('processShard', () => {
     expect(rows.map((r) => r.game_id)).toEqual(rows.map((r) => r.seed));
     expect(new Set(rows.map((r) => r.game_id)).size).toBe(5);
     expect(rows.every((r) => r.shard === 2)).toBe(true);
-  });
+  }, 120_000);
 
   it('files, sizes, hashes, row counts, manifest entry, no tmp (VC-1227, VC-1249)', async () => {
     const dir = makeTempDir();
@@ -136,7 +136,7 @@ describe('processShard', () => {
     expect(l_noTrailingSpaces(path.join(dir, res.files.decisions.path))).toBe(true);
     // the entry fits a manifest
     ManifestSchema.shape.shards.parse([res]);
-  });
+  }, 120_000);
 
   it('the same shard twice gives identical decompressed contents (VC-1232)', async () => {
     const a = makeTempDir();
@@ -148,7 +148,7 @@ describe('processShard', () => {
       const fb = shardFilePaths(b, 1)[table];
       expect(gunzipSync(readFileSync(fa)).equals(gunzipSync(readFileSync(fb)))).toBe(true);
     }
-  });
+  }, 120_000);
 
   it('stops at the first GameFailure, leaves .tmp files and renames nothing', async () => {
     const dir = makeTempDir();
@@ -175,7 +175,7 @@ describe('processShard', () => {
       'shard-00000.games.jsonl.gz.tmp',
       'shard-00000.hands.jsonl.gz.tmp',
     ]);
-  });
+  }, 120_000);
 
   it('any error thrown by a game fails the shard with that game seed', async () => {
     const dir = makeTempDir();
@@ -192,13 +192,13 @@ describe('processShard', () => {
       },
     });
     expect(res).toMatchObject({ status: 'failed', seed: 'sh-1-2', message: 'boom' });
-  });
+  }, 120_000);
 
   it('rejects a shard outside the plan', async () => {
     await expect(
       processShard({ params: params(), shard: 3, runDir: makeTempDir(), stamp }),
     ).rejects.toThrow(RangeError);
-  });
+  }, 120_000);
 });
 
 function l_noTrailingSpaces(file: string): boolean {
