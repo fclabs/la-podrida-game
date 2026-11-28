@@ -16,7 +16,8 @@
     "test": "vitest run",
     "test:sim": "vitest run --config vitest.sim.config.ts",
     "simulate": "tsx scripts/simulate.ts",
-    "blob-checks": "tsx scripts/blob-checks.ts"
+    "blob-checks": "tsx scripts/blob-checks.ts",
+    "bench-moves": "tsx scripts/bench-moves.ts"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
