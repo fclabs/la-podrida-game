@@ -47,3 +47,24 @@ Consequences: `GameFailure` is the only per-game failure type apart from errors 
 Decision: `trump_card`, `dealer`, `trump_in_dealer_hand`, `cards_dealt` are taken from the `hand-dealt` events (hand 0 from the initial state, since `createGame`'s events are not in the loop result); scoring columns from `evaluate(final).hands`. `final_place_by_seat[seat]` = the ranking entry's place (competition numbering).
 Rejected: reading the recorder rows (hands with no decisions cannot exist, but the hands table must not depend on rows).
 Consequences: a hands row exists for each scored hand even if `decisions` are dropped by a hook.
+
+## D-010: Manifest shard entries are a discriminated union; file paths are relative (Iteration 4)
+Context: the spec table lists fields per status; `path` in a manifest should survive moving the run directory.
+Decision: `ShardEntrySchema` is a `z.discriminatedUnion('status', ...)` of strict objects (pending: shard, games; complete: + git_commit, git_dirty, completed_at, files; failed: + error). `files.*.path` is relative to the run directory (`shards/shard-00000.games.jsonl.gz`); timestamps are `z.iso.datetime()`.
+Rejected: one object with optional fields (allows nonsense combinations); absolute paths (break when the dataset is moved).
+Consequences: resume/validate resolve a file as `path.join(runDir, entry.path)`.
+
+## D-011: Sink writes through gzip into `<path>.tmp`; hashing reads the stored file back (Iteration 4)
+Decision: `createJsonlGzipSink` pipes a `zlib` gzip (default level) into a write stream on `<final>.tmp`; `append` honors backpressure (races `drain` against the pipeline's failure); `finish()` ends the stream, SHA-256s the stored file by streaming it back, stats it, then renames. `abort()` closes without renaming or deleting. `rows` counts appended objects.
+Rejected: hashing in a tee transform (more moving parts, same result); buffering rows in memory.
+Consequences: one extra sequential read of each file per shard; gzip output is deterministic for one Node/zlib (A-3).
+
+## D-012: `processShard` takes `ShardParams` and a `ShardStamp`; returns the manifest entry itself (Iteration 4)
+Context: the plan's signature `{ params, shard, runDir, hooks }` lacks the run id (not in the manifest `params`) and the caller-supplied git fields.
+Decision: `params` is `Pick<RunOptions, 'run_id'|'preset'|'games'|'shard_size'|'strategies'|'replay_every'>`; an extra `stamp: { git_commit, git_dirty, now }` carries the caller's git info and a clock (`now()` called once, after the renames, for `completed_at`). `hooks` is optional plain functions (D-007). The result is the `complete` `ShardEntry` or `{ status: 'failed', seed, message }`.
+Rejected: passing `completed_at` as a string (would be the shard's start time); reading git inside the shard (the main thread computes it once, Iteration 5).
+Consequences: Iteration 5's worker message carries the params and stamp fields; the main thread maps a failure to `{ status: 'failed', error: { seed, message } }`.
+
+## D-013: Only `GameFailure` becomes a failure result in Iteration 4 (Iteration 4)
+Decision: following the plan scope ("on a `GameFailure`"), `processShard` returns a failure only for `GameFailure`; other errors abort the sinks and propagate unchanged. Iteration 6 widens it (seed from `gameSeed`).
+Consequences: no `.tmp` cleanup yet in either case.

@@ -1,5 +1,5 @@
 // Row schemas of the generated dataset (spec 12, Data & Interfaces). Keys are in the spec's column
-// order. The manifest schema comes in a later iteration.
+// order. The manifest schema is at the end.
 import { z } from 'zod';
 
 const cardIds = z.array(z.string());
@@ -90,3 +90,63 @@ export const HandsRowSchema = z.strictObject({
 
 export type GamesRow = z.infer<typeof GamesRowSchema>;
 export type HandsRow = z.infer<typeof HandsRowSchema>;
+
+const isoUtc = z.iso.datetime();
+
+/** One output file of a shard as the manifest records it (`path` is relative to the run directory). */
+export const ShardFileSchema = z.strictObject({
+  path: z.string(),
+  bytes: z.int(),
+  sha256: z.string(),
+  rows: z.int(),
+});
+
+/** The run parameters a manifest records (spec 12 `manifest.json`, `params`). */
+export const ManifestParamsSchema = z.strictObject({
+  preset: z.string(),
+  players: z.int(),
+  games: z.int(),
+  shard_size: z.int(),
+  strategies: z.array(z.string()),
+  replay_every: z.int(),
+});
+
+const shardBase = { shard: z.int(), games: z.int() };
+
+/** A manifest shard entry, by status: pending, complete (files and git info) or failed (error). */
+export const ShardEntrySchema = z.discriminatedUnion('status', [
+  z.strictObject({ ...shardBase, status: z.literal('pending') }),
+  z.strictObject({
+    ...shardBase,
+    status: z.literal('complete'),
+    git_commit: z.string(),
+    git_dirty: z.boolean(),
+    completed_at: isoUtc,
+    files: z.strictObject({
+      games: ShardFileSchema,
+      hands: ShardFileSchema,
+      decisions: ShardFileSchema,
+    }),
+  }),
+  z.strictObject({
+    ...shardBase,
+    status: z.literal('failed'),
+    error: z.strictObject({ seed: z.string().nullable(), message: z.string() }),
+  }),
+]);
+
+/** `manifest.json` (spec 12 Data & Interfaces). */
+export const ManifestSchema = z.strictObject({
+  schema_version: z.int(),
+  generator_version: z.int(),
+  run_id: z.string(),
+  params: ManifestParamsSchema,
+  created_at: isoUtc,
+  shards: z.array(ShardEntrySchema),
+});
+
+export type ShardFile = z.infer<typeof ShardFileSchema>;
+export type ManifestParams = z.infer<typeof ManifestParamsSchema>;
+export type ShardEntry = z.infer<typeof ShardEntrySchema>;
+export type CompleteShardEntry = Extract<ShardEntry, { status: 'complete' }>;
+export type Manifest = z.infer<typeof ManifestSchema>;
