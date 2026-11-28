@@ -22,16 +22,19 @@ No environment variables are needed for local development; every setting has a d
 
 ## Commands
 
-| Command          | What it does                                                                                             |
-| ---------------- | -------------------------------------------------------------------------------------------------------- |
-| `pnpm dev`       | Start the Next.js development server on <http://localhost:3000/>.                                        |
-| `pnpm build`     | Production build (`next build`).                                                                         |
-| `pnpm typecheck` | Type-check the whole project (`app/`, `src/`, `tests/`, `scripts/`) with TypeScript `strict`.            |
-| `pnpm lint`      | Run ESLint (zero warnings allowed) and check formatting with Prettier. Also enforces the layer rules.    |
-| `pnpm format`    | Rewrite files to the project format with Prettier.                                                       |
-| `pnpm test`      | Run the tests in `tests/unit`, `tests/contract` and `tests/api` with Vitest.                             |
-| `pnpm test:sim`  | Run the long-running simulation tests in `tests/sim` (not part of `pnpm test`).                          |
-| `pnpm simulate`  | Play batches of all-AI games and print average scores and the made-bid rate (see the development guide). |
+| Command            | What it does                                                                                                                                                           |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`         | Start the Next.js development server on <http://localhost:3000/>.                                                                                                      |
+| `pnpm build`       | Production build (`next build`).                                                                                                                                       |
+| `pnpm typecheck`   | Type-check the whole project (`app/`, `src/`, `tests/`, `scripts/`) with TypeScript `strict`.                                                                          |
+| `pnpm lint`        | Run ESLint (zero warnings allowed) and check formatting with Prettier. Also enforces the layer rules.                                                                  |
+| `pnpm format`      | Rewrite files to the project format with Prettier.                                                                                                                     |
+| `pnpm test`        | Run the tests in `tests/unit`, `tests/contract` and `tests/api` with Vitest.                                                                                           |
+| `pnpm test:sim`    | Run the long-running simulation tests in `tests/sim` (not part of `pnpm test`).                                                                                        |
+| `pnpm simulate`    | Play batches of all-AI games and print average scores and the made-bid rate (see the development guide).                                                               |
+| `pnpm blob-checks` | Check a real Vercel Blob store: exclusive create-only writes, consistent reads, ascending listing, delete (needs `BLOB_READ_WRITE_TOKEN`; see the deployment runbook). |
+| `pnpm bench-moves` | Measure move latency (p95) over HTTP on a deployed URL: `--base-url`, `--scenario warm\|stale\|cold`.                                                                  |
+| `pnpm smoke`       | Play a whole game over HTTP on a deployed URL and call the cron route (`--base-url`, needs `CRON_SECRET`).                                                             |
 
 Before pushing, run the same checks CI runs:
 
@@ -45,6 +48,7 @@ pnpm typecheck && pnpm lint && pnpm test && pnpm test:sim && pnpm build
 - [Game rules](docs/game_rules.md): how La Podrida is played and its regional variants.
 - [System design](docs/design.md): what the system does: components, domain model and game logic.
 - [Architecture](docs/architecture.md): how it is built and run: stack, module boundaries, storage, API, security.
+- [Deployment runbook](docs/deployment.md): launching on Vercel, the preview checks, the manual checklist, rollback and the launch record.
 - [Implementation phases](docs/implementation.md): the order the MVP is built in, phase by phase.
 
 ## License
