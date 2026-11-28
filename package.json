@@ -15,7 +15,8 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:sim": "vitest run --config vitest.sim.config.ts",
-    "simulate": "tsx scripts/simulate.ts"
+    "simulate": "tsx scripts/simulate.ts",
+    "blob-checks": "tsx scripts/blob-checks.ts"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
