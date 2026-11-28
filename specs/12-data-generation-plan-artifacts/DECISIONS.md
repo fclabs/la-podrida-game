@@ -143,3 +143,6 @@ Consequences: a resume with all shards valid rewrites only `manifest.json` (same
 Decision: `spawnCli` (child handle + `closed` promise), `waitForManifest` (poll every 20 ms with a timeout, no fixed sleeps) and `tryReadManifest` live next to `runCli`, reusable by Iterations 9-10. The kill happens only after the manifest shows >=3 complete shards; the manifest read after `closed` is the truth for what was complete.
 Rejected: a hook that slows shards (a 200-game run takes ~9 s on 2 workers, ample margin).
 Consequences: the `strategies` guard difference cannot be made through the CLI alone (only `random` exists), so tests edit the manifest.
+
+## No new decisions (Iteration 9)
+Iteration 9 only measured and checked; no source change, no interpretation chosen. The 3-player runs (default preset minimum) are the NFR-1201 comparison; the 5-player run is the size projection (NFR-1203), as the scope prescribes.

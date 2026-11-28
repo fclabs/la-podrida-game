@@ -1,23 +1,18 @@
-# CONTEXT — Spec 12 data generation (state after Iteration 8)
+# CONTEXT — Spec 12 data generation (state after Iteration 9, final)
 
 ## Current state
 - Spec start commit (HEAD before any Phase 12 change): `af777e04fcf3d8b751444c48770134c470622a9b`.
-- Iterations 1-2 done: `pnpm generate-data` with argument validation; `decisions` row schemas and recorder.
-- Iteration 3 done: labels, `games`/`hands` rows, FR-1212 checks 1-5, sampled replay (`playRecordedGame`, in memory).
+- Iterations 1-3 done: CLI with argument validation; row schemas, recorder, labels, `games`/`hands` rows, FR-1212 checks 1-5, sampled replay (`playRecordedGame`, in memory).
 - Iteration 4 done: gzip JSONL sinks, manifest schema/helpers, `processShard`. A failed shard's `.tmp` files stay
   for the main thread to delete (`cleanupShardFiles`).
 - Iteration 5 done: `pnpm generate-data run` works end to end with a worker pool and prints the
   4-line summary; exit 0 when every shard is complete, else 1.
-- Iteration 6 done: failure handling (FR-1217) and the test-hook seam. Any error thrown while a game is
-  played fails the shard with `gameSeed(run, shard, index)`; a failing/dying worker is terminated, the
-  shard's files (final and `.tmp`) are deleted by the main thread, the shard is recorded `failed`, a
-  replacement worker is started if shards remain; the run prints the summary and exits 1. Hook modules
-  from `GENERATE_DATA_TEST_HOOKS` are loaded by the worker.
-- Iteration 7 done: `pnpm generate-data validate` runs the seven checks of FR-1221 (streaming), prints
-  the distribution report (status `OK`, or `INCOMPLETE` + exit 1 for runs with non-complete shards) and
-  exits 1 on the first failing check.
+- Iteration 6 done: failure handling (FR-1217; failed shard cleaned by the main thread, summary printed, exit 1) and the
+  test-hook seam (`GENERATE_DATA_TEST_HOOKS`, loaded by the worker).
+- Iteration 7 done: `validate` runs the seven checks of FR-1221 (streaming), prints the report (`OK`, or `INCOMPLETE` + exit 1).
 - Iteration 8 done: `run` into an existing run id resumes (FR-1218) behind the parameter guard
   (FR-1219/1220); start-up deletes `*.tmp` files; the summary prints `skipped`.
+- Iteration 9 done: measurement run and regression check; no source change (figures in Known gaps).
 - A-2 proven (worker with `execArgv: ['--import','tsx']` loads `.ts` and `@/`). Baseline of
   `pnpm --silent simulate --games 200 --seed sim` is in `baseline-simulate.txt` (3 players).
 
@@ -299,3 +294,16 @@ Keys of every row are the schema's order (tests check this against the schemas' 
   and only `random` is registered, so the CLI cannot produce that difference alone (tests edit the manifest).
 - The manifest 'failed' entry is `error: {seed|null, message}` (null for a dead worker, `shard-error`, `onShard`/hook-load errors); `ShardFailure` (processShard) is flat; run.ts maps.
 - Rows are not schema-parsed inside `playRecordedGame` (perf); the sinks/validate iterations parse where needed.
+
+## Measured figures (Iteration 9; default preset argentina-fidepo, default shard size 1000 = one shard, so one busy worker)
+| run | games | decisions/game | hands/game | size | bytes/game | duration | ms/game |
+|---|---|---|---|---|---|---|---|
+| 3 players, default workers | 1000 | 981 | 29 | 41.9 MB (41,942,261 B) | 41,942 | 72.1 s | 72.1 |
+| 3 players, `--workers 1` (fresh id) | 1000 | 981 | 29 | 42.0 MB | ~41,940 | 71.9 s | 71.9 |
+| 5 players | 1000 | 635 | 17 | 26.2 MB (26,223,824 B) | 26,224 | 44.0 s | 44.0 |
+- Simulator (`pnpm --silent simulate --games 200`): 3 players 11.1 s = 55.5 ms/game; 5 players 6.6 s = 33.0 ms/game.
+  NFR-1201: generator/simulator = 71.9/55.5 = 1.30x (3 players, workers 1), 44.0/33.0 = 1.33x (5 players); limit 3x.
+- Projection to 100,000 games: 5 players 26.2 MB / 1000 x 100000 = 2,622 MB (ceiling 8,000 MB, NFR-1203); 3 players 4,194 MB.
+- `validate` of the 1000-game 3-player run exits 0, `status: OK`. Measurement datasets were deleted; `.data/datasets` is empty.
+- Final command list: `pnpm generate-data run --run-id <id> --games <n> [--workers <n>] [--out <dir>] [--players <n>] [--preset <p>]
+  [--shard-size <n>] [--replay-every <n>] [--strategies <list>]`, `pnpm generate-data validate --run-id <id> [--out <dir>]`.
