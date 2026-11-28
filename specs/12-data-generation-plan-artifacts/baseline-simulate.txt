@@ -1,0 +1,4 @@
+preset: argentina-fidepo  players: 3  games: 200  hands/game: 29
+average total per seat: 0: 129.9  1: 132.0  2: 130.1
+made-bid rate: 10.8%
+duration: 11.3 s
