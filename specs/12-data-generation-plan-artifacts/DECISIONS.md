@@ -146,3 +146,6 @@ Consequences: the `strategies` guard difference cannot be made through the CLI a
 
 ## No new decisions (Iteration 9)
 Iteration 9 only measured and checked; no source change, no interpretation chosen. The 3-player runs (default preset minimum) are the NFR-1201 comparison; the 5-player run is the size projection (NFR-1203), as the scope prescribes.
+
+## No new decisions (Iteration 10)
+Iteration 10 only ran the full dataset and the kill/resume proof; no source change and no interpretation chosen. The kill used SIGKILL on the whole `pnpm` process tree (workers are threads, so no stray processes) once the manifest showed 40 complete shards.

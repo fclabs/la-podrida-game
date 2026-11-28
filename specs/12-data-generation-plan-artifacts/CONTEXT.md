@@ -1,18 +1,13 @@
-# CONTEXT — Spec 12 data generation (state after Iteration 9, final)
+# CONTEXT — Spec 12 data generation (state after Iteration 10)
 
 ## Current state
 - Spec start commit (HEAD before any Phase 12 change): `af777e04fcf3d8b751444c48770134c470622a9b`.
 - Iterations 1-3 done: CLI with argument validation; row schemas, recorder, labels, `games`/`hands` rows, FR-1212 checks 1-5, sampled replay (`playRecordedGame`, in memory).
-- Iteration 4 done: gzip JSONL sinks, manifest schema/helpers, `processShard`. A failed shard's `.tmp` files stay
-  for the main thread to delete (`cleanupShardFiles`).
-- Iteration 5 done: `pnpm generate-data run` works end to end with a worker pool and prints the
-  4-line summary; exit 0 when every shard is complete, else 1.
-- Iteration 6 done: failure handling (FR-1217; failed shard cleaned by the main thread, summary printed, exit 1) and the
-  test-hook seam (`GENERATE_DATA_TEST_HOOKS`, loaded by the worker).
-- Iteration 7 done: `validate` runs the seven checks of FR-1221 (streaming), prints the report (`OK`, or `INCOMPLETE` + exit 1).
-- Iteration 8 done: `run` into an existing run id resumes (FR-1218) behind the parameter guard
-  (FR-1219/1220); start-up deletes `*.tmp` files; the summary prints `skipped`.
-- Iteration 9 done: measurement run and regression check; no source change (figures in Known gaps).
+- Iterations 4-8 done: gzip JSONL sinks + manifest + `processShard`; `run` with worker pool and 4-line summary (exit 0 iff all complete);
+  failure handling (FR-1217) and the test-hook seam (`GENERATE_DATA_TEST_HOOKS`); `validate` (seven FR-1221 checks, `OK` or `INCOMPLETE`
+  + exit 1); resume (FR-1218) behind the parameter guard (FR-1219/1220), start-up deletion of `*.tmp`, `skipped` in the summary.
+- Iteration 9 done: measurement run and regression check; no source change.
+- Iteration 10 done: first full dataset and resume proof (`.data/datasets/s0-full`, `s0-full-resume`); no source change.
 - A-2 proven (worker with `execArgv: ['--import','tsx']` loads `.ts` and `@/`). Baseline of
   `pnpm --silent simulate --games 200 --seed sim` is in `baseline-simulate.txt` (3 players).
 
@@ -253,11 +248,8 @@ Keys of every row are the schema's order (tests check this against the schemas' 
 - Messages in `UsageError` are single-line; `parseArgs` errors are cut at the first newline.
 - `--out` is not validated or touched by the parser (relative paths are relative to cwd).
 - Tests spawning the CLI/workers write only under `makeTempDir()`. Tests that play many games or spawn processes set an explicit `120_000` ms timeout (last argument of `it`): the default 5 s fails under CPU contention.
-- Kill tests: `spawnCli(args, {env?, cwd?}) -> { child, closed }` (`child` = the node process: `child.kill('SIGKILL')`;
-  `closed` resolves to `{code, stdout, stderr}`), `waitForManifest(out, runId, predicate, {timeoutMs?, running?})`
-  polls every 20 ms (default 90 s) and returns the manifest; `tryReadManifest(out, runId)` returns null while
-  missing/unparsable. Pattern (resume.test.ts): spawn with `--workers 2`, wait for >=3 complete, SIGKILL, `await
-  closed`, then the manifest on disk is final. A 200-game, 10-per-shard run takes ~9 s on 2 workers.
+- Kill tests: `spawnCli(args) -> { child, closed }`, `waitForManifest(out, runId, predicate, {timeoutMs?})` (polls 20 ms),
+  `tryReadManifest`. Pattern (resume.test.ts): `--workers 2`, wait for >=3 complete, SIGKILL, `await closed`.
 
 - Recorder: the view-derived columns are captured in `choose` BEFORE the inner strategy runs; the row is
   finished in `onTransition` (oracle columns from `prev`, `step` = rows so far). Hand boundaries: the
@@ -278,15 +270,10 @@ Keys of every row are the schema's order (tests check this against the schemas' 
 - Validate (D-022): checks 3-7 run per shard, not each over the whole dataset, so a check-3 failure in shard 5 is not
   reported before a check-4 failure in shard 0 (shard 0's is). Check 5 of FR-1212 is re-scored with `scoreHand` (D-026).
   Validate does not compare manifest `run_id` with `--run-id`.
-- Pool (D-014, D-018): `min(workers, shards)` slots, each owning at most one live worker (`startWorker(worker.ts)`);
-  one shared queue (`shift()` in shard order); the main thread writes the manifest in `record()` (serialised
-  promise chain). Per shard `exchange()` resolves on the first of: shard-result (complete or failed), `shard-error`,
-  worker `error`, worker `exit` (message `worker exited unexpectedly (code N)`, seed null). On any failure the slot
-  `terminate()`s the worker (waits for exit), runs `cleanupShardFiles`, records `failed` (`error: {seed, message}`,
-  message gets `; cleanup failed: <reason>` when cleanup reports a problem), and spawns a replacement lazily.
-  Only a manifest write failure (disk) rejects `executeRun`.
-  Exit code: 0 iff every shard is `complete`, else 1 (summary is always printed first).
-  `executeRun` does mkdir -p of `<out>/<run_id>` (resolved against cwd) after the guard has passed.
+- Pool (D-014, D-018): `min(workers, shards)` slots, one live worker each, one shared queue; the main thread writes the
+  manifest in `record()`. A shard ends on the first of shard-result, `shard-error`, worker `error`, worker `exit`;
+  on failure the slot terminates the worker, runs `cleanupShardFiles`, records `failed` (`; cleanup failed: <reason>`
+  appended if needed) and respawns lazily. Only a manifest write failure rejects `executeRun`. Exit 0 iff every shard is `complete`.
 - Resume (D-027..D-029): a manifest that exists but does not parse (ZodError/SyntaxError) is not handled: `run`
   crashes with the stack trace (nonzero exit). A resume with nothing left to do still rewrites `manifest.json`
   (same content). A reset shard's old, invalid files stay on disk until the shard's new files replace them (rename
@@ -295,15 +282,18 @@ Keys of every row are the schema's order (tests check this against the schemas' 
 - The manifest 'failed' entry is `error: {seed|null, message}` (null for a dead worker, `shard-error`, `onShard`/hook-load errors); `ShardFailure` (processShard) is flat; run.ts maps.
 - Rows are not schema-parsed inside `playRecordedGame` (perf); the sinks/validate iterations parse where needed.
 
-## Measured figures (Iteration 9; default preset argentina-fidepo, default shard size 1000 = one shard, so one busy worker)
-| run | games | decisions/game | hands/game | size | bytes/game | duration | ms/game |
-|---|---|---|---|---|---|---|---|
-| 3 players, default workers | 1000 | 981 | 29 | 41.9 MB (41,942,261 B) | 41,942 | 72.1 s | 72.1 |
-| 3 players, `--workers 1` (fresh id) | 1000 | 981 | 29 | 42.0 MB | ~41,940 | 71.9 s | 71.9 |
-| 5 players | 1000 | 635 | 17 | 26.2 MB (26,223,824 B) | 26,224 | 44.0 s | 44.0 |
-- Simulator (`pnpm --silent simulate --games 200`): 3 players 11.1 s = 55.5 ms/game; 5 players 6.6 s = 33.0 ms/game.
-  NFR-1201: generator/simulator = 71.9/55.5 = 1.30x (3 players, workers 1), 44.0/33.0 = 1.33x (5 players); limit 3x.
-- Projection to 100,000 games: 5 players 26.2 MB / 1000 x 100000 = 2,622 MB (ceiling 8,000 MB, NFR-1203); 3 players 4,194 MB.
-- `validate` of the 1000-game 3-player run exits 0, `status: OK`. Measurement datasets were deleted; `.data/datasets` is empty.
+## Measured figures
+Iteration 9 (1000 games, one shard): 3 players 981 decisions/game, 41,942 B/game, 72.1 ms/game (`--workers 1` 71.9);
+5 players 635 decisions/game, 26,224 B/game, 44.0 ms/game. Simulator 55.5 ms/game (3p), 33.0 (5p); NFR-1201 ratio 1.30x/1.33x (limit 3x).
+
+Iteration 10 (full runs, 5 players, `argentina-fidepo`, five `random` seats, 100,000 games = 100 shards of 1000, 10 cores):
+| dir under `.data/datasets/` | how | summary | size | wall |
+|---|---|---|---|---|
+| `s0-full` | one run, default workers | `100 complete (0 skipped, 0 failed)`, rows games 100000 hands 1700000 decisions 63500000 | 2617.9 MB (2,617,928,524 B; 26,179 B/game) | duration 650.3 s, external 650 s |
+| `s0-full-resume` | killed (SIGKILL) at 40 complete, rerun | `100 complete (40 skipped, 0 failed)`, same rows | 2623.9 MB (2,623,935,065 B) | rerun 395.9 s, external 397 s |
+- Projection was 2,622 MB; actual 2,617.9 MB. 6.5 ms/game wall across 10 workers. Per shard ~26.2 MB (decisions ~25.8 MB, hands ~349 KB, games ~19 KB).
+- `validate` of each: exit 0, `status: OK`, ~11.5 min wall (single-threaded; 692 s and 699 s). The two datasets differ in size
+  because seeds contain the run id (`<run_id>-<shard>-<index>`), so they are different games.
+- Both datasets (~2.5 GB each on disk) are kept, git-ignored. The validate report of `s0-full` is quoted in `iterations/10-full-run.md`.
 - Final command list: `pnpm generate-data run --run-id <id> --games <n> [--workers <n>] [--out <dir>] [--players <n>] [--preset <p>]
   [--shard-size <n>] [--replay-every <n>] [--strategies <list>]`, `pnpm generate-data validate --run-id <id> [--out <dir>]`.
