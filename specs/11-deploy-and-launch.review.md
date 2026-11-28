@@ -53,3 +53,9 @@ Delta pass 3: no MUST. Verified MUST trend: pass 1 = 2, pass 2 = 2 (introduced b
 
 Verdict: **READY**. No verified MUST. Implementer could build without asking a question: yes.
 Passes: 1 discovery (3 reviewers), 2 delta, 1 readiness (4 total review rounds). MUST trend: 2 → 2 → 0 → 0. Spec size: 194 → 204 lines (+5%).
+
+## Amendment after Iteration 4
+
+| ID | Pass | Sev | Location | Finding (one line) | Status | Resolution |
+|----|------|-----|----------|--------------------|--------|------------|
+| R-033 | impl | MUST | VC-1134 | Literal grep cannot be empty: it matches placeholders (`...`, `…`), the documented dummy `local-test-secret`, and the spec's own text | decided | Operator: reword to the intent. VC-1134 now excludes `specs/`, placeholders and the dummy; spec and plan updated; the check passes (no output). Intent unchanged (BR-1107). |

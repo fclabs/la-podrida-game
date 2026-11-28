@@ -206,7 +206,7 @@ No safe parallelism: iterations 1–3 all edit `package.json`, share `scripts/li
 - VC-1128: `docs/deployment.md` has the runbook, checklist, rollback and launch-record sections; `docs/development.md` has §19 "Deployment and launch checks" and §20 "Known limitations"; `git grep -n -E '§19|#19' -- docs README.md` shows no reference that still means Known limitations at its old number; `README.md` lists the three scripts.
 - VC-1129: the rollback section names `vercel rollback`, the listing command and the production-only limit, and the documented form matches `vercel rollback --help`.
 - VC-1120 (content): the checklist lists the six items of FR-1120.
-- VC-1134: `git grep -n -E "BLOB_READ_WRITE_TOKEN=[^ ]|CRON_SECRET=[^ ]|x-vercel-protection-bypass: [A-Za-z0-9]{8}"` finds no value in tracked files, and `git check-ignore .env.local .vercel` lists both.
+- VC-1134: `git grep -n -E "BLOB_READ_WRITE_TOKEN=[^ ]|CRON_SECRET=[^ ]|x-vercel-protection-bypass: [A-Za-z0-9]{8}" -- . ":(exclude)specs" | grep -v -E "=(\.\.\.|…)|local-test-secret"` prints nothing (placeholders `...` and `…` and the documented dummy `local-test-secret` are allowed; `specs/` is excluded because it quotes the pattern), and `git check-ignore .env.local .vercel` lists both → BR-1107.
 - `docs/deployment.md` does not contain the strings `11-deploy`, `specs/` or `artifacts`.
 - Prettier passes on the new docs: `pnpm lint`; `pnpm typecheck`, `pnpm test` still pass; `git diff main --stat -- src app vercel.json 'specs/*-frozen.md'` is empty.
 - Artifacts: `iterations/04-docs.md` exists and records each criterion with the command run.
