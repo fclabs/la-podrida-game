@@ -8,6 +8,7 @@ import { createGame } from '@/src/engine/engine';
 import { createPlayers } from '@/src/players/registry';
 import { evaluate } from '@/src/score/score-engine';
 import { runAiLoop } from '@/src/service/ai-loop';
+import { loadHooks } from './hooks';
 import { processShard } from './shard';
 import type { ShardErrorResponse, ShardRequest, ShardResponse } from './worker-host';
 
@@ -34,18 +35,27 @@ function selftest(seed: string): number[] {
   return evaluate(state).totals;
 }
 
+// Loaded once, at worker start (the first shard message waits for it).
+const loaded = loadHooks();
+loaded.catch(() => undefined); // the failure is reported when a shard awaits it
+
 async function handleShard(request: ShardRequest): Promise<void> {
   try {
+    const { hooks, onShard } = await loaded;
+    onShard?.({ shard: request.shard, phase: 'start' });
     const result = await processShard({
       params: request.params,
       shard: request.shard,
       runDir: request.runDir,
+      hooks,
       stamp: {
         git_commit: request.git_commit,
         git_dirty: request.git_dirty,
         now: () => new Date().toISOString(),
       },
     });
+    // `end` follows the renames, so it is only called for a shard that completed.
+    if (result.status === 'complete') onShard?.({ shard: request.shard, phase: 'end' });
     const response: ShardResponse = { kind: 'shard-result', shard: request.shard, result };
     parentPort?.postMessage(response);
   } catch (error) {

@@ -86,3 +86,23 @@ Consequences: nothing in this iteration depends on it; no test exercises it.
 
 ## D-017: `run` test must not use the default `--out` (Iteration 5)
 Decision: the old args.test "valid run hits the stub" was removed (it would now run 1000 games into `.data/datasets`); CLI run tests always pass `--out <makeTempDir()>`.
+
+## D-018: Any failed shard terminates its worker, is cleaned up, then recorded; the worker is replaced (Iteration 6)
+Context: FR-1217 + I-6 want the files deleted only once the worker has stopped, whatever the failure.
+Decision: for a failed game result, `shard-error`, worker `error` or worker `exit`, the slot calls `worker.terminate()` (resolves when the worker is gone), then `cleanupShardFiles(runDir, shard)`, then `record(failed)`, and spawns a replacement worker on its next shard. A game failure also costs a worker restart (tsx start-up, ~0.3 s).
+Rejected: keeping a worker alive after posting a failure (needs a "done writing" proof beyond I-6's wording); worker calling `process.exit` itself.
+Consequences: pool size is kept; `executeRun` only rejects on manifest-write errors.
+
+## D-019: Any error thrown by a game is a game failure with `gameSeed` (Iteration 6)
+Decision: `processShard` wraps only the `playRecordedGame` call: whatever it throws (GameFailure, AiLoopLimitError, IllegalMoveError, a hook's error) yields `{status:'failed', seed: gameSeed(run_id, shard, index), message: error.message}` and stops the shard. Errors from the sinks/disk still reject (`shard-error`, seed null). Supersedes D-013.
+Consequences: shard.test's "other errors propagate" test became "any error thrown by a game fails the shard".
+
+## D-020: Hook loading and `onShard` timing (Iteration 6)
+Decision: `hooks.ts` `loadHooks(env)` imports `pathToFileURL(resolve(path))`, takes the default export, and calls `runAiLoop(real)` / `replayRunAiLoop(real)` once to get the plain functions of D-007. The worker starts the load at module start and each shard awaits it. `onShard('start')` runs before `processShard`; `'end'` only for a shard that completed (after the renames); a failed shard gets no `end`. An empty variable counts as unset.
+Rejected: calling `end` for failed shards too (spec says "end after the renames"); loading hooks in the main thread.
+Consequences: a throwing `onShard` or a hook-load error is a `shard-error` (seed null).
+
+## D-021: Test fixtures are one env-configured module (Iteration 6)
+Decision: `fixtures/hooks-configurable.ts` exports all four hooks and is inert unless the test sets its `HOOK_*` env vars (documented in CONTEXT.md); `hooks-empty.ts` exports `{}`. Tests identify games by `state.seed` (I-4).
+Consequences: later tests (resume, validate) reuse these to create failed shards.
+

@@ -1,7 +1,7 @@
 // Plays one shard in-process and writes its three gzip JSONL files (spec 12 FR-1204, FR-1214).
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { GameFailure, type PlayRecordedGameOptions, playRecordedGame } from './game';
+import { type PlayRecordedGameOptions, gameSeed, playRecordedGame } from './game';
 import { planShards, shardFilePaths, shardsDir } from './manifest';
 import type { CompleteShardEntry } from './schema';
 import { type JsonlGzipSink, createJsonlGzipSink } from './sinks';
@@ -35,7 +35,7 @@ export interface ProcessShardOptions {
   stamp: ShardStamp;
 }
 
-/** The first failing game of a shard; its `.tmp` files are left in place (cleanup: Iteration 6). */
+/** The first failing game of a shard; its `.tmp` files are left in place for the main thread to delete. */
 export interface ShardFailure {
   status: 'failed';
   seed: string;
@@ -47,9 +47,10 @@ export type ShardResult = CompleteShardEntry | ShardFailure;
 
 /**
  * Plays the games of `shard` one at a time, streaming each game's rows to the three sinks, then
- * renames the files and returns the `complete` manifest entry. Stops at the first `GameFailure`
- * and returns `{ status: 'failed', seed, message }`; any other error closes the sinks and
- * propagates unchanged.
+ * renames the files and returns the `complete` manifest entry. Anything thrown while a game is
+ * played (a failed check, `AiLoopLimitError`, `IllegalMoveError`, a hook) stops the shard at that
+ * game and returns `{ status: 'failed', seed: gameSeed(...), message }`; the sinks are closed and
+ * their `.tmp` files stay. Errors outside a game (disk, sinks) propagate unchanged.
  */
 export async function processShard(options: ProcessShardOptions): Promise<ShardResult> {
   const { params, shard, runDir, hooks, stamp } = options;
@@ -64,26 +65,34 @@ export async function processShard(options: ProcessShardOptions): Promise<ShardR
     decisions: createJsonlGzipSink(paths.decisions),
   };
 
+  let index = 0;
   try {
-    for (let index = 0; index < planned.games; index++) {
-      const tables = playRecordedGame({
-        run_id: params.run_id,
-        shard,
-        index,
-        preset: params.preset,
-        strategies: params.strategies,
-        replay_every: params.replay_every,
-        ...hooks,
-      });
+    for (; index < planned.games; index++) {
+      let tables: ReturnType<typeof playRecordedGame>;
+      try {
+        tables = playRecordedGame({
+          run_id: params.run_id,
+          shard,
+          index,
+          preset: params.preset,
+          strategies: params.strategies,
+          replay_every: params.replay_every,
+          ...hooks,
+        });
+      } catch (error) {
+        await Promise.all([sinks.games.abort(), sinks.hands.abort(), sinks.decisions.abort()]);
+        return {
+          status: 'failed',
+          seed: gameSeed(params.run_id, shard, index),
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
       await sinks.games.append([tables.games]);
       await sinks.hands.append(tables.hands);
       await sinks.decisions.append(tables.decisions);
     }
   } catch (error) {
     await Promise.all([sinks.games.abort(), sinks.hands.abort(), sinks.decisions.abort()]);
-    if (error instanceof GameFailure) {
-      return { status: 'failed', seed: error.seed, message: error.message };
-    }
     throw error;
   }
 

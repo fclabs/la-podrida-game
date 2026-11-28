@@ -14,6 +14,7 @@ import {
 import { createJsonlGzipSink } from '../../../scripts/datagen/sinks';
 import { type ShardParams, type ShardStamp, processShard } from '../../../scripts/datagen/shard';
 import { shardFilePaths } from '../../../scripts/datagen/manifest';
+import { runAiLoop } from '../../../src/service/ai-loop';
 import { makeTempDir } from './helpers';
 
 const stamp: ShardStamp = {
@@ -176,22 +177,21 @@ describe('processShard', () => {
     ]);
   });
 
-  it('other errors close the sinks and propagate unchanged', async () => {
+  it('any error thrown by a game fails the shard with that game seed', async () => {
     const dir = makeTempDir();
-    const boom = new Error('boom');
-    await expect(
-      processShard({
-        params: params(),
-        shard: 0,
-        runDir: dir,
-        stamp,
-        hooks: {
-          runAiLoop: () => {
-            throw boom;
-          },
+    const res = await processShard({
+      params: params(),
+      shard: 1,
+      runDir: dir,
+      stamp,
+      hooks: {
+        runAiLoop: (state, players, options) => {
+          if (state.seed === 'sh-1-2') throw new Error('boom');
+          return runAiLoop(state, players, options);
         },
-      }),
-    ).rejects.toBe(boom);
+      },
+    });
+    expect(res).toMatchObject({ status: 'failed', seed: 'sh-1-2', message: 'boom' });
   });
 
   it('rejects a shard outside the plan', async () => {

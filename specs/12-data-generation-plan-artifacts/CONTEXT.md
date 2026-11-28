@@ -1,4 +1,4 @@
-# CONTEXT — Spec 12 data generation (state after Iteration 5)
+# CONTEXT — Spec 12 data generation (state after Iteration 6)
 
 ## Current state
 - Spec start commit (HEAD before any Phase 12 change): `af777e04fcf3d8b751444c48770134c470622a9b`.
@@ -8,12 +8,16 @@
 - Iteration 3 done: outcome labels, `games`/`hands` rows, the FR-1212 checks 1-5 and the sampled
   replay (FR-1213) exist as `playRecordedGame`; it returns rows in memory, nothing is written to disk.
 - Iteration 4 done: gzip JSONL sinks, the manifest schema/helpers and `processShard` exist; a shard
-  can be written to disk in-process (no workers, no `run` command yet). Failed-shard cleanup of
-  `.tmp` files is NOT done (Iteration 6); `processShard` leaves them in place.
+  can be written to disk in-process. `processShard` leaves a failed shard's `.tmp` files in place; the
+  main thread deletes them (Iteration 6, `cleanupShardFiles`).
 - Iteration 5 done: `pnpm generate-data run` works end to end with a worker pool and prints the
-  4-line summary; exit 0 when every shard is complete, else 1 (a `failed` shard is recorded in the
-  manifest but its files are NOT cleaned up and unexpected errors/worker deaths just reject the run;
-  Iteration 6). No resume yet: `run` into an existing run id overwrites the manifest (Iteration 8).
+  4-line summary; exit 0 when every shard is complete, else 1. No resume yet: `run` into an existing
+  run id overwrites the manifest (Iteration 8).
+- Iteration 6 done: failure handling (FR-1217) and the test-hook seam. Any error thrown while a game is
+  played fails the shard with `gameSeed(run, shard, index)`; a failing/dying worker is terminated, the
+  shard's files (final and `.tmp`) are deleted by the main thread, the shard is recorded `failed`, a
+  replacement worker is started if shards remain; the run prints the summary and exits 1. Hook modules
+  from `GENERATE_DATA_TEST_HOOKS` are loaded by the worker. No resume yet (Iteration 8).
 - A-2 proven: a `worker_threads` worker started with `execArgv: ['--import', 'tsx']` from a tsx
   process loads `.ts` and resolves `@/`.
 - Baseline of `pnpm --silent simulate --games 200 --seed sim` is in `baseline-simulate.txt`
@@ -24,9 +28,12 @@
 - `scripts/generate-data.ts` — entry; dispatches on the first argument; UsageError -> stderr line; `run` -> `executeRun` (git info read once here via `git rev-parse HEAD` / `git status --porcelain`); `validate` stub.
 - `scripts/datagen/constants.ts` — `SCHEMA_VERSION`, `GENERATOR_VERSION`, FR-1203 defaults, `DEFAULT_OUT`.
 - `scripts/datagen/args.ts` — `parseRunArgs`, `parseValidateArgs`, `UsageError`, option types.
-- `scripts/datagen/worker.ts` — worker entry: answers `selftest` and `shard` messages (never mentions the manifest, VC-1251).
+- `scripts/datagen/worker.ts` — worker entry: answers `selftest` and `shard` messages; loads hooks once at start; calls `onShard` around a shard (never mentions the manifest, VC-1251).
+- `scripts/datagen/hooks.ts` — `loadHooks`, `HookModule`, `LoadedHooks`, `HOOKS_ENV`.
+- `tests/unit/datagen/failures.test.ts` — VC-1221..1226/1229b/1247/1251/1253, `loadHooks`, `cleanupShardFiles`.
+- `tests/unit/datagen/fixtures/hooks-configurable.ts`, `hooks-empty.ts` — hook modules (see Public interfaces).
 - `scripts/datagen/worker-host.ts` — `startWorker` and the message types `ShardRequest`/`ShardResponse`/`ShardErrorResponse`.
-- `scripts/datagen/run.ts` — `executeRun`, the pool, `formatSummary`, `oneDecimal`.
+- `scripts/datagen/run.ts` — `executeRun`, the pool, `cleanupShardFiles`, `formatSummary`, `oneDecimal`.
 - `tests/unit/datagen/run.test.ts` — VC-1201/1203/1204/1205/1227/1228/1229/1232/1249 at CLI level, summary format.
 - `scripts/datagen/schema.ts` — Zod schemas `PendingDecisionRowSchema`, `OutcomeColumnsSchema`, `DecisionRowSchema`, `GamesRowSchema`, `HandsRowSchema`, and the manifest: `ShardFileSchema`, `ManifestParamsSchema`, `ShardEntrySchema`, `ManifestSchema` (+ types).
 - `scripts/datagen/sinks.ts` — `createJsonlGzipSink`.
@@ -63,12 +70,17 @@ startWorker(entryFile: string | URL, workerData?: unknown): Worker
 //   in  { kind: 'selftest', seed }  ->  out { kind: 'selftest-result', totals: number[] }
 //   in  ShardRequest { kind:'shard', params: ShardParams, shard, runDir, git_commit, git_dirty }
 //       -> out ShardResponse { kind:'shard-result', shard, result: ShardResult }   (complete entry or {status:'failed',seed,message})
-//       -> or ShardErrorResponse { kind:'shard-error', shard, message }  (any non-GameFailure error thrown by processShard)
-//   A worker handles one shard message at a time and stays alive for the next (the pool reuses it).
-//   The worker builds `stamp.now = () => new Date().toISOString()`; hooks are not passed yet (Iteration 6).
+//       -> or ShardErrorResponse { kind:'shard-error', shard, message }  (thrown outside a game: hook load, onShard, sinks, disk)
+//   A worker handles one shard message at a time and stays alive for the next while shards succeed.
+//   The worker builds `stamp.now = () => new Date().toISOString()` and passes the loaded hooks to processShard.
+//   Failure message of a game: result {status:'failed', seed: <that game's seed>, message}. The main thread
+//   treats {failed result, shard-error, worker 'error' event, worker exit} alike (see run.ts below).
 // scripts/datagen/run.ts
 executeRun(options: RunOptions, deps: { now: () => string; gitInfo: {git_commit,git_dirty}; write?: (s)=>void }):
   Promise<{ manifest: Manifest; exitCode: 0|1 }>
+cleanupShardFiles(runDir: string, shard: number): Promise<string | null>
+  // deletes the 3 final files and their `.tmp` of the shard (rm force: missing is fine); null when all gone,
+  // else the other errors' messages joined with ", ". Call only after the shard's worker has stopped (I-6).
 formatSummary(manifest, skipped: number, durationSeconds: number): string   // the 4 lines + trailing "\n"; reused by resume
 oneDecimal(n): string                                                       // never "-0.0"
 // generate-data.ts: `process.exitCode = (await executeRun(parseRunArgs(rest), { now: () => new Date().toISOString(), gitInfo: readGitInfo() })).exitCode`
@@ -161,13 +173,35 @@ ShardStamp { git_commit: string; git_dirty: boolean; now: () => string }   // su
 processShard({ params, shard, runDir, hooks?, stamp }): Promise<ShardResult>
 ShardResult = CompleteShardEntry | { status: 'failed', seed: string, message: string }
 ```
+```ts
+// scripts/datagen/hooks.ts  (worker side only; the main thread never reads the variable)
+HOOKS_ENV = 'GENERATE_DATA_TEST_HOOKS'
+interface HookModule { runAiLoop?(real) => fn; replayRunAiLoop?(real) => fn;
+                       transformRows?(rows: GameTables) => GameTables; onShard?({shard, phase:'start'|'end'}) => void }
+interface LoadedHooks { hooks: ShardHooks /* plain functions, factories applied once */; onShard? }
+loadHooks(env = process.env): Promise<LoadedHooks>   // unset or '' -> { hooks: {} }; else import(default export, missing = no hook)
+```
+Hook module contract: the module's DEFAULT export holds the optional functions; the worker imports it once at
+start (file path, absolute or relative to cwd). `onShard('start')` runs before `processShard`, `'end'` after it
+returned a complete entry (after the renames); NOT called for a failed shard. A hook that throws (or a throwing
+`onShard`) fails the shard with `seed: null` for `onShard`/load errors; a throw inside a game hook (`runAiLoop`,
+`transformRows`, `replayRunAiLoop`) fails the shard with that game's seed.
+Fixtures (tests/unit/datagen/fixtures/): `hooks-empty.ts` (`export default {}`); `hooks-configurable.ts`, inert
+unless env vars are set by the test (via `runCli(args, { env })`): `HOOK_FAIL_SEED` (the game, matched on
+`state.seed` / `rows.games.seed`), `HOOK_MODE` (`not-game-over|limit|illegal` for runAiLoop;
+`drop-decision|points|tricks|drop-hand` for transformRows; `replay-differ` for replayRunAiLoop, changes step 1),
+`HOOK_CALLS_LOG` (one seed per runAiLoop-hook call), `HOOK_REPLAY_LOG` (one seed per replay), `HOOK_TIMES_LOG`
+(`<shard> <phase> <ms>`), `HOOK_EXIT_SHARD` (process.exit(1) at that shard's start), `HOOK_MANIFEST_PATH`
+(deleted at start of shard 0). Hook modules may read any env var (I-4).
+
 `processShard`: mkdir `<runDir>/shards` (recursive); plays games `0..n-1` of the shard (n from `planShards`;
 RangeError if the shard is not in the plan); after each game appends its rows to the three sinks; on success
 calls `finish()` on games, hands, decisions in that order (each renames) and returns the manifest `complete`
 entry (`files.*.path` relative to `runDir`, e.g. `shards/shard-00000.games.jsonl.gz`; `completed_at = stamp.now()`
 called after the renames). On `GameFailure`: aborts the sinks (`.tmp` files STAY), returns the failure
-(first failing game only). Any other error: aborts the sinks and rethrows unchanged (the seed is then
-`gameSeed(run_id, shard, index)`, which the caller/Iteration 6 must derive; `processShard` does not).
+(first failing game only). ANY error thrown by `playRecordedGame` (check failures, `AiLoopLimitError`,
+`IllegalMoveError`, hooks) becomes `{status:'failed', seed: gameSeed(run_id, shard, index), message: error.message}`
+(sinks aborted, `.tmp` stay). Errors outside the game call (sink/disk errors) abort the sinks and rethrow.
 Keys of every row are the schema's order (tests check this against the schemas' shapes).
 
 ## Conventions & invariants
@@ -195,17 +229,20 @@ Keys of every row are the schema's order (tests check this against the schemas' 
 
 ## Known gaps
 - `validate` is a stub.
-- Pool (D-014): `min(workers, shards)` workers started with `startWorker(worker.ts)`; one shared queue (`shift()` in
-  shard order); a worker that answers gets the next shard; the main thread writes the manifest in `record()`
-  (serialised promise chain) right after each result; the first `shard-error`, worker `error` or unexpected
-  `exit` rejects `executeRun` (workers are terminated in `finally`). `skipped` is always 0 (resume: Iteration 8).
+- Pool (D-014, D-018): `min(workers, shards)` slots, each owning at most one live worker (`startWorker(worker.ts)`);
+  one shared queue (`shift()` in shard order); the main thread writes the manifest in `record()` (serialised
+  promise chain). Per shard `exchange()` resolves on the first of: shard-result (complete or failed), `shard-error`,
+  worker `error`, worker `exit` (message `worker exited unexpectedly (code N)`, seed null). On any failure the slot
+  `terminate()`s the worker (waits for exit), runs `cleanupShardFiles`, records `failed` (`error: {seed, message}`,
+  message gets `; cleanup failed: <reason>` when cleanup reports a problem), and spawns a replacement lazily.
+  Only a manifest write failure (disk) rejects `executeRun`. `skipped` is always 0 (resume: Iteration 8).
+  Exit code: 0 iff every shard is `complete`, else 1 (summary is always printed first).
   `executeRun` does mkdir -p of `<out>/<run_id>` (resolved against cwd) and rewrites any existing manifest.
-- Failed-shard cleanup (deleting `.tmp`/final files) and start-up `*.tmp` cleanup are not implemented (Iterations 6, 8).
-- `processShard` rethrows non-`GameFailure` errors (no seed attached); Iteration 6 converts them to failures.
+- Start-up `*.tmp` cleanup is not implemented (Iteration 8).
 - The manifest `ShardEntry` 'failed' shape is `error: {seed, message}`; `ShardFailure` (processShard) is flat; the caller maps.
 - `rec.rows()` returns the live array; `buildTables` copies into new `DecisionRow` objects.
 - Rows are not schema-parsed inside `playRecordedGame` (perf); the sinks/validate iterations parse where needed.
-- The manifest `failed` entry is built from the worker's `{seed,message}` in `run.ts` (error.seed string; `null` only after Iteration 6).
-- Hook modules from the environment (`GENERATE_DATA_TEST_HOOKS`) are not loaded yet (Iteration 6).
+- The manifest `failed` entry is `{shard, games, status:'failed', error:{seed: string|null, message}}`, built in `run.ts`;
+  `seed` is null for a dead worker, `shard-error`, `onShard`/hook-load errors.
 - Replay compares move ids rebuilt from `bid-made`/`card-played` events of the replay result.
 - `--out` default for `validate` is `.data/datasets` (I-1).

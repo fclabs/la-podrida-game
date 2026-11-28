@@ -1,12 +1,12 @@
 // The `run` command (spec 12 FR-1201, FR-1214..FR-1216): creates the run directory and the
 // initial manifest, processes the shards with a pool of workers and prints the run summary.
 // Only this (main) thread writes the manifest (BR-1206).
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Worker } from 'node:worker_threads';
 import type { RunOptions } from './args';
-import { newManifest, writeManifestAtomic } from './manifest';
+import { newManifest, shardFilePaths, writeManifestAtomic } from './manifest';
 import type { CompleteShardEntry, Manifest, ShardEntry } from './schema';
 import { startWorker } from './worker-host';
 import type { ShardErrorResponse, ShardRequest, ShardResponse } from './worker-host';
@@ -72,9 +72,71 @@ export function formatSummary(
 const WORKER_ENTRY = fileURLToPath(new URL('./worker.ts', import.meta.url));
 
 /**
+ * Deletes every file of `shard` that exists, final or `.tmp` (FR-1217). Call it only once the
+ * shard's worker has stopped. A missing file is fine; any other failure is collected. Returns
+ * `null` when everything is gone, else the reasons joined with `, `.
+ */
+export async function cleanupShardFiles(runDir: string, shard: number): Promise<string | null> {
+  const problems: string[] = [];
+  for (const file of Object.values(shardFilePaths(runDir, shard))) {
+    for (const target of [file, `${file}.tmp`]) {
+      try {
+        await rm(target, { force: true });
+      } catch (error) {
+        problems.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+  return problems.length === 0 ? null : problems.join(', ');
+}
+
+/** What became of one shard sent to one worker. */
+type Exchange =
+  { complete: CompleteShardEntry } | { failure: { seed: string | null; message: string } };
+
+/**
+ * Sends `request` to `worker` and waits for its answer, a `shard-error`, an uncaught worker
+ * error, or the worker exiting (a worker that dies has `seed: null`).
+ */
+function exchange(worker: Worker, request: ShardRequest): Promise<Exchange> {
+  return new Promise<Exchange>((resolve) => {
+    const finish = (outcome: Exchange): void => {
+      worker.off('message', onMessage);
+      worker.off('error', onError);
+      worker.off('exit', onExit);
+      resolve(outcome);
+    };
+    const onMessage = (message: ShardResponse | ShardErrorResponse): void => {
+      if (message.kind === 'shard-result') {
+        const { result } = message;
+        finish(
+          result.status === 'complete'
+            ? { complete: result }
+            : { failure: { seed: result.seed, message: result.message } },
+        );
+      } else if (message.kind === 'shard-error') {
+        finish({ failure: { seed: null, message: message.message } });
+      }
+    };
+    const onError = (error: unknown): void =>
+      finish({
+        failure: { seed: null, message: error instanceof Error ? error.message : String(error) },
+      });
+    const onExit = (code: number): void =>
+      finish({ failure: { seed: null, message: `worker exited unexpectedly (code ${code})` } });
+    worker.on('message', onMessage);
+    worker.on('error', onError);
+    worker.on('exit', onExit);
+    worker.postMessage(request);
+  });
+}
+
+/**
  * Plays every shard of the run with at most `options.workers` workers. Each worker handles one
  * shard at a time and is reused: when it answers, the main thread updates the manifest and hands
- * it the next unprocessed shard (a shared queue, in shard order).
+ * it the next unprocessed shard (a shared queue, in shard order). A failing shard (a game
+ * failure, a worker error or a dead worker) is cleaned up once its worker has stopped, recorded
+ * as `failed`, and the worker is replaced; the other shards continue.
  */
 export async function executeRun(options: RunOptions, deps: RunDeps): Promise<RunOutcome> {
   const started = performance.now();
@@ -104,52 +166,53 @@ export async function executeRun(options: RunOptions, deps: RunDeps): Promise<Ru
     return writing;
   };
 
-  const slot = (worker: Worker): Promise<void> =>
-    new Promise<void>((resolve, reject) => {
-      const next = (): void => {
-        const shard = queue.shift();
-        if (shard === undefined) return resolve();
-        const request: ShardRequest = {
-          kind: 'shard',
-          params: { ...options },
-          shard,
-          runDir,
-          git_commit: deps.gitInfo.git_commit,
-          git_dirty: deps.gitInfo.git_dirty,
-        };
-        worker.postMessage(request);
-      };
-      worker.on('message', (message: ShardResponse | ShardErrorResponse) => {
-        if (message.kind === 'shard-result') {
-          const planned = manifest.shards[message.shard];
-          const { result } = message;
-          const entry: ShardEntry =
-            result.status === 'complete'
-              ? result
-              : {
-                  shard: planned.shard,
-                  games: planned.games,
-                  status: 'failed',
-                  error: { seed: result.seed, message: result.message },
-                };
-          record(entry).then(next, reject);
-        } else if (message.kind === 'shard-error') {
-          reject(new Error(`shard ${message.shard}: ${message.message}`));
-        }
-      });
-      worker.on('error', reject);
-      worker.on('exit', (code) => reject(new Error(`worker exited unexpectedly (code ${code})`)));
-      next();
-    });
+  const live = new Set<Worker>();
+  const spawn = (): Worker => {
+    const worker = startWorker(WORKER_ENTRY);
+    worker.on('error', () => undefined); // reported through `exchange` while a shard is out
+    live.add(worker);
+    return worker;
+  };
 
-  const workers = Array.from({ length: Math.min(options.workers, queue.length) }, () =>
-    startWorker(WORKER_ENTRY),
-  );
+  const slot = async (): Promise<void> => {
+    let worker: Worker | null = null;
+    for (let shard = queue.shift(); shard !== undefined; shard = queue.shift()) {
+      worker ??= spawn();
+      const outcome = await exchange(worker, {
+        kind: 'shard',
+        params: { ...options },
+        shard,
+        runDir,
+        git_commit: deps.gitInfo.git_commit,
+        git_dirty: deps.gitInfo.git_dirty,
+      });
+      if ('complete' in outcome) {
+        await record(outcome.complete);
+        continue;
+      }
+      // The worker must have exited before its files are deleted (I-6); then replace it.
+      await worker.terminate();
+      live.delete(worker);
+      worker = null;
+      const cleanup = await cleanupShardFiles(runDir, shard);
+      const { seed, message } = outcome.failure;
+      await record({
+        shard,
+        games: manifest.shards[shard].games,
+        status: 'failed',
+        error: {
+          seed,
+          message: cleanup === null ? message : `${message}; cleanup failed: ${cleanup}`,
+        },
+      });
+    }
+  };
+
   try {
-    await Promise.all(workers.map(slot));
+    await Promise.all(Array.from({ length: Math.min(options.workers, queue.length) }, slot));
     await writing;
   } finally {
-    await Promise.all(workers.map((w) => w.terminate()));
+    await Promise.all([...live].map((w) => w.terminate()));
   }
 
   const seconds = (performance.now() - started) / 1000;
