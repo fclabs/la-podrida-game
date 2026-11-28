@@ -53,6 +53,51 @@ export const COPY = {
   // Score sheet (FR-927, FR-928)
   scoreSheet: 'Planilla',
   close: 'Cerrar',
+
+  // Rules dialog
+  rules: 'Reglas',
+  rulesTitle: 'Reglas de La Podrida',
+  rulesSections: [
+    {
+      heading: 'Objetivo',
+      items: [
+        'Es un juego de bazas en el que tenés que acertar exactamente cuántas bazas vas a ganar en cada mano.',
+        'Si ganás más o menos bazas de las que pediste, no cumplís.',
+      ],
+    },
+    {
+      heading: 'Reparto y triunfo',
+      items: [
+        'Se juega con mazo francés de 52 cartas, de 3 a 6 jugadores.',
+        'El repartidor da a cada jugador la cantidad de cartas de la mano. Esa cantidad cambia en cada mano: baja desde el máximo hasta 5, se juegan tantas manos de 4 cartas como jugadores haya, y luego sube de nuevo hasta el máximo.',
+        'Se da vuelta la siguiente carta del mazo: su palo es el triunfo. Si se repartió todo el mazo, el triunfo lo marca la última carta del repartidor.',
+      ],
+    },
+    {
+      heading: 'Pedir',
+      items: [
+        'Empezando por el jugador a la derecha del repartidor, cada uno dice cuántas bazas cree que va a ganar. Se puede pedir cero.',
+        'El repartidor pide último y no puede pedir un número que haga que la suma de los pedidos sea igual a la cantidad de bazas de la mano (así siempre hay al menos un jugador que no cumple).',
+      ],
+    },
+    {
+      heading: 'Jugar',
+      items: [
+        'El jugador mano sale con la carta que quiera; los demás juegan en orden.',
+        'Hay que responder al palo: si tenés una carta del palo de salida, tenés que jugarla. No es obligatorio matar.',
+        'Si no tenés del palo, tenés que jugar un triunfo (fallar). Si tampoco tenés triunfo, jugás cualquier carta.',
+        'La baza la gana el triunfo más alto; si nadie jugó triunfo, la carta más alta del palo de salida. Quien gana la baza sale en la siguiente.',
+      ],
+    },
+    {
+      heading: 'Puntaje',
+      items: [
+        'Si cumplís tu pedido: 10 puntos de bonificación más 1 punto por baza ganada.',
+        'Si no cumplís: solo 1 punto por baza ganada, sin bonificación.',
+        'Al final de todas las manos gana quien tenga más puntos. En caso de empate, gana quien haya fallado menos pedidos.',
+      ],
+    },
+  ],
   liveStatus: {
     'on-track': 'En camino',
     'made-so-far': 'Cumplida',
