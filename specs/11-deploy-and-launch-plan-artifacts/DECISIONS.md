@@ -29,3 +29,9 @@ Context: details the spec leaves open.
 Decision: (a) `passed` compares the ROUNDED `p95Ms` with the limit; (b) `--p95-limit-ms` accepts 1..600000; (c) `--samples` is parsed with no default and rejected for `cold` after parsing (exit 2), `cold` runs with n 1; (d) base URL must parse as `https:`, trailing slashes are stripped for requests but the line keeps the value given; (e) stale pre-read requires a `HeadSchema`-valid document, anything else is `HeadMismatch`; (f) when a game ends mid-run the next game gets that scenario's untimed moves (3 warm, 1 stale) before timing resumes.
 Rejected: judging the unrounded p95; a default `--samples` for cold.
 Consequences: none for other scripts.
+
+## D-006: smoke failure shape and choices (Iteration 3)
+Context: FR-1118/1119 do not define the line after a failed step or how a thrown error is reported.
+Decision: `steps` lists only the steps run, the last being the failed one (`ok:false`); the reason goes to stderr (`smoke: failed: <Name>: <message>`, secrets redacted), not into the line (as D-004). Any thrown error in a step (network, 30 s timeout, status mismatch) fails that step. `--base-url` must be https (as bench-moves). `no-leak` checks the seat token by substring in every body other than the create body. `finalRanking` must hold exactly seats 0..2 (1 human + 2 AI). The in-process helper gained an optional `cronSecret`.
+Rejected: listing all ten steps with the unreached ones `ok:false`.
+Consequences: Iteration 4's runbook should say that a failed run shows a shorter `steps` list.
