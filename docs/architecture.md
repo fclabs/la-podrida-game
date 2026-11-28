@@ -119,6 +119,7 @@ tests/
   unit/  contract/  sim/  api/
 scripts/
   simulate.ts  CLI: run N all-AI games and print stats
+  generate-data.ts  CLI: record all-AI games as a training dataset (modules in datagen/)
 ```
 
 ---
