@@ -31,3 +31,19 @@ Consequences: one recorder per game; the recorder must see every transition of i
 ## D-006: `hidden_stock_left` uses remaining hands plus played cards (Iteration 2)
 Decision: dealt set = cards still in `prev.hand.hands` + the recorder's played ids + the trump card; stock = `buildDeck` order minus that set. This covers the trump-in-dealer-hand case with no special branch.
 Consequences: lengths match VC-1212 (deck - n*cards_dealt - 1, or without -1 when the trump is in the dealer's hand).
+
+## D-007: Per-game hooks are plain function arguments; replay compares event-derived move ids (Iteration 3)
+Context: the spec's hooks are `(real) => fn` factories loaded from a module, but this iteration has no loading.
+Decision: `playRecordedGame` takes `runAiLoop`, `replayRunAiLoop`, `transformRows` as ready functions (I-4: the first only for the game's own play). The replay is unrecorded and its moves are rebuilt from `bid-made`/`card-played` events of the replay result, so any injected loop is observable.
+Rejected: collecting moves through `onTransition` in the replay (an injected loop may ignore it).
+Consequences: Iteration 6 wraps the loaded hook module `(real) => fn` into these arguments. Compare order: moves by step first, then final totals.
+
+## D-008: Check 1 runs before labeling; labeling errors become `GameFailure` (Iteration 3)
+Decision: a non-`game-over` result fails check 1 immediately (labels need a finished game); `buildTables` errors (inconsistent events/rows) are wrapped as `GameFailure("labels: ...")`. Checks 2-5 run after `transformRows` against `evaluate(final state)`; check 2 compares the `hands` row count only, check 5 looks rows up by `hand_index`.
+Rejected: letting label errors escape as plain `Error` (the shard processor would lack the seed).
+Consequences: `GameFailure` is the only per-game failure type apart from errors thrown by the loop itself.
+
+## D-009: `hands` deal columns come from `hand-dealt` events (Iteration 3)
+Decision: `trump_card`, `dealer`, `trump_in_dealer_hand`, `cards_dealt` are taken from the `hand-dealt` events (hand 0 from the initial state, since `createGame`'s events are not in the loop result); scoring columns from `evaluate(final).hands`. `final_place_by_seat[seat]` = the ranking entry's place (competition numbering).
+Rejected: reading the recorder rows (hands with no decisions cannot exist, but the hands table must not depend on rows).
+Consequences: a hands row exists for each scored hand even if `decisions` are dropped by a hook.

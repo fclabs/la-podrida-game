@@ -1,11 +1,13 @@
-# CONTEXT — Spec 12 data generation (state after Iteration 2)
+# CONTEXT — Spec 12 data generation (state after Iteration 3)
 
 ## Current state
 - Spec start commit (HEAD before any Phase 12 change): `af777e04fcf3d8b751444c48770134c470622a9b`.
 - Iteration 1 done: `pnpm generate-data` exists with full argument validation; `run` and `validate`
   are still **stubs** that print `generate-data: <subcommand> is not implemented yet` to stderr and
   exit 1 (later iterations replace them).
-- Iteration 2 done: `decisions` row schemas and the observing recorder exist (no outcome labels yet).
+- Iteration 2 done: `decisions` row schemas and the observing recorder exist.
+- Iteration 3 done: outcome labels, `games`/`hands` rows, the FR-1212 checks 1-5 and the sampled
+  replay (FR-1213) exist as `playRecordedGame`; it returns rows in memory, nothing is written to disk.
 - A-2 proven: a `worker_threads` worker started with `execArgv: ['--import', 'tsx']` from a tsx
   process loads `.ts` and resolves `@/`.
 - Baseline of `pnpm --silent simulate --games 200 --seed sim` is in `baseline-simulate.txt`
@@ -18,10 +20,13 @@
 - `scripts/datagen/args.ts` — `parseRunArgs`, `parseValidateArgs`, `UsageError`, option types.
 - `scripts/datagen/worker.ts` — worker entry; only answers `{kind:'selftest', seed}` so far.
 - `scripts/datagen/worker-host.ts` — `startWorker`.
-- `scripts/datagen/schema.ts` — Zod schemas `PendingDecisionRowSchema`, `OutcomeColumnsSchema`, `DecisionRowSchema` and their types.
+- `scripts/datagen/schema.ts` — Zod schemas `PendingDecisionRowSchema`, `OutcomeColumnsSchema`, `DecisionRowSchema`, `GamesRowSchema`, `HandsRowSchema` and their types.
+- `scripts/datagen/labels.ts` — `buildTables` (labels, `hands` rows, `games` row).
+- `scripts/datagen/game.ts` — `gameSeed`, `GameFailure`, `playRecordedGame`.
 - `scripts/datagen/cards.ts` — `cardIds`, `hiddenStockLeft`.
 - `scripts/datagen/recorder.ts` — `createRecorder`.
 - `tests/unit/datagen/recorder.test.ts`, `schema.test.ts` — VC-1207..1216, BR-1208.
+- `tests/unit/datagen/labels.test.ts`, `game.test.ts` — VC-1204/1206/1213/1217..1220/1248/1250, per-game checks, replay.
 - `tests/unit/datagen/helpers.ts` — `runCli`, `makeTempDir`, `REPO_ROOT`.
 - `tests/unit/datagen/args.test.ts` — invalid-case matrix, defaults, CLI sample (VC-1202, VC-1203 first half).
 - `tests/unit/datagen/worker-bootstrap.test.ts` + `fixtures/spawn-selftest.ts` — A-2 proof.
@@ -71,6 +76,36 @@ Recorder { wrapStrategy(seat, strategy): AIStrategy;      // same name, same arg
 //        runAiLoop(state, players, { onTransition: rec.onTransition })
 ```
 
+```ts
+// scripts/datagen/schema.ts (strict, spec column order; per-seat arrays have n_players entries)
+GamesRow { game_id, run_id, shard, seed, preset, n_players, n_hands, strategy_by_seat: string[],
+           final_total_by_seat: int[], final_place_by_seat: int[], generator_version }   // no git/created_at
+HandsRow { game_id, hand_index, cards_dealt, dealer, trump_card: string, trump_in_dealer_hand: bool,
+           bid_by_seat, tricks_won_by_seat, made_by_seat: bool[], points_by_seat }
+DecisionRow  // see above; GamesRowSchema / HandsRowSchema exported next to DecisionRowSchema
+// scripts/datagen/labels.ts
+interface GameTables { games: GamesRow; hands: HandsRow[]; decisions: DecisionRow[] }
+buildTables({ run_id, shard, preset, strategies, initial, final, events, pending }): GameTables
+  // initial = state from createGame (hand 0 dealt); final = game-over state; events = runAiLoop's events
+  // hands rows from evaluate(final).hands; deal columns from hand-dealt events (hand 0 from initial);
+  // won_this_trick = winner of the next trick-won event after the card-played; throws Error if inconsistent
+// scripts/datagen/game.ts
+gameSeed(runId, shard, index): string                      // `${runId}-${shard}-${index}`
+class GameFailure extends Error { readonly seed: string }  // message names the check; nothing else
+type RunAiLoopFn = typeof runAiLoop
+interface PlayRecordedGameOptions { run_id; shard; index; preset; strategies: readonly string[];
+  replay_every: number;
+  runAiLoop?: RunAiLoopFn;                 // the game's own play only
+  replayRunAiLoop?: RunAiLoopFn;           // replay only (default: real runAiLoop)
+  transformRows?: (rows: GameTables) => GameTables }   // after labels, before checks; default identity
+playRecordedGame(options): GameTables     // sync; throws GameFailure; loop errors propagate unchanged
+```
+`playRecordedGame`: seats `ai-<k>` (playerId and name), `gameId` = seed = `R-s-i`, `strategy` set per seat.
+Order: play -> check 1 -> labels -> `transformRows` -> checks 2,3,4,5 -> replay if `index % replay_every === 0`.
+Messages: `check N: ...`, `labels: ...`, `replay: step <n> differs (...)`, `replay: final totals differ (...)`.
+The hooks are plain function arguments (NOT factories `(real) => fn` as in the spec's env hook module;
+Iteration 6 adapts the loaded hook module). The caller must write the rows itself (Iteration 4+).
+
 ## Conventions & invariants
 - Imports of `src/` only from domain, engine, score, players, service/ai-loop, service/player-view.
 - Option names in the manifest/params use snake_case (`shard_size`, `replay_every`); CLI flags use hyphens.
@@ -95,6 +130,9 @@ Recorder { wrapStrategy(seat, strategy): AIStrategy;      // same name, same arg
 - Node here is v26 (engines says 24); pnpm prints a harmless warning.
 
 ## Known gaps
-- `run` / `validate` are stubs; worker only has the selftest message; no `games`/`hands` schemas, labels, sinks, manifest.
-- Rows are pending only; outcome labels (Iteration 3) are not filled; `rows()` returns the live array.
+- `run` / `validate` are stubs; worker only has the selftest message; no sinks, manifest, shard processor.
+- `rec.rows()` returns the live array; `buildTables` copies into new `DecisionRow` objects.
+- Rows are not schema-parsed inside `playRecordedGame` (perf); the sinks/validate iterations parse where needed.
+- Hook modules from the environment (`GENERATE_DATA_TEST_HOOKS`) are not loaded yet (Iteration 6).
+- Replay compares move ids rebuilt from `bid-made`/`card-played` events of the replay result.
 - `--out` default for `validate` is `.data/datasets` (I-1).

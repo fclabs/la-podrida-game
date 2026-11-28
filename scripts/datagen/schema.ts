@@ -1,5 +1,5 @@
 // Row schemas of the generated dataset (spec 12, Data & Interfaces). Keys are in the spec's column
-// order. The `games`, `hands` and manifest schemas come in later iterations.
+// order. The manifest schema comes in a later iteration.
 import { z } from 'zod';
 
 const cardIds = z.array(z.string());
@@ -58,3 +58,35 @@ export const DecisionRowSchema = PendingDecisionRowSchema.extend(OutcomeColumnsS
 export type PendingDecisionRow = z.infer<typeof PendingDecisionRowSchema>;
 export type OutcomeColumns = z.infer<typeof OutcomeColumnsSchema>;
 export type DecisionRow = z.infer<typeof DecisionRowSchema>;
+
+/** A `games` row (spec 12 FR-1211): one per game. No git or wall-clock columns (spec A-8). */
+export const GamesRowSchema = z.strictObject({
+  game_id: z.string(),
+  run_id: z.string(),
+  shard: z.int(),
+  seed: z.string(),
+  preset: z.string(),
+  n_players: z.int(),
+  n_hands: z.int(),
+  strategy_by_seat: z.array(z.string()),
+  final_total_by_seat: perSeatInts,
+  final_place_by_seat: perSeatInts,
+  generator_version: z.int(),
+});
+
+/** A `hands` row (spec 12 FR-1211): one per hand of a game; all per-seat arrays have `n_players`. */
+export const HandsRowSchema = z.strictObject({
+  game_id: z.string(),
+  hand_index: z.int(),
+  cards_dealt: z.int(),
+  dealer: z.int(),
+  trump_card: z.string(),
+  trump_in_dealer_hand: z.boolean(),
+  bid_by_seat: perSeatInts,
+  tricks_won_by_seat: perSeatInts,
+  made_by_seat: z.array(z.boolean()),
+  points_by_seat: perSeatInts,
+});
+
+export type GamesRow = z.infer<typeof GamesRowSchema>;
+export type HandsRow = z.infer<typeof HandsRowSchema>;
