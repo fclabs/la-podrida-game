@@ -2378,7 +2378,7 @@ What Vercel Cron does, and what to know when you deploy:
 - On the **Hobby plan** the job fires at some point within its hour, so "03:00" means 03:00 to 03:59.
 - No `maxDuration` is set, so the platform's default function time limit applies. A run cut off by it leaves the unfinished game with its marker and resumes the next day (§18.6).
 
-The first run on a real Blob store, the real `durationMs` and Blob's list order (§19) are verified when the app is deployed.
+The first run on a real Blob store, the real `durationMs` and Blob's list order (§20) are verified when the app is deployed.
 
 ### 18.10 Running the tests
 
@@ -2466,7 +2466,23 @@ This walks the whole cycle on the file store: create a game, make it look old, c
 
 ---
 
-## 19. Known limitations
+## 19. Deployment and launch checks
+
+Three scripts check a deployment against a real Vercel Blob store. They are run by the operator, not in CI, and all read their secrets from the shell (never from a file). The full runbook, the manual checklist, the rollback steps and the launch record are in [`deployment.md`](./deployment.md).
+
+| Script                | What it checks                                                                                                                                                                                  | Needs                                                                               |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `pnpm blob-checks`    | Against the store itself: a create-only `put` is exclusive under concurrent writers, reads are consistent right after a write, a paged listing is ascending, and a delete removes the keys.      | `BLOB_READ_WRITE_TOKEN` (required)                                                  |
+| `pnpm bench-moves`    | Move latency over HTTP on a deployed URL: p95 against a limit (default 500 ms) for the `warm` and `stale` scenarios, and one timed first move for `cold`.                                         | `--base-url`, `--scenario`; `BLOB_READ_WRITE_TOKEN` for `stale`; bypass if protected |
+| `pnpm smoke`          | A whole game played over HTTP on a deployed URL (ten steps: create, auth, a move conflict, play to the end, resume, retry, no secret leaks, cron auth and run).                                   | `--base-url`; `CRON_SECRET` of that environment; bypass if protected                |
+
+Each prints one JSON line on stdout, and its exit code is 0 when it passed, 1 when it failed and 2 for a usage error. `blob-checks` writes only under `checks/<runId>/` and deletes it. The `stale` scenario of `bench-moves` also writes `head.json` into the store. Benchmark and smoke games expire under the normal retention rule (§18).
+
+The scripts are tested without a network. `tests/unit/scripts/` runs them over the real route handlers and a memory store, and over a store wrapped to misbehave, so a broken store makes the checks fail. The helpers (`scripts/lib/`: strict option parsing, the 30-second request guard, percentiles) are shared. `scripts/` is not layer-restricted.
+
+---
+
+## 20. Known limitations
 
 - **Configuration is validated on the first API request, not at server startup.** The service factory calls `getConfig()` lazily (§16.5), so a misconfigured deployment starts, and its first request answers 500 with a `ConfigError` error line in the logs. Building at module load would break `next build` instead.
 - **Blob credentials are checked by `createObjectStore`, not by `loadConfig`** (§13.3), so a `blob` configuration without them is reported when the store is first built, not at startup.

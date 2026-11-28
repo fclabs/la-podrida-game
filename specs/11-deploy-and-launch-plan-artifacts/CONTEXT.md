@@ -1,6 +1,6 @@
-# CONTEXT (state after Iteration 3)
+# CONTEXT (state after Iteration 4)
 
-Launch state: not started. All three scripts are built: `blob-checks`, `bench-moves`, `smoke` (package.json has exactly these three new entries, FR-1130). No Vercel work yet. Nothing under `src/`, `app/`, `vercel.json` has changed and none may.
+Launch state: not started. All three scripts are built (`blob-checks`, `bench-moves`, `smoke`; package.json has exactly these three new entries, FR-1130) and the docs are written (Iteration 4). No Vercel work yet. Nothing under `src/`, `app/`, `vercel.json` has changed and none may.
 
 ## Commands
 
@@ -120,6 +120,22 @@ Methods not returned delegate to the base. For CLI tests `runCli` takes `io` cap
 
 `.gitignore` ignores `lib/`, so files under `scripts/lib/` need `git add -f` when first added (already tracked after Iteration 1).
 
+## Docs (Iteration 4)
+
+`docs/deployment.md` (standalone: no mention of the plan, spec number or artifact directory) is the runbook. HANDS OFF: its section anchors, which Iterations 5-8 fill, and the runbook commands.
+
+- `## 1. Prerequisites and secrets handling` (1.1 tools, 1.2 where each secret lives, 1.3 silent prompt `read -rs VAR` then `export VAR`, 1.4 local preview read-write token, 1.5 bypass secret, 1.6 `openssl rand -hex 32`)
+- `## 2. Launch runbook`: `### Step 1. Configure Vercel for Preview`, `### Step 2. Preview checks` (2.1 blob-checks .. 2.9 leftovers), `### Step 3. The gate`, `### Step 4. Production`, `### Step 5. First cron run`
+- `## 3. Manual browser checklist` (six FR-1120 items; columns Preview / Production, pass/fail, date, URL)
+- `## 4. Rollback`: `vercel ls --environment production`, `vercel rollback <deployment>` (options `--timeout`, `--yes`, `--json`), `vercel rollback status [project]`; production only; data never deleted
+- `## 5. Launch record`: `**Launch status:** OPEN`; `### 5.1 Runs` (columns #, Environment, Script, Date, URL, JSON line (verbatim), Result; one row per script, add rows for extra runs), `### 5.2 Waivers`, `### 5.3 Regions`, `### 5.4 Manual checklist results`, `### 5.5 Gate evaluation` (ends with `**Gate:** not evaluated`), `### 5.6 First cron run`.
+
+The runbook runs: `pnpm blob-checks`; `pnpm test tests/contract`; `pnpm bench-moves --base-url https://<preview-url> --scenario warm|stale|cold`; `pnpm smoke --base-url https://<preview-url>` (production: `https://la-podrida-game.vercel.app`); `vercel env ls`; `vercel blob list-stores`; `vercel env add CRON_SECRET preview|production`.
+
+`docs/development.md`: new `## 19. Deployment and launch checks`; `## 20. Known limitations` (HANDS OFF numbering). The one old cross-reference (`§19` in 18.9, about Blob's list order) now says `§20`. No table of contents exists. The listing-order known limit text in 18.12 and in 20 is still the old "assumed" wording (Iteration 6 replaces it, FR-1127). `README.md`: three new command rows and a Documentation link to the runbook. `docs/architecture.md` untouched (Iteration 6 owns 1.2, 11, open question 1).
+
+VC-1134 note: `git grep` for the secret-value regex has pre-existing hits that are placeholders, not secrets (`docs/development.md` lines with `BLOB_READ_WRITE_TOKEN=…` and `CRON_SECRET=local-test-secret`, comments in `scripts/blob-checks.ts` and `tests/contract`, spec files). `docs/deployment.md` has none.
+
 ## Not yet done
 
-Real-store runs of VC-1107..VC-1109 belong to Iteration 5. Real-URL bench runs (VC-1113..VC-1115 on a Preview) belong to Iteration 5. Real-URL smoke runs (VC-1106 on a protected Preview, VC-1118, VC-1119) belong to Iteration 5. Docs (Iteration 4) and all Vercel steps are later. Decisions: see `DECISIONS.md`.
+Real-store runs of VC-1107..VC-1109 belong to Iteration 5. Real-URL bench runs (VC-1113..VC-1115 on a Preview) belong to Iteration 5. Real-URL smoke runs (VC-1106 on a protected Preview, VC-1118, VC-1119) belong to Iteration 5. All Vercel steps are later. Decisions: see `DECISIONS.md`.
