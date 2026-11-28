@@ -149,3 +149,6 @@ Iteration 9 only measured and checked; no source change, no interpretation chose
 
 ## No new decisions (Iteration 10)
 Iteration 10 only ran the full dataset and the kill/resume proof; no source change and no interpretation chosen. The kill used SIGKILL on the whole `pnpm` process tree (workers are threads, so no stray processes) once the manifest showed 40 complete shards.
+
+## No new decisions (Iteration 11)
+Iteration 11 only wrote documentation. Two wording choices, neither a design decision: the docs state the unparsable-manifest crash as a limitation (Known gaps), and the proposal's code tree (§5) now shows the shipped `scripts/datagen/` layout instead of `src/datagen/`.

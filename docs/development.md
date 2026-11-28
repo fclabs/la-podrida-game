@@ -49,6 +49,7 @@ tests/
   retention/            The daily cleanup job on the memory and file stores (§18.10)
   sim/                  Long-running simulations (run by `pnpm test:sim` only)
 scripts/simulate.ts     Command-line simulator (`pnpm simulate`)
+scripts/generate-data.ts  Self-play data generator (`pnpm generate-data`); modules in scripts/datagen/ (§19)
 tools/eslint-rules/     Local ESLint rule that enforces the layer boundaries
 docs/                   Design docs (this guide included)
 ```
@@ -2378,7 +2379,7 @@ What Vercel Cron does, and what to know when you deploy:
 - On the **Hobby plan** the job fires at some point within its hour, so "03:00" means 03:00 to 03:59.
 - No `maxDuration` is set, so the platform's default function time limit applies. A run cut off by it leaves the unfinished game with its marker and resumes the next day (§18.6).
 
-The first run on a real Blob store, the real `durationMs` and Blob's list order (§19) are verified when the app is deployed.
+The first run on a real Blob store, the real `durationMs` and Blob's list order (§20) are verified when the app is deployed.
 
 ### 18.10 Running the tests
 
@@ -2466,7 +2467,306 @@ This walks the whole cycle on the file store: create a game, make it look old, c
 
 ---
 
-## 19. Known limitations
+## 19. Data generation: `pnpm generate-data`
+
+`pnpm generate-data` plays many seeded all-AI games and records every decision (each bid and each card play) with the state it was taken in and how the hand and the game turned out. The output is a dataset of gzip-compressed JSON-lines files, meant as the input of a later step that trains a better AI than `random`. This section covers what the dataset contains, how to generate, validate and resume one, how to read it, how the code is organised and what it cannot do. The idea behind it and the later stages (a heuristic strategy, mixed tables, Parquet) are in the proposal [`__future__/data-generation.md`](./__future__/data-generation.md); only the first stages are built.
+
+### 19.1 What the dataset contains
+
+A dataset is one **run**. A run is split into **shards** of a fixed number of games, and each shard holds three tables, one file each:
+
+| Table | One row per | Rows for 5 players, `argentina-fidepo` |
+|---|---|---|
+| `games` | game | 1 |
+| `hands` | hand of a game | 17 per game |
+| `decisions` | bid or card play | 635 per game (85 bids and 550 plays) |
+
+Rows for fewer players have the same columns; 3 players give 981 decisions per game. Rows per game are always `n_players × (n_hands + Σ cards dealt per hand)`.
+
+**`games`:** `game_id`, `run_id`, `shard`, `seed`, `preset`, `n_players`, `n_hands`, `strategy_by_seat` (strategy name per seat), `final_total_by_seat`, `final_place_by_seat` (from `evaluate`, ties share a place), `generator_version`.
+
+**`hands`:** `game_id`, `hand_index`, `cards_dealt` (cards each seat was dealt), `dealer`, `trump_card`, `trump_in_dealer_hand`, and one array of length `n_players` each for `bid_by_seat`, `tricks_won_by_seat`, `made_by_seat` and `points_by_seat`.
+
+**`decisions`:** the columns come in groups.
+
+| Group | Columns |
+|---|---|
+| Keys | `game_id`, `hand_index`, `step` (0, 1, 2, … in play order across the whole game), `seat`, `decision_type` (`bid` or `play`) |
+| Player view | `cards_dealt`, `dealer`, `trump_card`, `trump_in_dealer_hand`, `your_hand`, `bids_so_far` (`null` for a seat that has not bid), `tricks_won_so_far`, `current_trick` (`[{seat, card}]`, empty while bidding), `cards_played_this_hand` (every card played earlier in the hand, in order), `score_totals`, `trick_number` (tricks already completed in the hand) |
+| Action | `legal_move_ids`, `chosen_move_id`, `chosen_index` (position of the chosen id in `legal_move_ids`) |
+| Policy | `strategy`, `policy_probs` (always `null` for now), `explore` (always `false` for now) |
+| Oracle | `hidden_hands` (every seat's remaining cards at decision time, before the move), `hidden_stock_left` (deck cards in no seat's dealt hand and not the trump card) |
+| Outcome labels | `hand_bid`, `hand_tricks_won`, `hand_made`, `hand_points` (all for `seat` in this hand); `won_this_trick` (for a `play`: whether `seat` won the trick the card went into; `null` for a bid); `final_place`, `final_total` (for `seat` at game over) |
+
+Cards and moves are the engine's string ids (`QH`, `bid:3`, `play:QH`), so a row can be fed back into `applyMove`. Arrays indexed by seat have `n_players` entries and the index is the seat number. Dense numeric encodings (one-hot planes and the like) are deliberately not stored: they belong in the training code so they can change without regenerating data.
+
+**Player view versus oracle.** Everything in `decisions` that is not a `hidden_` column is what the strategy could see when it chose (the `PlayerView` and legal moves it received), plus two public columns the view does not carry (`cards_played_this_hand`, `trick_number`), plus the action and the outcome labels. The two `hidden_` columns are the oracle: they show cards the acting seat cannot see. **A column is oracle data if and only if its name starts with `hidden_`.** They are there for analysis and for building teacher signals, but a model trained on them could not run in a real game, so training code must never use `hidden_*` columns as features. The outcome labels are also unknowable at decision time; they are targets, not inputs.
+
+### 19.2 Running: `run`
+
+```sh
+pnpm generate-data run --run-id <id> [--preset <id>] [--players <n>] [--games <n>]
+                       [--shard-size <n>] [--strategies <list>] [--workers <n>]
+                       [--replay-every <n>] [--out <dir>]
+```
+
+| Option | Default | Accepted values |
+|---|---|---|
+| `--run-id` | required | lowercase letters and digits separated by single hyphens (`^[a-z0-9]+(-[a-z0-9]+)*$`), at most 64 characters, not starting with `eval` |
+| `--preset` | `argentina-fidepo` | a preset id, as for `pnpm simulate` (§12.4) |
+| `--players` | the preset's minimum player count | a decimal integer within the preset's player range |
+| `--games` | `1000` | a positive decimal integer |
+| `--shard-size` | `1000` | a positive decimal integer: games per shard |
+| `--strategies` | `random` for every seat | comma-separated strategy names, exactly one per player (only `random` exists today) |
+| `--workers` | `os.availableParallelism()` | a positive decimal integer: how many shards are played at once |
+| `--replay-every` | `100` | a positive decimal integer: game `i` of every shard is replayed and compared when `i` is a multiple of it |
+| `--out` | `.data/datasets` | the directory that holds run directories; the run is written to `<out>/<run-id>/` |
+
+A run has `ceil(games / shard-size)` shards; all but the last hold `shard-size` games. At most `--workers` shards are played at the same time, each by one worker thread, and a shard is played by exactly one worker.
+
+When every shard is done, `run` prints four lines to stdout (the numbers are from a real 20-game run):
+
+```
+run: doc-check  preset: argentina-fidepo  players: 3  games: 20  shards: 2
+shards: 2 complete (0 skipped, 0 failed)
+rows: games 20  hands 580  decisions 19620
+size: 0.8 MB  duration: 1.1 s
+```
+
+`skipped` counts shards a resume left untouched (§19.4). `rows` and `size` cover every complete shard, skipped ones included, and are read from the manifest; `size` is the total bytes of the shard files divided by 1,000,000. `duration` is the wall-clock time of this invocation.
+
+**Exit codes.** `run` exits 0 when every shard is complete and 1 otherwise. A bad command line prints exactly one line to stderr, `generate-data: <problem>`, writes nothing to stdout, creates no file and exits 1. The cases are: no or unknown subcommand, an unknown option or a positional argument, a bad `--run-id`, an unknown preset, `--players` outside the preset's range, a non-integer or zero `--games`, `--shard-size`, `--workers` or `--replay-every`, and a `--strategies` list of the wrong length, with an empty item or with an unknown name. When several things are wrong, the first is reported, checking in the order of the table above. `--run-id` may not start with `eval` so that the `eval-*` seed prefix, reserved for evaluating strategies later, can never appear in training data.
+
+**Clean output.** As with `pnpm simulate` (§12.4), pnpm prints its own banner lines to stdout; use `pnpm --silent generate-data …` when you pipe or check the output.
+
+### 19.3 Validating: `validate`
+
+```sh
+pnpm generate-data validate --run-id <id> [--out <dir>]
+```
+
+`--run-id` follows the same rules as for `run`, and `--out` has the same default. `validate` reads a finished run and checks it, then prints a distribution report:
+
+```
+validate: doc-check  status: OK
+games: 20  hands: 580  decisions: 19620
+decisions per game: mean 981.0  min 981  max 981
+made-bid rate: 10.2%
+average final total by seat: 0: 127.7  1: 131.1  2: 128.2
+average final total by strategy: random: 129.0
+bid histogram, 4: 0:24 1:40 2:35 3:44 4:37
+bid histogram, 5: 0:31 1:20 2:13 3:16 4:25 5:15
+…                                  (one line per distinct number of cards dealt, ascending)
+```
+
+`made-bid rate` is made bids divided by all bids over every hand and seat. A histogram line counts bids by value over the `hands` table, zero counts included. Use it to check the data: with random seating the averages by seat should be close, and every bid value should be roughly equally frequent for `random`.
+
+It checks, in this order:
+
+1. `manifest.json` parses against its schema.
+2. Every complete shard has its three files with the size, SHA-256 and row count the manifest records.
+3. Every row of every file parses against its row schema.
+4. Every `hands` and `decisions` row belongs to a game in `games`, and every game has `n_hands` `hands` rows.
+5. Every game has the expected number of decisions.
+6. The labels are consistent: every hand's bids, tricks, `made` and points equal what the score engine gives for that hand, the tricks of a hand add up to the cards dealt, each decision's `hand_*` and `final_*` labels equal its `hands` and `games` rows, and each seat's hand points add up to its final total.
+7. The replay check: the sampled games (those whose index is a multiple of the manifest's `replay_every`) are replayed from their seeds without recording, and every chosen move and the final totals must equal the recorded ones.
+
+**Exit codes and errors.** `validate` exits 0 when every check passes. When one fails it prints one line to stderr and exits 1, with nothing on stdout:
+
+```
+generate-data: validate: check 4 (join): shard 0: hands row for unknown game doc-check-0-99
+```
+
+A run directory or manifest that does not exist prints `generate-data: no run "<id>" in <out>` and exits 1. When a run has `pending` or `failed` shards, `validate` checks the complete shards only, prints the report with `status: INCOMPLETE` and exits 1; if a complete shard also fails a check, only the failure line is printed.
+
+**Check order is per shard.** Checks 1 and 2 cover the whole manifest first. Checks 3 to 7 then run shard by shard, so that each file is unzipped once; the reported failure is the first failing shard's lowest-numbered check. A check 3 failure in shard 5 is therefore not reported ahead of a check 4 failure in shard 0. `validate` does not compare the manifest's `run_id` with `--run-id`.
+
+**It is slow.** `validate` is single-threaded and replays and re-scores games, so it takes far longer than generating: about 11.5 minutes for the full 100,000-game dataset (§19.9).
+
+### 19.4 Resuming
+
+A run can be killed at any moment (Ctrl-C, a crash, a closed laptop) and continued by running the same command again:
+
+```sh
+pnpm generate-data run --run-id s0 --games 100000 --players 5      # killed part way
+pnpm generate-data run --run-id s0 --games 100000 --players 5      # finishes the rest
+```
+
+Resuming works as follows, and it works this way because the shard is the unit of work and of durability:
+
+- A shard's files are written as `<name>.tmp` and renamed to their final names only when the shard is finished, and the manifest marks the shard `complete` only after the three renames. So a shard is either entirely there or not there at all.
+- At start-up, every leftover `*.tmp` file under the run directory is deleted.
+- A `complete` shard is skipped if its three files exist with the size and SHA-256 the manifest records. Nothing else is read from it. A `complete` shard with a missing, truncated or altered file is re-run, and so is every `pending` and `failed` shard. The files of skipped shards are not rewritten.
+- Because the SHA-256 of every complete shard is read first, a resume of a large run spends some time before any game is played.
+- Rerunning a shard gives the same rows (§19.5).
+
+**The parameter guard.** A resume must play the same games as the original run. Before anything is changed on disk, `run` compares `--preset`, `--players`, `--games`, `--shard-size`, `--strategies` and `--replay-every` with the manifest's `params` (an option you did not pass counts as its default), then the manifest's `schema_version` and `generator_version` with the code's. On the first difference it prints one line and exits 1:
+
+```
+generate-data: run "doc-check" has a different shard-size
+```
+
+`--workers` and `--out` may change freely between runs. If the run directory exists, is not empty and has no manifest, `run` refuses with `generate-data: run directory "<out>/<id>" exists without a manifest` and changes nothing. An empty existing directory is fine.
+
+To start over, delete the run directory or choose another `--run-id`. Resuming a finished run skips every shard and rewrites `manifest.json` with the same content.
+
+### 19.5 Seeds, determinism and the manifest
+
+**Seeds.** Game `i` of shard `s` of run `R` has the engine seed and the `game_id` `R-s-i` (both 0-based, `i` counted within the shard), for example `s0-3-17`. Its seats are `ai-0`, `ai-1`, … with the strategy of seat `k` set in the seat's `strategy`. Because the run id is part of the seed, two runs with different ids play different games even with the same parameters, and shards can be rerun independently and never collide.
+
+**Determinism.** For a fixed preset, player count, strategies and seed, the rows of a game are identical every time. They contain no wall-clock time, host data or random values from outside the engine's seeded streams. So for fixed run parameters the decompressed contents of every shard are identical on every run. The compressed bytes depend on the Node and zlib version, which is why the manifest's checksums describe the stored files and are checked against those same files. Any game can be reproduced by hand with `createGame` and `runAiLoop`, using the seats above and the seed.
+
+**Recording only observes.** Each seat's strategy is wrapped, and the wrapper and the recorder never change a decision, never draw from any random stream and never alter the state. A recorded game ends in exactly the same state as the same game played without recording; it works this way because the dataset must show what the AI would have done without being watched.
+
+**Checks during generation.** Every game is checked before its rows are written: it ended in `game-over`; its `hands` rows number the preset's hand plan; its `decisions` rows number the moves the loop applied; each hand's tricks add up to the cards dealt; and each hand's bid, tricks, `made` and points equal the score engine's. Every `--replay-every`-th game is also replayed and compared (the same replay check as in §19.3).
+
+**The manifest.** `<out>/<run-id>/manifest.json` describes the run and is the only record of which shards are done. It is written before the first shard starts and rewritten after each shard completes or fails, always as `manifest.json.tmp` then renamed, so it is never half-written. Only the main thread writes it; workers write nothing but their shard's temporary files. Its fields:
+
+| Field | Meaning |
+|---|---|
+| `schema_version`, `generator_version` | integers; a resume refuses a manifest whose versions differ from the code's |
+| `run_id`, `created_at` | the run id and the first creation time (kept on resume) |
+| `params` | `preset`, `players`, `games`, `shard_size`, `strategies`, `replay_every` |
+| `shards[]` | per shard, in order: `shard`, `games`, `status` (`pending`, `complete` or `failed`) |
+| for `complete` | `git_commit` (of the process that wrote it, `"unknown"` without git), `git_dirty`, `completed_at`, and `files.{games,hands,decisions}` = `{ path, bytes, sha256, rows }` with `path` relative to the run directory |
+| for `failed` | `error` = `{ seed, message }`, `seed` being the failing game's seed or `null` when it is not known |
+
+Option names in the manifest use underscores (`shard_size`); the command line uses hyphens (`--shard-size`).
+
+**Failures.** A game that fails (the AI loop's move limit, an engine error, a failed check or replay) stops its shard at that game. None of the shard's files is renamed into place; once its worker has stopped, the main thread deletes every file of the shard (final or `.tmp`) and marks it `failed` in the manifest with the seed and the message. The other shards continue, and `run` prints the summary (with the failed count) and exits 1. A worker that dies counts the same, with `seed: null`. Running the command again re-runs the failed shards. If deleting a failed shard's files itself fails, the message gets `; cleanup failed: <reason>` appended. A failed shard also costs a worker restart, a fraction of a second.
+
+### 19.6 Where the data lives
+
+Datasets are written under `--out`, by default `.data/datasets/<run-id>/`. `.data/` is git-ignored, and **datasets are never committed**: a full one is about 2.6 GB. They are not stored in the production Blob store either; the data is entirely synthetic and the generator never touches production game data. Only a manifest (a few KB) may be copied into git by hand, as a record of how a dataset was made. Delete a dataset by deleting its directory.
+
+```
+<out>/<run-id>/
+  manifest.json
+  shards/
+    shard-00000.games.jsonl.gz
+    shard-00000.hands.jsonl.gz
+    shard-00000.decisions.jsonl.gz
+    shard-00001.games.jsonl.gz
+    …
+```
+
+The shard number is zero-padded to five digits. The first full dataset (100,000 games, five `random` seats) was generated into `.data/datasets/s0-full/` on one machine; it is not in the repository, so do not rely on it being there.
+
+### 19.7 Reading the files
+
+Every file is UTF-8 JSON lines (one JSON object per line, keys in the column order above) compressed with gzip. From a shell:
+
+```sh
+gunzip -c .data/datasets/doc-check/shards/shard-00000.games.jsonl.gz | head -n 1
+gunzip -c .data/datasets/doc-check/shards/shard-00000.decisions.jsonl.gz | head -n 2 | jq .
+gunzip -c .data/datasets/doc-check/shards/shard-00000.hands.jsonl.gz | wc -l
+```
+
+From Node, stream it instead of loading it whole (a decisions file is about 26 MB compressed, and far more unzipped):
+
+```ts
+import { createReadStream } from 'node:fs';
+import { createGunzip } from 'node:zlib';
+import { createInterface } from 'node:readline';
+
+const lines = createInterface({ input: createReadStream(file).pipe(createGunzip()) });
+for await (const line of lines) {
+  const row = JSON.parse(line);
+  // row.hidden_* are oracle columns: do not use them as features (§19.1)
+}
+```
+
+The rows' shapes are the Zod schemas in `scripts/datagen/schema.ts`, which `validate` uses; parse with them if you read the data in TypeScript. Python (`gzip` plus `json`), DuckDB and similar tools read the files directly. Parquet output is not built yet.
+
+### 19.8 How the code is organised
+
+The generator is `scripts/generate-data.ts` (the entry point, which dispatches `run` and `validate`) and the modules in `scripts/datagen/`:
+
+| File | What it does |
+|---|---|
+| `args.ts`, `constants.ts` | Command-line parsing (no I/O, so a usage error cannot create files), defaults and the two version numbers |
+| `schema.ts` | Zod schemas of the three row types and the manifest |
+| `recorder.ts`, `cards.ts` | The strategy wrapper and the transition hook that build a game's decision rows; card helpers for the oracle columns |
+| `labels.ts`, `game.ts` | Outcome labels and the `games` and `hands` rows; playing one game with its checks and replay |
+| `sinks.ts`, `manifest.ts`, `shard.ts` | The gzip JSONL writer (temporary file, then rename), the manifest, and playing one shard |
+| `run.ts`, `worker.ts`, `worker-host.ts` | `run`: the parameter guard, the resume plan, and the worker pool; the worker thread entry and its message types |
+| `validate.ts`, `report.ts` | `validate` and its distribution report |
+| `hooks.ts` | The test-hook seam (§19.10) |
+
+A game is played with `createAiPlayer` seats wrapping each strategy in a recorder and one `runAiLoop` call whose `onTransition` hook completes each row. The recorder takes the player-view columns when the strategy is asked (so they are exactly what it received, not recomputed), and takes the oracle columns from the state before the move. It rebuilds `cards_played_this_hand` and `trick_number` from the `card-played` and `trick-won` events it has seen, because the view does not carry them. Rows get their outcome labels only after the game ends, and only then are the game's rows written, so no row is ever written without labels.
+
+The workers are long-lived `worker_threads` taking shard numbers from one queue held by the main thread, which is the only writer of the manifest. A worker plays its shard's games one at a time and appends each game's rows to the shard's temporary files as the game finishes, so memory does not grow with the shard size. Workers are started with `--import tsx`, so they load the TypeScript sources and the `@/` alias like the entry point does.
+
+**Why it lives under `scripts/`.** The generator needs `fs`, `zlib`, `crypto` and `worker_threads`, which the layer rules (§3) allow only in `src/storage` (`fs`) or not at all in the other `src` layers. `scripts/**` is outside the layer matrix, so the generator lives there and the frozen lint configuration is unchanged. The rules that keep it separate are:
+
+- Nothing under `src/` or `app/` imports from `scripts/`, and the generator changes no file there.
+- The generator imports from `src/` only the pure layers (`domain`, `engine`, `score`, `players`) and the two pure service helpers `service/ai-loop.ts` and `service/player-view.ts`. It never imports `src/storage`, `src/state` or `src/service/game-service.ts`, uses no network and never touches game data.
+
+These greps must find nothing:
+
+```sh
+grep -rE "from '(@/)?(\.\./)*src/(storage|state)|game-service" scripts/datagen scripts/generate-data.ts
+grep -rn "scripts/" src app
+```
+
+### 19.9 Measured figures
+
+All timings were measured on a 10-core macOS laptop and **will differ on other hardware**; the sizes do not depend on the machine.
+
+| Case (`argentina-fidepo`, 1,000 games, one shard, one worker busy) | Decisions per game | Compressed bytes per game | Time per game |
+|---|---|---|---|
+| 3 players (the default) | 981 | 41,942 | 72.1 ms |
+| 5 players | 635 | 26,224 | 44.0 ms |
+
+For comparison, `pnpm simulate` takes 55.5 ms per game with 3 players and 33.0 ms with 5, so recording, writing and the replay checks cost about 1.3 times a plain simulation. Of the size, the `decisions` table is about 98 %: about 25.8 MB of a 26.2 MB 5-player shard of 1,000 games, with 349 KB for `hands` and 19 KB for `games`.
+
+**The full run:** 100,000 games with 5 players and five `random` seats, in 100 shards of 1,000.
+
+| | |
+|---|---|
+| Rows | 100,000 `games`, 1,700,000 `hands`, 63,500,000 `decisions` |
+| Size | 2,617.9 MB on disk (26,179 bytes per game) |
+| Generation | 650 s (about 11 minutes) with 10 workers, about 6.5 ms per game of wall-clock time |
+| `validate` | about 11.5 minutes, single-threaded; exit 0, `status: OK` |
+| Resume | killed with 40 shards complete: the rerun skipped those 40 and finished in 396 s |
+
+On N cores, a 5-player run of 100,000 games takes roughly 44 s × 100 / N. Disk use is about 26.2 MB per 1,000 games for 5 players and 41.9 MB for 3 players.
+
+### 19.10 Testing
+
+The tests are in `tests/unit/datagen/` and run with `pnpm test` (`pnpm vitest run tests/unit/datagen` for just these). Tests that spawn the CLI use the helpers in `tests/unit/datagen/helpers.ts`: `runCli` starts `node --import tsx scripts/generate-data.ts` as a real process (not `pnpm`, which would add banner lines and a wrapper process), `spawnCli` returns the child so it can be killed, and `waitForManifest` polls the manifest until a condition holds. Tests write only to a fresh temporary directory (`makeTempDir`), never to `.data/`.
+
+**Timeouts.** Every test that plays many games or starts processes sets an explicit `120_000` ms timeout as the last argument of `it`. The default 5 s timeout passes on an idle machine but fails when two test runs share the CPU, so the explicit limit is part of writing such a test.
+
+**Killing a run.** The resume tests start a run with `--workers 2` and a small `--shard-size`, wait with `waitForManifest` until the manifest shows a few `complete` shards, send `SIGKILL`, and then run the same command again. They never sleep for a fixed time.
+
+**The test-hook seam.** To test failure paths without breaking the real code, each worker can load a hook module: when the environment variable `GENERATE_DATA_TEST_HOOKS` holds a module path, every worker imports that module once at start and uses the optional functions of its default export (a missing function means no hook). The main thread never reads the variable, and with it unset or empty nothing is imported and no hook code runs.
+
+| Hook | Effect |
+|---|---|
+| `runAiLoop(real) => fn` | replaces the `runAiLoop` that plays a game (it may return a different state or throw) |
+| `replayRunAiLoop(real) => fn` | replaces the `runAiLoop` used by the replay check only |
+| `transformRows(tables) => tables` | called per game after the labels are filled and before the checks; may change or drop rows |
+| `onShard({ shard, phase }) => void` | called with `"start"` before a shard and `"end"` after a shard completes (not for a failed shard); may throw or call `process.exit` |
+
+A hook that must act on one game identifies it by `state.seed` (or `tables.games.seed`), not by counting calls. The module `tests/unit/datagen/fixtures/hooks-configurable.ts` provides all four hooks, inert until a test sets its `HOOK_*` environment variables through `runCli(args, { env })`; for example, `HOOK_FAIL_SEED=t-1-0 HOOK_MODE=not-game-over` makes that game end before `game-over`, which fails shard 1 of run `t`. See the file for the other modes (illegal moves, dropped or altered rows, a differing replay, an exit at a shard's start).
+
+### 19.11 Gotchas and limitations
+
+- **Only the `random` strategy exists**, so every dataset today comes from `random` seats. `--strategies` already takes a list so that later strategies can be mixed per seat.
+- **`policy_probs` is `null` and `explore` is `false` in every row.** `random` is uniform by definition and no strategy reports probabilities yet.
+- **Seating is fixed.** Seat `k` always has the strategy at position `k` of `--strategies`; seats are not shuffled per game, so a table with different strategies has a seat-position effect.
+- **No graceful shutdown.** SIGINT and SIGTERM are not handled: a killed run leaves `.tmp` files and a manifest with `pending` shards, which the next `run` with the same parameters cleans up and finishes (§19.4).
+- **`run` crashes on an unparsable manifest.** If the run directory has a `manifest.json` that is not valid JSON or does not match its schema, `run` does not print a `generate-data:` line: it exits non-zero with a stack trace. Fix or delete the file (or the run directory) and run again. `validate` reports the same file as check 1.
+- **A resume rewrites `manifest.json` before it plays anything**, even when nothing is left to do (same content), and the files of a shard that fails verification stay on disk until the re-run's files replace them or its failure cleanup deletes them.
+- **`--strategies` cannot differ from a manifest through the command line today**: with one strategy registered, the parameter guard on `strategies` can only be exercised by editing a manifest.
+- **A resume checks every complete shard's SHA-256 first**, which takes time proportional to the dataset's size.
+- **Numbers are hardware-bound.** Timings in §19.9 are from one machine; sizes are not.
+- **The proposal's later stages are not built:** a heuristic strategy, mixed tables, Monte Carlo rollout labels, Parquet output and separate `shard` and `merge` subcommands (`run` creates shards and resume re-runs one).
+
+---
+
+## 20. Known limitations
 
 - **Configuration is validated on the first API request, not at server startup.** The service factory calls `getConfig()` lazily (§16.5), so a misconfigured deployment starts, and its first request answers 500 with a `ConfigError` error line in the logs. Building at module load would break `next build` instead.
 - **Blob credentials are checked by `createObjectStore`, not by `loadConfig`** (§13.3), so a `blob` configuration without them is reported when the store is first built, not at startup.
@@ -2480,4 +2780,4 @@ This walks the whole cycle on the file store: create a game, make it look old, c
 - **A game that retention is deleting answers 404** while it is partly deleted (§18.12).
 - **The file store leaves empty folders after a delete.** After a cleanup, `games/<id>/commits/` can remain on disk with no file in it; no key remains (§18.11).
 - **A store error message logged on a cleanup 500 may contain key paths**, hence game ids (§18.2). The response never contains it.
-- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12, **service limitations** in §15.11, **HTTP API limitations** in §16.12, **UI limitations** in §17.10, **retention limitations** in §18.12.
+- **Engine limitations** are listed in §10.8, **score limitations** in §11.7, **player, AI-loop and simulation limitations** in §12.8, **storage limitations** in §13.7, **game state limitations** in §14.12, **service limitations** in §15.11, **HTTP API limitations** in §16.12, **UI limitations** in §17.10, **retention limitations** in §18.12, **data generation limitations** in §19.11.

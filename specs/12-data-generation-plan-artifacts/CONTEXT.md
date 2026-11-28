@@ -1,13 +1,13 @@
-# CONTEXT — Spec 12 data generation (state after Iteration 10)
+# CONTEXT — Spec 12 data generation (shipped system, final)
 
 ## Current state
-- Spec start commit (HEAD before any Phase 12 change): `af777e04fcf3d8b751444c48770134c470622a9b`.
-- Iterations 1-3 done: CLI with argument validation; row schemas, recorder, labels, `games`/`hands` rows, FR-1212 checks 1-5, sampled replay (`playRecordedGame`, in memory).
-- Iterations 4-8 done: gzip JSONL sinks + manifest + `processShard`; `run` with worker pool and 4-line summary (exit 0 iff all complete);
-  failure handling (FR-1217) and the test-hook seam (`GENERATE_DATA_TEST_HOOKS`); `validate` (seven FR-1221 checks, `OK` or `INCOMPLETE`
-  + exit 1); resume (FR-1218) behind the parameter guard (FR-1219/1220), start-up deletion of `*.tmp`, `skipped` in the summary.
-- Iteration 9 done: measurement run and regression check; no source change.
-- Iteration 10 done: first full dataset and resume proof (`.data/datasets/s0-full`, `s0-full-resume`); no source change.
+- Spec start commit (HEAD before any Phase 12 change): `af777e04fcf3d8b751444c48770134c470622a9b`. `src/` and `app/` are unchanged since.
+- The system is complete: `pnpm generate-data run` (worker pool, shards, manifest, failure handling, resume behind a parameter
+  guard) and `pnpm generate-data validate` (seven checks, distribution report, `OK`/`INCOMPLETE`), plus the test-hook seam
+  (`GENERATE_DATA_TEST_HOOKS`). Measured and run in full: 100,000 games, 5 players, 2617.9 MB, 650 s on 10 cores (see Measured figures).
+- Documentation (Iteration 11): `docs/development.md` §19 "Data generation: pnpm generate-data" (Known limitations is now §20),
+  the README command table, `docs/architecture.md` scripts tree, and `docs/__future__/data-generation.md` (status line, §4.4, §5.1, §5
+  tree) carry the human-facing description. This file and `DECISIONS.md` are the engineering record.
 - A-2 proven (worker with `execArgv: ['--import','tsx']` loads `.ts` and `@/`). Baseline of
   `pnpm --silent simulate --games 200 --seed sim` is in `baseline-simulate.txt` (3 players).
 
