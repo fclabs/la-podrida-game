@@ -15,3 +15,19 @@ Consequences: later iterations (resume guard, validate) can throw/print their ow
 ## D-003: Parsers have no I/O (Iteration 1)
 Decision: `parseRunArgs` reads only `os.availableParallelism()`; it never touches `--out`, so a usage error cannot create files.
 Consequences: directory checks (FR-1220) belong to `run`, after parsing.
+
+## D-004: Pending vs complete rows are two schemas (Iteration 2)
+Context: the pipeline must not be able to flush a row without outcome labels.
+Decision: `PendingDecisionRowSchema` has the 24 non-outcome columns; `OutcomeColumnsSchema` has the 7 labels; `DecisionRowSchema = Pending.extend(Outcome.shape)` (still strict, pending keys first). Types `PendingDecisionRow` / `DecisionRow`; the recorder returns only `PendingDecisionRow`. `policy_probs` is `z.null()`, `explore` is `z.literal(false)`.
+Rejected: one schema with nullable outcome columns (an unlabeled row would type-check as complete).
+Consequences: Iteration 3 maps `PendingDecisionRow` + `OutcomeColumns` to `DecisionRow`; flush APIs accept `DecisionRow` only.
+
+## D-005: Trick state is tracked from events inside the recorder (Iteration 2)
+Context: the view has no `cards_played_this_hand` or `trick_number` (FR-1207).
+Decision: `createRecorder(initialState)` keeps `playedIds` and `trickNumber`; in `onTransition` the row is built from the current tracking first, then the transition's events update it (`hand-dealt` resets, `card-played` appends the id, `trick-won` increments). Hand 0 starts empty because the recorder is created from the initial state.
+Rejected: deriving from `prev` (`lastTrick`/`completedHands` cannot give the cards of earlier tricks); recomputing hidden columns from the view (oracle must come from `prev`).
+Consequences: one recorder per game; the recorder must see every transition of its game.
+
+## D-006: `hidden_stock_left` uses remaining hands plus played cards (Iteration 2)
+Decision: dealt set = cards still in `prev.hand.hands` + the recorder's played ids + the trump card; stock = `buildDeck` order minus that set. This covers the trump-in-dealer-hand case with no special branch.
+Consequences: lengths match VC-1212 (deck - n*cards_dealt - 1, or without -1 when the trump is in the dealer's hand).
